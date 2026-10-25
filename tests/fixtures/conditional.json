@@ -1,0 +1,36 @@
+{
+  "nodes": [
+    "__end__",
+    "__start__",
+    "answer",
+    "router",
+    "tool"
+  ],
+  "edges": [
+    {
+      "source": "__start__",
+      "target": "router",
+      "conditional": false
+    },
+    {
+      "source": "answer",
+      "target": "__end__",
+      "conditional": false
+    },
+    {
+      "source": "router",
+      "target": "answer",
+      "conditional": true
+    },
+    {
+      "source": "router",
+      "target": "tool",
+      "conditional": true
+    },
+    {
+      "source": "tool",
+      "target": "__end__",
+      "conditional": false
+    }
+  ]
+}

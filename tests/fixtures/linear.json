@@ -1,0 +1,25 @@
+{
+  "nodes": [
+    "__end__",
+    "__start__",
+    "a",
+    "b"
+  ],
+  "edges": [
+    {
+      "source": "__start__",
+      "target": "a",
+      "conditional": false
+    },
+    {
+      "source": "a",
+      "target": "b",
+      "conditional": false
+    },
+    {
+      "source": "b",
+      "target": "__end__",
+      "conditional": false
+    }
+  ]
+}
