@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Catch silent regressions in LangGraph agents on every PR: cassette replay of node I/O, calibrated LLM judges, and human review."
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28.1",
     "langgraph>=1.2.16",
+    "pyyaml>=6.0.3",
 ]
 
 [project.urls]
@@ -13,6 +15,7 @@ Issues = "https://github.com/AMOHYZ/langgraph-regression-guard/issues"
 
 [project.scripts]
 graph-diff = "lgcov.cli:main"
+lgcov = "lgcov.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.8.13,<1.0.0"]
@@ -45,4 +48,5 @@ dev = [
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
     "ruff>=0.17.1",
+    "types-pyyaml>=6.0.12.20260906",
 ]

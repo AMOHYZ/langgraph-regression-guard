@@ -8,6 +8,7 @@ from typing import Any
 
 from lgcov.graph_diff import diff_graphs
 from lgcov.snapshot import Edge, GraphSnapshot
+from lgcov.taxonomy import load_taxonomy
 
 # 0 = no change, 1 = graph changed, 2 = bad input (missing/unreadable/invalid).
 EXIT_ERROR = 2
@@ -25,7 +26,28 @@ def _load(path: str) -> GraphSnapshot:
     )
 
 
+def _taxonomy_check(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="lgcov taxonomy")
+    ap.add_argument("action", choices=["check"])
+    ap.add_argument("path")
+    args = ap.parse_args(argv)
+    try:
+        tax = load_taxonomy(args.path)
+    except (OSError, ValueError) as exc:
+        print(f"lgcov taxonomy: invalid taxonomy: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"{tax.system}: {len(tax.kpi_specs)} KPIs")
+    print("| name | node | judge | labels |")
+    print("|---|---|---|---|")
+    for spec in tax.kpi_specs:
+        print(f"| {spec.name} | {spec.node} | {spec.judge} | {', '.join(spec.labels)} |")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["taxonomy"]:
+        return _taxonomy_check(argv[1:])
     ap = argparse.ArgumentParser(prog="graph-diff")
     ap.add_argument("old")
     ap.add_argument("new")

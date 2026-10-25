@@ -4,6 +4,9 @@ import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from statistics import fmean
+from typing import Literal
+
+from lgcov.judges import JudgeInfraError, Verdict
 
 Judge = Callable[[str], float]  # one output -> score in [0, 1]
 
@@ -38,3 +41,26 @@ def judge_gate(
     lo, hi = bootstrap_drop_ci(base, new)
     # Fail only when we're confident the drop is bigger than the tolerance.
     return GateResult(lo <= max_drop, fmean(base), fmean(new), (lo, hi))
+
+
+GateOutcome = Literal["pass", "fail", "needs_human", "infra_error"]
+
+
+def verdict_gate(
+    base: Sequence[Verdict | JudgeInfraError],
+    new: Sequence[Verdict | JudgeInfraError],
+    max_drop: float = 0.05,
+    min_confidence: float = 0.7,
+) -> GateOutcome:
+    """T062: gate judged verdicts. An infra error on either side is never a 'fail'."""
+    if any(isinstance(o, JudgeInfraError) for o in (*base, *new)):
+        return "infra_error"
+    base_scores = [v.score for v in base if isinstance(v, Verdict)]
+    new_scores = [v.score for v in new if isinstance(v, Verdict)]
+    if not base_scores or not new_scores:
+        return "needs_human"
+    lo, _ = bootstrap_drop_ci(base_scores, new_scores)
+    if lo <= max_drop:
+        return "pass"
+    mean_confidence = fmean(v.confidence for v in new if isinstance(v, Verdict))
+    return "fail" if mean_confidence >= min_confidence else "needs_human"

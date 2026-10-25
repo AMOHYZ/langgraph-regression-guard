@@ -1,0 +1,25 @@
+# T075: hand-written from the PR #163 audit.
+version: 1
+system: open_deep_research
+failure_modes:
+  - id: supervisor_drift
+    description: Supervisor prompt rewrites change delegation behaviour without any test noticing.
+    evidence:
+      - PR #163 rewrote the supervisor system prompt (think_tool protocol, hard tool-call limits)
+  - id: report_degradation
+    description: Changes upstream of final_report degrade the report's grounding or completeness.
+    evidence:
+      - PR #163 changed nodes upstream of final_report with no tests or evals running on push
+kpis:
+  - name: delegates_research
+    failure_mode: supervisor_drift
+    node: supervisor
+    judge: jev
+    description: Supervisor delegates research instead of answering itself.
+    rubric: Did the supervisor delegate research to researchers instead of answering itself?
+  - name: report_grounded
+    failure_mode: report_degradation
+    node: final
+    judge: jev
+    description: Every claim in the report is supported by the gathered notes.
+    rubric: Is every claim in the report supported by the gathered research notes?
