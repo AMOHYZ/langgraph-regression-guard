@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from lgcov.code_judges import ToolNotCalled
 from lgcov.judges import KPI, FakeJudge, Judge
 from lgcov.taxonomy import judges_from_taxonomy, load_taxonomy
 
@@ -123,7 +124,23 @@ def test_unknown_judge_type_rejected(tmp_path: Path) -> None:
         load_taxonomy(_write(tmp_path, doc))
 
 
-def test_code_judge_arrives_in_t072(tmp_path: Path) -> None:
+def test_code_judge_builds_tool_not_called(tmp_path: Path) -> None:
+    doc = _doc(
+        """\
+  - name: kpi_a
+    failure_mode: mode_a
+    node: supervisor
+    judge: code
+    description: one line
+    rubric: Did the supervisor avoid web search?
+    check: {type: tool_not_called, tool: web_search}
+"""
+    )
+    judges = judges_from_taxonomy(load_taxonomy(_write(tmp_path, doc)), FAKES)
+    assert judges["kpi_a"] == ToolNotCalled(judges["kpi_a"].kpi, "web_search")
+
+
+def test_code_judge_unknown_check_fails_at_load(tmp_path: Path) -> None:
     doc = _doc(
         """\
   - name: kpi_a
@@ -132,11 +149,11 @@ def test_code_judge_arrives_in_t072(tmp_path: Path) -> None:
     judge: code
     description: one line
     rubric: Did the supervisor delegate?
-    check: {type: tool_not_called, tool: web_search}
+    check: {type: oracle}
 """
     )
-    with pytest.raises(NotImplementedError, match="T072"):
-        judges_from_taxonomy(load_taxonomy(_write(tmp_path, doc)), FAKES)
+    with pytest.raises(ValueError, match=r"kpi_a.*oracle.*tool_not_called"):
+        load_taxonomy(_write(tmp_path, doc))
 
 
 def test_wrong_version_rejected(tmp_path: Path) -> None:
