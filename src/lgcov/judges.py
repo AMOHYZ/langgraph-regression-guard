@@ -82,7 +82,9 @@ class Verdict:
 class Judge(Protocol):
     """One judge scores one KPI over one node's input/output pair."""
 
-    kpi: KPI
+    # Read-only so frozen dataclasses (the T072 code judges) satisfy the protocol.
+    @property
+    def kpi(self) -> KPI: ...
 
     def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict: ...
 

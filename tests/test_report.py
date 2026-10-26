@@ -4,8 +4,10 @@ from pathlib import Path
 
 from fixtures.build_examples import build_linear
 
+from lgcov.code_judges import ToolNotCalled
 from lgcov.coverage import CoverageReport, coverage
 from lgcov.graph_diff import GraphDiff, diff_graphs
+from lgcov.judges import KPI
 from lgcov.report import KpiResult, render_pr_report
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 
@@ -56,3 +58,14 @@ def test_pipe_in_note_is_escaped() -> None:
     diff, cov = _fixture_diff_and_coverage()
     out = render_pr_report(diff, cov, [KpiResult("k", "pass", 1.0, "a|b")])
     assert "| a\\|b |" in out
+
+
+def test_code_judge_verdict_renders_as_row() -> None:
+    diff, cov = _fixture_diff_and_coverage()
+    kpi = KPI.binary("no_web_search", "d", "r")
+    v = ToolNotCalled(kpi, "web_search").judge(
+        {}, {"trace": {"nodes": ["a"], "tools": ["web_search"]}}
+    )
+    row = KpiResult(kpi.name, "fail", v.confidence, str(v.raw["reason"]))
+    out = render_pr_report(diff, cov, [row])
+    assert "| no_web_search | 🔴 fail | 1.00 | tool web_search called at step 1 |" in out

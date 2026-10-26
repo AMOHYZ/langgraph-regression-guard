@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from lgcov.code_judges import code_judge
 from lgcov.judges import KPI, Judge
 
 VERSION = 1
@@ -127,6 +128,11 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
         check={k: str(v) for k, v in check.items()} if check is not None else None,
     )
     spec.to_kpi()  # KPI's own label/score checks, at load time rather than build time
+    if judge == "code":
+        try:
+            code_judge(spec.to_kpi(), spec.check or {})
+        except ValueError as exc:
+            raise ValueError(f"{where}: {exc}") from None
     return spec
 
 
@@ -170,7 +176,8 @@ def judges_from_taxonomy(
     judges: dict[str, Judge] = {}
     for spec in tax.kpi_specs:
         if spec.judge == "code":
-            raise NotImplementedError("code judges arrive in T072")
+            judges[spec.name] = code_judge(spec.to_kpi(), spec.check or {})
+            continue
         if spec.judge not in factories:
             raise ValueError(f"KPI '{spec.name}': no factory registered for judge '{spec.judge}'")
         judges[spec.name] = factories[spec.judge](spec.to_kpi())
