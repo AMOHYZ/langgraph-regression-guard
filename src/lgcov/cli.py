@@ -1,15 +1,17 @@
 """graph-diff CLI: print node/edge changes between two graph snapshots."""
 
 import argparse
+import importlib.machinery
 import importlib.util
 import json
 import sys
 from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
+from types import CodeType
 from typing import Any
 
-from lgcov.cassette import Cassette, Drift, Step, record, replay
+from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import load_config
 from lgcov.graph_diff import diff_graphs
@@ -50,12 +52,23 @@ def _taxonomy_check(argv: list[str]) -> int:
     return 0
 
 
+class _SourceOnlyLoader(importlib.machinery.SourceFileLoader):
+    """Always compile from source, never from __pycache__: a .pyc is reused when the
+    source keeps its size and second-resolution mtime, which a quick same-length edit
+    (A1 -> A2, a prompt tweak) does, and replay would then run the old graph.
+    """
+
+    def get_code(self, fullname: str) -> CodeType:
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
 # Any: a compiled graph from user code; see cassette.record for why it stays untyped.
 def _load_graph(target: str) -> Any:
     path, sep, attr = target.rpartition(":")
     if not sep or not path or not attr:
         raise ValueError(f"target must be <file.py>:<attr>, got {target!r}")
-    spec = importlib.util.spec_from_file_location(Path(path).stem, path)
+    name = Path(path).stem
+    spec = importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot import {path}")
     module = importlib.util.module_from_spec(spec)
@@ -128,6 +141,13 @@ def _replay(argv: list[str]) -> int:
     return 1 if any(drifts) else 0
 
 
+def _write_runs(path: Path, runs: list[Cassette]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Same shape and formatting as examples/demo_agent/record.py, so baselines diff cleanly.
+    body = json.dumps({"runs": [asdict(r) for r in runs]}, indent=2, sort_keys=True) + "\n"
+    path.write_text(body, encoding="utf-8")
+
+
 def _record(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lgcov record")
     ap.add_argument("--inputs", required=True, help="JSON list of graph input objects")
@@ -144,12 +164,43 @@ def _record(argv: list[str]) -> int:
     except (OSError, ImportError, SyntaxError, ValueError) as exc:
         print(f"lgcov record: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    runs = [asdict(record(graph, i)) for i in inputs]
+    runs = [record(graph, i) for i in inputs]
     out = Path(cfg.cassette_dir) / "baseline.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    # Same shape and formatting as examples/demo_agent/record.py, so baselines diff cleanly.
-    out.write_text(json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_runs(out, runs)
     print(f"recorded {len(runs)} runs to {out}")
+    return 0
+
+
+def _cassette_accept(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="lgcov cassette")
+    ap.add_argument("action", choices=["accept"])
+    ap.add_argument("nodes", nargs="+", help="drifted nodes to re-baseline")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    args = ap.parse_args(argv)
+    nodes = set(args.nodes)
+    try:
+        cfg = load_config(args.config)
+        path = Path(cfg.cassette_dir) / "baseline.json"
+        runs = _load_runs(str(path))
+        graph = _load_graph(cfg.graph_entrypoint)
+        fresh = [record(graph, run.inputs) for run in runs]
+        known = {s.node for r in (*runs, *fresh) for s in r.steps}
+        unknown = sorted(nodes - known)
+        if unknown:
+            raise ValueError(f"unknown node {unknown[0]!r}; known: {sorted(known)}")
+        results = [accept_nodes(b, f, nodes) for b, f in zip(runs, fresh, strict=True)]
+    except (OSError, ImportError, SyntaxError, ValueError, KeyError, TypeError) as exc:
+        print(f"lgcov cassette accept: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    for node in sorted(nodes):
+        n = sum(node in changed for _, changed in results)
+        if n:
+            print(f"accepted `{node}`: updated in {n}/{len(runs)} runs")
+        else:
+            print(f"`{node}`: no drift, nothing to accept")
+    if any(changed for _, changed in results):
+        _write_runs(path, [accepted for accepted, _ in results])
+        print(f"wrote {path}")
     return 0
 
 
@@ -164,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
         return _replay(argv[1:])
     if argv[:1] == ["record"]:
         return _record(argv[1:])
+    if argv[:1] == ["cassette"]:
+        return _cassette_accept(argv[1:])
     ap = argparse.ArgumentParser(prog="graph-diff")
     ap.add_argument("old")
     ap.add_argument("new")

@@ -65,6 +65,41 @@ def replay(graph: Any, cassette: Cassette) -> list[Drift]:
     ]
 
 
+def accept_nodes(baseline: Cassette, fresh: Cassette, nodes: set[str]) -> tuple[Cassette, set[str]]:
+    """T082: copy `fresh` steps into `baseline` for `nodes` only; every other step is kept.
+
+    Returns the new baseline and the subset of `nodes` whose output actually changed.
+    A node must have run the same number of times in both, since steps are matched by
+    occurrence. Note a fresh output already reflects any upstream drift not accepted.
+    """
+    by_node: dict[str, list[Step]] = {}
+    for step in fresh.steps:
+        by_node.setdefault(step.node, []).append(step)
+    seen: dict[str, int] = {}
+    for step in baseline.steps:
+        seen[step.node] = seen.get(step.node, 0) + 1
+    for node in sorted(nodes):
+        if len(by_node.get(node, [])) != seen.get(node, 0):
+            raise ValueError(
+                f"node {node!r} ran {len(by_node.get(node, []))}x, baseline has "
+                f"{seen.get(node, 0)}x; re-record the baseline instead"
+            )
+    used: dict[str, int] = {}
+    steps: list[Step] = []
+    changed: set[str] = set()
+    for step in baseline.steps:
+        if step.node not in nodes:
+            steps.append(step)
+            continue
+        i = used.get(step.node, 0)
+        used[step.node] = i + 1
+        new = by_node[step.node][i]
+        if new != step:
+            changed.add(step.node)
+        steps.append(new)
+    return Cassette(inputs=baseline.inputs, steps=steps), changed
+
+
 # A node function: takes the incoming state, returns a partial state update.
 # Param is Ellipsis because user nodes are typed against their own schema.
 NodeFunc = Callable[..., dict[str, Any]]

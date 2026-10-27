@@ -53,6 +53,10 @@ lgcov replay                 # "No cassette drift (2 runs)."
 # 4. Make a change and replay again.
 sed -i.bak 's/a concise support/a friendly, detailed support/' graph.py
 lgcov replay                 # `respond` | root | 2/2, exit code 1
+
+# 5. The change is intended: re-baseline only that node.
+lgcov cassette accept respond
+lgcov replay                 # "No cassette drift (2 runs)."
 ```
 
 `lgcov.yaml` keys: `graph_entrypoint` (required), `cassette_dir`, `taxonomy`,
