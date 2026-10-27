@@ -140,3 +140,25 @@ def test_cli_replay_bad_baseline_exits_two(
     p.write_text('{"runs": [{"inputs": {}}]}', encoding="utf-8")
     assert main(["replay", f"{DEMO_GRAPH}:graph", str(p)]) == 2
     assert "cannot read baseline" in capsys.readouterr().err
+
+
+# T080: replay reads graph_entrypoint / cassette_dir from lgcov.yaml; positionals override.
+def test_cli_replay_reads_lgcov_yaml(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (tmp_path / "cassettes").mkdir()
+    (tmp_path / "cassettes" / "baseline.json").write_text(
+        Path(DEMO_BASELINE).read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    cfg = tmp_path / "lgcov.yaml"
+    cfg.write_text(
+        f"graph_entrypoint: {DEMO_GRAPH}:graph\ncassette_dir: {tmp_path / 'cassettes'}\n",
+        encoding="utf-8",
+    )
+    assert main(["replay", "--config", str(cfg)]) == 0
+    assert "No cassette drift (2 runs)." in capsys.readouterr().out
+
+
+def test_cli_replay_without_entrypoint_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["replay", "--config", str(tmp_path / "missing.yaml")]) == 2
+    assert "graph_entrypoint" in capsys.readouterr().err
