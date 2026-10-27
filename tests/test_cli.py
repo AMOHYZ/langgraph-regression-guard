@@ -162,3 +162,46 @@ def test_cli_replay_without_entrypoint_exits_two(
 ) -> None:
     assert main(["replay", "--config", str(tmp_path / "missing.yaml")]) == 2
     assert "graph_entrypoint" in capsys.readouterr().err
+
+
+# T077: `lgcov --version` reports the installed package version.
+def test_cli_version_matches_package_metadata(capsys: pytest.CaptureFixture[str]) -> None:
+    from importlib.metadata import version
+
+    assert main(["--version"]) == 0
+    assert capsys.readouterr().out == f"lgcov {version('langgraph-regression-guard')}\n"
+
+
+# T077: `lgcov record --inputs inputs.json` writes the baseline that `lgcov replay` reads.
+def _demo_config(tmp_path: Path) -> Path:
+    cfg = tmp_path / "lgcov.yaml"
+    cfg.write_text(
+        f"graph_entrypoint: {DEMO_GRAPH}:graph\ncassette_dir: {tmp_path / 'cassettes'}\n",
+        encoding="utf-8",
+    )
+    return cfg
+
+
+def test_cli_record_then_replay_round_trips(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = _demo_config(tmp_path)
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text('[{"question": "Where is my order?"}, {"question": "What are your hours?"}]')
+    assert main(["record", "--config", str(cfg), "--inputs", str(inputs)]) == 0
+    written = (tmp_path / "cassettes" / "baseline.json").read_text(encoding="utf-8")
+    assert written == Path(DEMO_BASELINE).read_text(encoding="utf-8")
+    assert "recorded 2 runs" in capsys.readouterr().out
+    assert main(["replay", "--config", str(cfg)]) == 0
+
+
+@pytest.mark.parametrize("body", ['{"question": "x"}', "[1, 2]", "not json"])
+def test_cli_record_bad_inputs_exits_two(
+    tmp_path: Path, body: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text(body)
+    code = main(["record", "--config", str(_demo_config(tmp_path)), "--inputs", str(inputs)])
+    assert code == 2
+    assert "lgcov record:" in capsys.readouterr().err
+    assert not (tmp_path / "cassettes" / "baseline.json").exists()
