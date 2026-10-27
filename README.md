@@ -31,7 +31,8 @@ Three layers, one per level of confidence:
 
 Needs Python 3.12+. Runs offline: the demo agent uses a fake, deterministic LLM.
 
-Minutes to first report: TBD
+Minutes to first report: 2 (clean venv, steps below pasted as-is; measured 2026-10-27,
+41–70 s of which is `pip install`).
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
