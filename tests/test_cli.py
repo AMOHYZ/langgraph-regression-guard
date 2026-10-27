@@ -309,3 +309,22 @@ def test_cli_replay_sees_edit_with_same_size_and_mtime(
     capsys.readouterr()
     assert main(["replay", "--config", str(cfg)]) == 1
     assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
+
+
+# T085: ignore_paths in lgcov.yaml reach `lgcov replay`.
+def test_cli_replay_applies_ignore_paths_from_config(tmp_path: Path) -> None:
+    graph = tmp_path / "graph.py"
+    graph.write_text(
+        AB_GRAPH.replace("import TypedDict", "import TypedDict\nimport random")
+        .replace("    b: str\n", "    b: str\n    nonce: float\n")
+        .replace('return {"b": "B1"}', 'return {"b": "B1", "nonce": random.random()}'),
+        encoding="utf-8",
+    )
+    cfg = tmp_path / "lgcov.yaml"
+    base = f"graph_entrypoint: {graph}:graph\ncassette_dir: {tmp_path / 'cassettes'}\n"
+    cfg.write_text(base, encoding="utf-8")
+    (tmp_path / "inputs.json").write_text("[{}]", encoding="utf-8")
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    assert main(["replay", "--config", str(cfg)]) == 1  # the random nonce drifts
+    cfg.write_text(base + "ignore_paths: [/nonce]\n", encoding="utf-8")
+    assert main(["replay", "--config", str(cfg)]) == 0
