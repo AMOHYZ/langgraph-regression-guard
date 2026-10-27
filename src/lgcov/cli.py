@@ -1,12 +1,14 @@
 """graph-diff CLI: print node/edge changes between two graph snapshots."""
 
 import argparse
+import importlib.machinery
 import importlib.util
 import json
 import sys
 from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
+from types import CodeType
 from typing import Any
 
 from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay
@@ -50,12 +52,23 @@ def _taxonomy_check(argv: list[str]) -> int:
     return 0
 
 
+class _SourceOnlyLoader(importlib.machinery.SourceFileLoader):
+    """Always compile from source, never from __pycache__: a .pyc is reused when the
+    source keeps its size and second-resolution mtime, which a quick same-length edit
+    (A1 -> A2, a prompt tweak) does, and replay would then run the old graph.
+    """
+
+    def get_code(self, fullname: str) -> CodeType:
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
 # Any: a compiled graph from user code; see cassette.record for why it stays untyped.
 def _load_graph(target: str) -> Any:
     path, sep, attr = target.rpartition(":")
     if not sep or not path or not attr:
         raise ValueError(f"target must be <file.py>:<attr>, got {target!r}")
-    spec = importlib.util.spec_from_file_location(Path(path).stem, path)
+    name = Path(path).stem
+    spec = importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot import {path}")
     module = importlib.util.module_from_spec(spec)

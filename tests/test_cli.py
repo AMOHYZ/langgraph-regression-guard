@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -288,3 +290,22 @@ def test_cli_accept_unknown_node_exits_two(
     assert main(["cassette", "accept", "b", "ghost", "--config", str(cfg)]) == 2
     assert "unknown node 'ghost'" in capsys.readouterr().err
     assert baseline.read_text(encoding="utf-8") == before  # nothing half-applied
+
+
+def test_cli_replay_sees_edit_with_same_size_and_mtime(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: _load_graph reused a stale __pycache__ .pyc when an edit kept the
+    # file's size and (second-resolution) mtime, so replay ran the old graph.
+    # Bytecode writing is forced on: CI writes .pyc files even where dev shells don't.
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    cfg, _ = _ab_project(tmp_path)  # records with A1/B1, then rewrites to A2/B2
+    graph = tmp_path / "graph.py"
+    graph.write_text(AB_GRAPH, encoding="utf-8")
+    stat = graph.stat()
+    assert main(["replay", "--config", str(cfg)]) == 0  # caches bytecode for A1/B1
+    graph.write_text(AB_GRAPH.replace("A1", "A2"), encoding="utf-8")  # same size
+    os.utime(graph, ns=(stat.st_atime_ns, stat.st_mtime_ns))  # same mtime
+    capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 1
+    assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
