@@ -96,12 +96,14 @@ def test_cli_taxonomy_check_invalid_exits_two(
 
 
 # `lgcov replay <graph.py:attr> <baseline.json>`: drifted nodes vs the recorded cassettes.
-DEMO = Path(__file__).resolve().parents[1] / "examples" / "demo_agent"
-DEMO_BASELINE = str(DEMO / "cassettes" / "baseline.json")
+# Frozen copies of the demo agent, so editing the demo (as its PR does) can't break these.
+FIXTURES = Path(__file__).parent / "fixtures"
+DEMO_GRAPH = FIXTURES / "demo_graph.py"
+DEMO_BASELINE = str(FIXTURES / "demo_baseline.json")
 
 
 def test_cli_replay_unchanged_demo_has_no_drift(capsys: pytest.CaptureFixture[str]) -> None:
-    code = main(["replay", f"{DEMO / 'graph.py'}:graph", DEMO_BASELINE])
+    code = main(["replay", f"{DEMO_GRAPH}:graph", DEMO_BASELINE])
     assert code == 0
     assert "No cassette drift (2 runs)." in capsys.readouterr().out
 
@@ -109,7 +111,7 @@ def test_cli_replay_unchanged_demo_has_no_drift(capsys: pytest.CaptureFixture[st
 def test_cli_replay_prompt_tweak_is_root_drift_in_respond(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    src = (DEMO / "graph.py").read_text(encoding="utf-8")
+    src = DEMO_GRAPH.read_text(encoding="utf-8")
     tweaked = src.replace("a concise support", "a friendly, detailed support")
     assert tweaked != src
     (tmp_path / "graph.py").write_text(tweaked, encoding="utf-8")
@@ -124,7 +126,7 @@ def test_cli_replay_prompt_tweak_is_root_drift_in_respond(
     "target", ["missing.py:graph", "GRAPH:SYSTEM_PROMPT", "GRAPH:nope", "GRAPH"]
 )
 def test_cli_replay_bad_target_exits_two(target: str, capsys: pytest.CaptureFixture[str]) -> None:
-    target = target.replace("GRAPH", str(DEMO / "graph.py"))
+    target = target.replace("GRAPH", str(DEMO_GRAPH))
     assert main(["replay", target, DEMO_BASELINE]) == 2
     err = capsys.readouterr().err
     assert "lgcov replay:" in err
@@ -136,5 +138,5 @@ def test_cli_replay_bad_baseline_exits_two(
 ) -> None:
     p = tmp_path / "baseline.json"
     p.write_text('{"runs": [{"inputs": {}}]}', encoding="utf-8")
-    assert main(["replay", f"{DEMO / 'graph.py'}:graph", str(p)]) == 2
+    assert main(["replay", f"{DEMO_GRAPH}:graph", str(p)]) == 2
     assert "cannot read baseline" in capsys.readouterr().err

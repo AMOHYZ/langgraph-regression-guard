@@ -1,0 +1,48 @@
+{
+  "runs": [
+    {
+      "inputs": {
+        "question": "Where is my order?"
+      },
+      "steps": [
+        {
+          "node": "classify",
+          "output": {
+            "needs_tool": true
+          }
+        },
+        {
+          "node": "lookup_order",
+          "output": {
+            "tool_result": "order #42: shipped"
+          }
+        },
+        {
+          "node": "respond",
+          "output": {
+            "answer": "[70] t.\norder #42: shipped\nWhere is my order?"
+          }
+        }
+      ]
+    },
+    {
+      "inputs": {
+        "question": "What are your hours?"
+      },
+      "steps": [
+        {
+          "node": "classify",
+          "output": {
+            "needs_tool": false
+          }
+        },
+        {
+          "node": "respond",
+          "output": {
+            "answer": "[54] ise support agent.\n\nWhat are your hours?"
+          }
+        }
+      ]
+    }
+  ]
+}
