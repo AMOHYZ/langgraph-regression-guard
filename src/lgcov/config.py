@@ -24,7 +24,7 @@ class Config:
     cassette_dir: str = "cassettes"
     taxonomy: str | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
-    ignore_paths: tuple[str, ...] = ()  # JSON pointers, e.g. /steps/0/output/id
+    ignore_paths: tuple[str, ...] = ()  # JSON pointers into node I/O, e.g. /meta/nonce
 
 
 _KEYS = ("cassette_dir", "graph_entrypoint", "ignore_paths", "taxonomy", "thresholds")

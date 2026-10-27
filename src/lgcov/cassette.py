@@ -1,8 +1,10 @@
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any, TypedDict
+
+from lgcov.normalize import normalize
 
 
 @dataclass(frozen=True)
@@ -46,18 +48,19 @@ def record(graph: Any, inputs: dict[str, Any]) -> Cassette:
     return Cassette(inputs=inputs, steps=steps)
 
 
-def _by_node(steps: list[Step]) -> dict[str, list[str]]:
-    # sorted per node so parallel Send workers compare stably
+def _by_node(steps: list[Step], ignore_paths: Sequence[str] = ()) -> dict[str, list[str]]:
+    # sorted per node so parallel Send workers compare stably; T085: volatile fields masked
     out: dict[str, list[str]] = {}
     for s in steps:
-        out.setdefault(s.node, []).append(json.dumps(s.output, sort_keys=True))
+        norm = normalize(s.output, ignore_paths)
+        out.setdefault(s.node, []).append(json.dumps(norm, sort_keys=True))
     return {n: sorted(v) for n, v in out.items()}
 
 
-def replay(graph: Any, cassette: Cassette) -> list[Drift]:
-    """Re-run with the recorded inputs; return nodes whose outputs changed."""
-    expected = _by_node(cassette.steps)
-    actual = _by_node(record(graph, cassette.inputs).steps)
+def replay(graph: Any, cassette: Cassette, ignore_paths: Sequence[str] = ()) -> list[Drift]:
+    """Re-run with the recorded inputs; return nodes whose (normalised) outputs changed."""
+    expected = _by_node(cassette.steps, ignore_paths)
+    actual = _by_node(record(graph, cassette.inputs).steps, ignore_paths)
     return [
         Drift(node=n, expected=expected.get(n), actual=actual.get(n))
         for n in sorted(expected.keys() | actual.keys())
@@ -140,8 +143,10 @@ def record_io(
     return log
 
 
-def diff_cassettes(base: dict[str, NodeIO], new: dict[str, NodeIO]) -> dict[str, str]:
-    """Classify per-node drift.
+def diff_cassettes(
+    base: dict[str, NodeIO], new: dict[str, NodeIO], ignore_paths: Sequence[str] = ()
+) -> dict[str, str]:
+    """Classify per-node drift, after masking volatile fields (T085).
 
     "root": same input, different output (the node you edited).
     "propagated": different input (it only changed because upstream did).
@@ -152,8 +157,8 @@ def diff_cassettes(base: dict[str, NodeIO], new: dict[str, NodeIO]) -> dict[str,
         b, n = base.get(name), new.get(name)
         if b is None or n is None:
             drift[name] = "added" if b is None else "removed"
-        elif b["input"] != n["input"]:
+        elif normalize(b["input"], ignore_paths) != normalize(n["input"], ignore_paths):
             drift[name] = "propagated"
-        elif b["output"] != n["output"]:
+        elif normalize(b["output"], ignore_paths) != normalize(n["output"], ignore_paths):
             drift[name] = "root"
     return drift

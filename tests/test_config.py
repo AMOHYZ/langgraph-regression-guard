@@ -22,14 +22,14 @@ def test_full_file_loads_typed(tmp_path: Path) -> None:
         "cassette_dir: cassettes\n"
         "taxonomy: taxonomy.yaml\n"
         "thresholds: {min_node_coverage: 80, fail_on: [fail, infra_error]}\n"
-        "ignore_paths: [/steps/0/output/id]\n",
+        "ignore_paths: [/meta/nonce]\n",
     )
     assert load_config(path) == Config(
         graph_entrypoint="app/graph.py:graph",
         cassette_dir="cassettes",
         taxonomy="taxonomy.yaml",
         thresholds=Thresholds(min_node_coverage=80.0, fail_on=("fail", "infra_error")),
-        ignore_paths=("/steps/0/output/id",),
+        ignore_paths=("/meta/nonce",),
     )
 
 

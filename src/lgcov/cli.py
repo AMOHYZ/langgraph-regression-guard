@@ -136,7 +136,7 @@ def _replay(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"lgcov replay: cannot read baseline: {exc!r}", file=sys.stderr)
         return EXIT_ERROR
-    drifts = [replay(graph, run) for run in runs]
+    drifts = [replay(graph, run, cfg.ignore_paths) for run in runs]
     print("\n".join(_replay_markdown(runs, drifts)))
     return 1 if any(drifts) else 0
 
