@@ -36,6 +36,10 @@ jobs:
           echo '<!-- lgcov-report -->' > report.md
           # graph-diff exits 1 when the graph changed; still post the comment.
           uv run graph-diff /tmp/old.json /tmp/new.json >> report.md || true
+          echo >> report.md
+          # Replay the demo baseline against this PR's graph; exit 1 means drift, still post.
+          uv run lgcov replay examples/demo_agent/graph.py:graph \
+            examples/demo_agent/cassettes/baseline.json >> report.md || true
           cat report.md
 
       # T081: update our own marked comment instead of adding one per push.

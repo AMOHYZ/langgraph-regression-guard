@@ -93,3 +93,48 @@ def test_cli_taxonomy_check_invalid_exits_two(
     assert code == 2
     assert "kpi_a" in err
     assert "Traceback" not in err
+
+
+# `lgcov replay <graph.py:attr> <baseline.json>`: drifted nodes vs the recorded cassettes.
+DEMO = Path(__file__).resolve().parents[1] / "examples" / "demo_agent"
+DEMO_BASELINE = str(DEMO / "cassettes" / "baseline.json")
+
+
+def test_cli_replay_unchanged_demo_has_no_drift(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["replay", f"{DEMO / 'graph.py'}:graph", DEMO_BASELINE])
+    assert code == 0
+    assert "No cassette drift (2 runs)." in capsys.readouterr().out
+
+
+def test_cli_replay_prompt_tweak_is_root_drift_in_respond(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = (DEMO / "graph.py").read_text(encoding="utf-8")
+    tweaked = src.replace("a concise support", "a friendly, detailed support")
+    assert tweaked != src
+    (tmp_path / "graph.py").write_text(tweaked, encoding="utf-8")
+    code = main(["replay", f"{tmp_path / 'graph.py'}:graph", DEMO_BASELINE])
+    lines = capsys.readouterr().out.splitlines()
+    assert code == 1
+    assert "| `respond` | root | 2/2 |" in lines
+    assert "Unchanged: `classify`, `lookup_order`" in lines
+
+
+@pytest.mark.parametrize(
+    "target", ["missing.py:graph", "GRAPH:SYSTEM_PROMPT", "GRAPH:nope", "GRAPH"]
+)
+def test_cli_replay_bad_target_exits_two(target: str, capsys: pytest.CaptureFixture[str]) -> None:
+    target = target.replace("GRAPH", str(DEMO / "graph.py"))
+    assert main(["replay", target, DEMO_BASELINE]) == 2
+    err = capsys.readouterr().err
+    assert "lgcov replay:" in err
+    assert "Traceback" not in err
+
+
+def test_cli_replay_bad_baseline_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = tmp_path / "baseline.json"
+    p.write_text('{"runs": [{"inputs": {}}]}', encoding="utf-8")
+    assert main(["replay", f"{DEMO / 'graph.py'}:graph", str(p)]) == 2
+    assert "cannot read baseline" in capsys.readouterr().err
