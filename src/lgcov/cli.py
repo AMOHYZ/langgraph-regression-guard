@@ -4,10 +4,12 @@ import argparse
 import importlib.util
 import json
 import sys
+from dataclasses import asdict
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
-from lgcov.cassette import Cassette, Drift, Step, replay
+from lgcov.cassette import Cassette, Drift, Step, record, replay
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import load_config
 from lgcov.graph_diff import diff_graphs
@@ -126,12 +128,42 @@ def _replay(argv: list[str]) -> int:
     return 1 if any(drifts) else 0
 
 
+def _record(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="lgcov record")
+    ap.add_argument("--inputs", required=True, help="JSON list of graph input objects")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
+    args = ap.parse_args(argv)
+    try:
+        cfg = load_config(args.config, {"graph_entrypoint": args.graph})
+        graph = _load_graph(cfg.graph_entrypoint)
+        # Any: raw JSON before validation
+        inputs: Any = json.loads(Path(args.inputs).read_text(encoding="utf-8"))
+        if not isinstance(inputs, list) or not all(isinstance(i, dict) for i in inputs):
+            raise ValueError(f"{args.inputs}: must be a JSON list of input objects")
+    except (OSError, ImportError, SyntaxError, ValueError) as exc:
+        print(f"lgcov record: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    runs = [asdict(record(graph, i)) for i in inputs]
+    out = Path(cfg.cassette_dir) / "baseline.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # Same shape and formatting as examples/demo_agent/record.py, so baselines diff cleanly.
+    out.write_text(json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"recorded {len(runs)} runs to {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--version"]:
+        print(f"lgcov {version('langgraph-regression-guard')}")
+        return 0
     if argv[:1] == ["taxonomy"]:
         return _taxonomy_check(argv[1:])
     if argv[:1] == ["replay"]:
         return _replay(argv[1:])
+    if argv[:1] == ["record"]:
+        return _record(argv[1:])
     ap = argparse.ArgumentParser(prog="graph-diff")
     ap.add_argument("old")
     ap.add_argument("new")

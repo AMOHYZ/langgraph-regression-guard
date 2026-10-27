@@ -29,6 +29,37 @@ Three layers, one per level of confidence:
 
 ## Quickstart
 
+Needs Python 3.12+. Runs offline: the demo agent uses a fake, deterministic LLM.
+
+Minutes to first report: TBD
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install "git+https://github.com/AMOHYZ/langgraph-regression-guard"
+lgcov --version
+
+# 1. A graph to guard: the demo agent (or point graph_entrypoint at your own).
+curl -fsSLO https://raw.githubusercontent.com/AMOHYZ/langgraph-regression-guard/main/examples/demo_agent/graph.py
+printf 'graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n' > lgcov.yaml
+
+# 2. Record a baseline: one cassette run per input.
+echo '[{"question": "Where is my order?"}, {"question": "What are your hours?"}]' > inputs.json
+lgcov record --inputs inputs.json
+
+# 3. Replay it: the first report.
+lgcov replay                 # "No cassette drift (2 runs)."
+
+# 4. Make a change and replay again.
+sed -i.bak 's/a concise support/a friendly, detailed support/' graph.py
+lgcov replay                 # `respond` | root | 2/2, exit code 1
+```
+
+`lgcov.yaml` keys: `graph_entrypoint` (required), `cassette_dir`, `taxonomy`,
+`thresholds` (`min_node_coverage`, `fail_on`) and `ignore_paths`. CLI flags
+override the file.
+
+## Development
+
 ```bash
 cp .env.example .env   # fill in JEV_API_URL / JEV_API_KEY for L2/L3
 uv sync
