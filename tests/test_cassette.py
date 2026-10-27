@@ -39,3 +39,23 @@ def test_cassette_json_round_trip() -> None:
 def test_send_fan_out_is_stable() -> None:
     cassette = record(fan_out_send(), {"x": 0})
     assert replay(fan_out_send(), cassette) == []
+
+
+def test_accept_nodes_copies_only_the_named_node() -> None:
+    from lgcov.cassette import Step, accept_nodes
+
+    base = Cassette({"x": 1}, [Step("a", {"x": 1}), Step("b", {"x": 2})])
+    fresh = Cassette({"x": 1}, [Step("a", {"x": 9}), Step("b", {"x": 8})])
+    accepted, changed = accept_nodes(base, fresh, {"b"})
+    assert accepted == Cassette({"x": 1}, [Step("a", {"x": 1}), Step("b", {"x": 8})])
+    assert changed == {"b"}
+
+
+def test_accept_nodes_refuses_when_the_node_ran_a_different_number_of_times() -> None:
+    import pytest
+
+    from lgcov.cassette import Step, accept_nodes
+
+    base = Cassette({}, [Step("w", 1), Step("w", 2)])
+    with pytest.raises(ValueError, match="re-record"):
+        accept_nodes(base, Cassette({}, [Step("w", 1)]), {"w"})

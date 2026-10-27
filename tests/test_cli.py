@@ -205,3 +205,86 @@ def test_cli_record_bad_inputs_exits_two(
     assert code == 2
     assert "lgcov record:" in capsys.readouterr().err
     assert not (tmp_path / "cassettes" / "baseline.json").exists()
+
+
+# T082: `lgcov cassette accept <node>...` re-baselines only the named nodes.
+AB_GRAPH = """\
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+
+class S(TypedDict, total=False):
+    a: str
+    b: str
+
+
+def a(state: S) -> S:
+    return {"a": "A1"}
+
+
+def b(state: S) -> S:
+    return {"b": "B1"}
+
+
+g = StateGraph(S)
+g.add_node("a", a)
+g.add_node("b", b)
+g.add_edge(START, "a")
+g.add_edge("a", "b")
+g.add_edge("b", END)
+graph = g.compile()
+"""
+
+
+def _ab_project(tmp_path: Path) -> tuple[Path, Path]:
+    """Record a baseline for AB_GRAPH, then change both nodes; returns (config, baseline)."""
+    graph = tmp_path / "graph.py"
+    graph.write_text(AB_GRAPH, encoding="utf-8")
+    cfg = tmp_path / "lgcov.yaml"
+    cfg.write_text(
+        f"graph_entrypoint: {graph}:graph\ncassette_dir: {tmp_path / 'cassettes'}\n",
+        encoding="utf-8",
+    )
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text("[{}, {}]", encoding="utf-8")
+    assert main(["record", "--config", str(cfg), "--inputs", str(inputs)]) == 0
+    graph.write_text(AB_GRAPH.replace("A1", "A2").replace("B1", "B2"), encoding="utf-8")
+    return cfg, tmp_path / "cassettes" / "baseline.json"
+
+
+def test_cli_accept_b_leaves_a_byte_identical(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    before = baseline.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert main(["cassette", "accept", "b", "--config", str(cfg)]) == 0
+    assert "accepted `b`: updated in 2/2 runs" in capsys.readouterr().out
+    # Only b's output text changed; every other byte, a's entries included, is untouched.
+    assert baseline.read_text(encoding="utf-8") == before.replace('"B1"', '"B2"')
+    assert main(["replay", "--config", str(cfg)]) == 1
+    assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
+
+
+def test_cli_accept_node_without_drift_is_a_no_op(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    (tmp_path / "graph.py").write_text(AB_GRAPH.replace("B1", "B2"), encoding="utf-8")
+    before = baseline.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert main(["cassette", "accept", "a", "--config", str(cfg)]) == 0
+    assert "`a`: no drift, nothing to accept" in capsys.readouterr().out
+    assert baseline.read_text(encoding="utf-8") == before
+
+
+def test_cli_accept_unknown_node_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    before = baseline.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert main(["cassette", "accept", "b", "ghost", "--config", str(cfg)]) == 2
+    assert "unknown node 'ghost'" in capsys.readouterr().err
+    assert baseline.read_text(encoding="utf-8") == before  # nothing half-applied
