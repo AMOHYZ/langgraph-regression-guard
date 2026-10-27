@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from lgcov.cassette import Cassette, Drift, Step, replay
+from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
+from lgcov.config import load_config
 from lgcov.graph_diff import diff_graphs
 from lgcov.snapshot import Edge, GraphSnapshot
 from lgcov.taxonomy import load_taxonomy
@@ -97,16 +99,25 @@ def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[st
 
 def _replay(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lgcov replay")
-    ap.add_argument("target", help="<file.py>:<attr> of the compiled graph")
-    ap.add_argument("baseline", help='cassette JSON: {"runs": [...]}')
+    ap.add_argument("target", nargs="?", help="<file.py>:<attr>; overrides graph_entrypoint")
+    ap.add_argument(
+        "baseline", nargs="?", help="cassette JSON; default <cassette_dir>/baseline.json"
+    )
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
     args = ap.parse_args(argv)
     try:
-        graph = _load_graph(args.target)
+        cfg = load_config(args.config, {"graph_entrypoint": args.target})
+    except (OSError, ValueError) as exc:
+        print(f"lgcov replay: invalid config: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    baseline = args.baseline or str(Path(cfg.cassette_dir) / "baseline.json")
+    try:
+        graph = _load_graph(cfg.graph_entrypoint)
     except (OSError, ImportError, SyntaxError, ValueError) as exc:
         print(f"lgcov replay: cannot load graph: {exc}", file=sys.stderr)
         return EXIT_ERROR
     try:
-        runs = _load_runs(args.baseline)
+        runs = _load_runs(baseline)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"lgcov replay: cannot read baseline: {exc!r}", file=sys.stderr)
         return EXIT_ERROR
