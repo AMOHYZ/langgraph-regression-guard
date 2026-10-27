@@ -1,6 +1,7 @@
 """T079: the demo agent example: 3 nodes, 1 tool, 1 conditional edge, a deterministic fake LLM."""
 
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -41,3 +42,17 @@ def test_fake_llm_is_deterministic() -> None:
     first = graph.invoke({"question": "Where is my order?"})["answer"]
     assert first == graph.invoke({"question": "Where is my order?"})["answer"]
     assert first.startswith("[")
+
+
+BASELINE = DEMO.parent / "cassettes" / "baseline.json"
+
+
+def test_committed_baseline_is_current_and_covers_both_branches() -> None:
+    from examples.demo_agent.record import baseline_json
+
+    text = baseline_json()
+    assert BASELINE.read_text(encoding="utf-8") == text  # re-run `make demo-baseline`
+    runs = json.loads(text)["runs"]
+    assert len(runs) == 2
+    visited = {step["node"] for run in runs for step in run["steps"]}
+    assert visited == {"classify", "lookup_order", "respond"}
