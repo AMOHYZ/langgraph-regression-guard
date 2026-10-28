@@ -69,3 +69,10 @@ def test_code_judge_verdict_renders_as_row() -> None:
     row = KpiResult(kpi.name, "fail", v.confidence, str(v.raw["reason"]))
     out = render_pr_report(diff, cov, [row])
     assert "| no_web_search | 🔴 fail | 1.00 | tool web_search called at step 1 |" in out
+
+
+def test_report_mentions_normalised_field_count() -> None:
+    diff, cov = _fixture_diff_and_coverage()
+    out = render_pr_report(diff, cov, [], normalised_fields=4)
+    assert "Normalised 4 volatile field(s) before L1 compare." in out
+    assert "Normalised" not in render_pr_report(diff, cov, [])

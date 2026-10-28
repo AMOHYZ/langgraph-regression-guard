@@ -34,11 +34,21 @@ class KpiResult:
 
 
 def render_pr_report(
-    diff: GraphDiff, coverage: CoverageReport, verdicts: Sequence[KpiResult]
+    diff: GraphDiff,
+    coverage: CoverageReport,
+    verdicts: Sequence[KpiResult],
+    *,
+    normalised_fields: int | None = None,
 ) -> str:
     lines = [_header(verdicts), ""]
     lines += ["### Graph changes", "", *_graph_changes(diff), ""]
     lines += ["### Coverage", "", *_coverage(coverage), ""]
+    if normalised_fields is not None:
+        lines += [
+            "",
+            f"Normalised {normalised_fields} volatile field(s) before L1 compare.",
+            "",
+        ]
     lines += ["### Judge verdicts", "", *_verdicts(verdicts), ""]
     lines += [
         "---",
