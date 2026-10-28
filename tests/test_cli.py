@@ -166,7 +166,7 @@ def test_cli_replay_without_entrypoint_exits_two(
     assert "graph_entrypoint" in capsys.readouterr().err
 
 
-# T077: `lgcov --version` reports the installed package version.
+# T077 / T084: `lgcov --version` reports the installed package version.
 def test_cli_version_matches_package_metadata(capsys: pytest.CaptureFixture[str]) -> None:
     from importlib.metadata import version
 
