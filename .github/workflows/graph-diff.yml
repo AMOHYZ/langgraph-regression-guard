@@ -23,6 +23,19 @@ jobs:
       - name: Install deps
         run: uv sync --locked
 
+      # T083: main's latest coverage.json (if any) becomes the PR trend baseline.
+      - name: Download main coverage
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: graph-diff.yml
+          branch: main
+          name: coverage
+          path: baseline-coverage
+          search_artifacts: true
+          if_no_artifact_found: warn
+        continue-on-error: true
+
       # T039 stand-ins: empty legacy-format snapshots until `lgcov snapshot` exists.
       - name: Snapshot head
         run: |
@@ -39,7 +52,31 @@ jobs:
           echo >> report.md
           # Replay the baseline from lgcov.yaml against this PR's graph; exit 1 = drift, still post.
           uv run lgcov replay --config lgcov.yaml >> report.md || true
+          # T083: write this run's coverage.json; trend line uses main's artifact when present.
+          uv run python - <<'PY'
+          from pathlib import Path
+          from lgcov.coverage import CoverageReport, format_coverage_delta, load_coverage, write_coverage
+          # Empty snapshots until real trace wiring lands; still exercise the artifact path.
+          current = CoverageReport(node_pct=0.0, edge_pct=0.0, unhit_nodes=[], unhit_edges=[])
+          write_coverage("coverage.json", current)
+          base_path = Path("baseline-coverage/coverage.json")
+          baseline = load_coverage(base_path) if base_path.is_file() else None
+          base_n = None if baseline is None else baseline.node_pct
+          base_e = None if baseline is None else baseline.edge_pct
+          Path("report.md").open("a", encoding="utf-8").write(
+              "\n### Coverage\n\n"
+              f"| | hit |\n|---|---|\n"
+              f"| nodes | {format_coverage_delta(current.node_pct, base_n)} |\n"
+              f"| edges | {format_coverage_delta(current.edge_pct, base_e)} |\n"
+          )
+          PY
           cat report.md
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.json
 
       # T081: update our own marked comment instead of adding one per push.
       - name: Upsert PR comment

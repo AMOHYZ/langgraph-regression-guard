@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from lgcov.coverage import CoverageReport
+from lgcov.coverage import CoverageReport, format_coverage_delta
 from lgcov.graph_diff import GraphDiff
 from lgcov.judge_gate import GateOutcome
 from lgcov.snapshot import Edge
@@ -38,11 +38,12 @@ def render_pr_report(
     coverage: CoverageReport,
     verdicts: Sequence[KpiResult],
     *,
+    baseline_coverage: CoverageReport | None = None,
     normalised_fields: int | None = None,
 ) -> str:
     lines = [_header(verdicts), ""]
     lines += ["### Graph changes", "", *_graph_changes(diff), ""]
-    lines += ["### Coverage", "", *_coverage(coverage), ""]
+    lines += ["### Coverage", "", *_coverage(coverage, baseline_coverage), ""]
     if normalised_fields is not None:
         lines += [
             "",
@@ -84,12 +85,14 @@ def _graph_changes(diff: GraphDiff) -> list[str]:
     ]
 
 
-def _coverage(cov: CoverageReport) -> list[str]:
+def _coverage(cov: CoverageReport, baseline: CoverageReport | None = None) -> list[str]:
+    base_nodes = None if baseline is None else baseline.node_pct
+    base_edges = None if baseline is None else baseline.edge_pct
     lines = [
         "| | hit |",
         "|---|---|",
-        f"| nodes | {cov.node_pct:.1f}% |",
-        f"| edges | {cov.edge_pct:.1f}% |",
+        f"| nodes | {format_coverage_delta(cov.node_pct, base_nodes)} |",
+        f"| edges | {format_coverage_delta(cov.edge_pct, base_edges)} |",
         "",
     ]
     if not cov.unhit_nodes and not cov.unhit_edges:

@@ -76,3 +76,23 @@ def test_report_mentions_normalised_field_count() -> None:
     out = render_pr_report(diff, cov, [], normalised_fields=4)
     assert "Normalised 4 volatile field(s) before L1 compare." in out
     assert "Normalised" not in render_pr_report(diff, cov, [])
+
+
+def test_coverage_section_shows_trend_vs_main() -> None:
+    diff, cov = _fixture_diff_and_coverage()  # nodes 50%, edges 33.3%
+    baseline = CoverageReport(
+        node_pct=75.0,
+        edge_pct=23.3,
+        unhit_nodes=[],
+        unhit_edges=[],
+    )
+    out = render_pr_report(diff, cov, [], baseline_coverage=baseline)
+    assert "| nodes | 50.0% (-25.0% vs main) |" in out
+    assert "| edges | 33.3% (+10.0% vs main) |" in out
+
+
+def test_coverage_section_no_baseline_snapshot() -> None:
+    diff, cov = _fixture_diff_and_coverage()
+    out = render_pr_report(diff, cov, [])
+    assert "| nodes | 50.0% (no baseline) |" in out
+    assert "| edges | 33.3% (no baseline) |" in out
