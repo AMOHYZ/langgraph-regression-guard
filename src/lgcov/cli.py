@@ -1,6 +1,7 @@
 """graph-diff CLI: print node/edge changes between two graph snapshots."""
 
 import argparse
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -18,8 +19,15 @@ from lgcov.graph_diff import diff_graphs
 from lgcov.snapshot import Edge, GraphSnapshot
 from lgcov.taxonomy import load_taxonomy
 
-# 0 = no change, 1 = graph (or replay) changed, 2 = bad input (missing/unreadable/invalid).
+# 0 = no change / accepted, 1 = graph/replay changed or named node not drifted,
+# 2 = bad input (missing/unreadable/invalid).
 EXIT_ERROR = 2
+EXIT_NOT_DRIFTED = 1
+
+
+def _output_hash(output: object) -> str:
+    body = json.dumps(output, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(body).hexdigest()[:12]
 
 
 def _load(path: str) -> GraphSnapshot:
@@ -171,36 +179,103 @@ def _record(argv: list[str]) -> int:
     return 0
 
 
+def _accept_summary(
+    path: Path,
+    runs: list[Cassette],
+    fresh: list[Cassette],
+    results: list[tuple[Cassette, set[str]]],
+    nodes: set[str],
+) -> str:
+    """Markdown table: node, old/new output hash, file touched."""
+    lines = [
+        "### Cassette accept",
+        "",
+        "| node | old | new | file |",
+        "|---|---|---|---|",
+    ]
+    for node in sorted(nodes):
+        if not any(node in changed for _, changed in results):
+            continue
+        old_hashes: list[str] = []
+        new_hashes: list[str] = []
+        for base, neu in zip(runs, fresh, strict=True):
+            for step in base.steps:
+                if step.node == node:
+                    old_hashes.append(_output_hash(step.output))
+            for step in neu.steps:
+                if step.node == node:
+                    new_hashes.append(_output_hash(step.output))
+        old = ",".join(dict.fromkeys(old_hashes)) or "—"
+        new = ",".join(dict.fromkeys(new_hashes)) or "—"
+        lines.append(f"| `{node}` | `{old}` | `{new}` | `{path}` |")
+    return "\n".join(lines) + "\n"
+
+
 def _cassette_accept(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lgcov cassette")
     ap.add_argument("action", choices=["accept"])
-    ap.add_argument("nodes", nargs="+", help="drifted nodes to re-baseline")
+    ap.add_argument(
+        "--nodes",
+        help="comma-separated drifted nodes to re-baseline, e.g. respond,tool",
+    )
+    ap.add_argument(
+        "--all-drifted",
+        action="store_true",
+        help="re-baseline every node that currently drifts",
+    )
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    ap.add_argument("--cassette-dir", help="overrides cassette_dir from config")
     args = ap.parse_args(argv)
-    nodes = set(args.nodes)
+    if bool(args.nodes) == args.all_drifted:
+        print(
+            "lgcov cassette accept: pass exactly one of --nodes or --all-drifted",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    named = {n for n in (args.nodes or "").split(",") if n}
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(args.config, {"cassette_dir": args.cassette_dir})
         path = Path(cfg.cassette_dir) / "baseline.json"
         runs = _load_runs(str(path))
         graph = _load_graph(cfg.graph_entrypoint)
         fresh = [record(graph, run.inputs) for run in runs]
-        known = {s.node for r in (*runs, *fresh) for s in r.steps}
-        unknown = sorted(nodes - known)
-        if unknown:
-            raise ValueError(f"unknown node {unknown[0]!r}; known: {sorted(known)}")
+        if args.all_drifted:
+            nodes = {
+                node
+                for base, neu in zip(runs, fresh, strict=True)
+                for node in accept_nodes(base, neu, {s.node for s in base.steps})[1]
+            }
+            if not nodes:
+                print("lgcov cassette accept: no drifted nodes", file=sys.stderr)
+                return EXIT_NOT_DRIFTED
+        else:
+            nodes = named
+            known = {s.node for r in (*runs, *fresh) for s in r.steps}
+            unknown = sorted(nodes - known)
+            if unknown:
+                raise ValueError(f"unknown node {unknown[0]!r}; known: {sorted(known)}")
         results = [accept_nodes(b, f, nodes) for b, f in zip(runs, fresh, strict=True)]
     except (OSError, ImportError, SyntaxError, ValueError, KeyError, TypeError) as exc:
         print(f"lgcov cassette accept: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    for node in sorted(nodes):
-        n = sum(node in changed for _, changed in results)
-        if n:
-            print(f"accepted `{node}`: updated in {n}/{len(runs)} runs")
-        else:
-            print(f"`{node}`: no drift, nothing to accept")
-    if any(changed for _, changed in results):
-        _write_runs(path, [accepted for accepted, _ in results])
-        print(f"wrote {path}")
+    not_drifted = sorted(n for n in nodes if not any(n in c for _, c in results))
+    if not_drifted and not args.all_drifted:
+        print(
+            f"lgcov cassette accept: node {not_drifted[0]!r} is not drifted",
+            file=sys.stderr,
+        )
+        return EXIT_NOT_DRIFTED
+    changed_nodes = {n for _, c in results for n in c}
+    if not changed_nodes:
+        print("lgcov cassette accept: no drifted nodes", file=sys.stderr)
+        return EXIT_NOT_DRIFTED
+    _write_runs(path, [accepted for accepted, _ in results])
+    summary = _accept_summary(path, runs, fresh, results, changed_nodes)
+    summary_path = path.parent / "accept.md"
+    summary_path.write_text(summary, encoding="utf-8")
+    print(summary, end="")
+    print(f"wrote {path}")
+    print(f"wrote {summary_path}")
     return 0
 
 

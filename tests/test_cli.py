@@ -209,7 +209,7 @@ def test_cli_record_bad_inputs_exits_two(
     assert not (tmp_path / "cassettes" / "baseline.json").exists()
 
 
-# T082: `lgcov cassette accept <node>...` re-baselines only the named nodes.
+# T082: `lgcov cassette accept --nodes ...` re-baselines only the named nodes.
 AB_GRAPH = """\
 from typing import TypedDict
 
@@ -261,23 +261,28 @@ def test_cli_accept_b_leaves_a_byte_identical(
     cfg, baseline = _ab_project(tmp_path)
     before = baseline.read_text(encoding="utf-8")
     capsys.readouterr()
-    assert main(["cassette", "accept", "b", "--config", str(cfg)]) == 0
-    assert "accepted `b`: updated in 2/2 runs" in capsys.readouterr().out
+    assert main(["cassette", "accept", "--nodes", "b", "--config", str(cfg)]) == 0
+    out = capsys.readouterr().out
+    assert "| `b` |" in out
+    assert str(baseline) in out
     # Only b's output text changed; every other byte, a's entries included, is untouched.
     assert baseline.read_text(encoding="utf-8") == before.replace('"B1"', '"B2"')
+    summary = baseline.parent / "accept.md"
+    assert summary.is_file()
+    assert "| `b` |" in summary.read_text(encoding="utf-8")
     assert main(["replay", "--config", str(cfg)]) == 1
     assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
 
 
-def test_cli_accept_node_without_drift_is_a_no_op(
+def test_cli_accept_node_without_drift_exits_one(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cfg, baseline = _ab_project(tmp_path)
     (tmp_path / "graph.py").write_text(AB_GRAPH.replace("B1", "B2"), encoding="utf-8")
     before = baseline.read_text(encoding="utf-8")
     capsys.readouterr()
-    assert main(["cassette", "accept", "a", "--config", str(cfg)]) == 0
-    assert "`a`: no drift, nothing to accept" in capsys.readouterr().out
+    assert main(["cassette", "accept", "--nodes", "a", "--config", str(cfg)]) == 1
+    assert "not drifted" in capsys.readouterr().err
     assert baseline.read_text(encoding="utf-8") == before
 
 
@@ -287,9 +292,48 @@ def test_cli_accept_unknown_node_exits_two(
     cfg, baseline = _ab_project(tmp_path)
     before = baseline.read_text(encoding="utf-8")
     capsys.readouterr()
-    assert main(["cassette", "accept", "b", "ghost", "--config", str(cfg)]) == 2
+    assert main(["cassette", "accept", "--nodes", "b,ghost", "--config", str(cfg)]) == 2
     assert "unknown node 'ghost'" in capsys.readouterr().err
     assert baseline.read_text(encoding="utf-8") == before  # nothing half-applied
+
+
+def test_cli_accept_all_drifted(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    before = baseline.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert main(["cassette", "accept", "--all-drifted", "--config", str(cfg)]) == 0
+    out = capsys.readouterr().out
+    assert "| `a` |" in out and "| `b` |" in out
+    after = baseline.read_text(encoding="utf-8")
+    assert after == before.replace('"A1"', '"A2"').replace('"B1"', '"B2"')
+    assert main(["replay", "--config", str(cfg)]) == 0
+
+
+def test_cli_accept_cassette_dir_flag_overrides_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, _ = _ab_project(tmp_path)
+    other = tmp_path / "other_cassettes"
+    other.mkdir()
+    (tmp_path / "cassettes" / "baseline.json").replace(other / "baseline.json")
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "cassette",
+                "accept",
+                "--nodes",
+                "b",
+                "--config",
+                str(cfg),
+                "--cassette-dir",
+                str(other),
+            ]
+        )
+        == 0
+    )
+    assert (other / "baseline.json").read_text(encoding="utf-8").count('"B2"') == 2
+    assert (other / "accept.md").is_file()
 
 
 def test_cli_replay_sees_edit_with_same_size_and_mtime(
