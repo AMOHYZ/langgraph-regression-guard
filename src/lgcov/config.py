@@ -1,4 +1,4 @@
-"""T080: lgcov.yaml -> a typed Config. CLI flags override file values."""
+"""T080: lgcov.yaml -> a typed Config. Precedence: CLI flag > file > default."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ FAIL_ON_VALUES = ("fail", "infra_error", "needs_human")  # judge_gate.GateOutcom
 @dataclass(frozen=True)
 class Thresholds:
     min_node_coverage: float = 0.0  # percent, 0..100
+    max_drifted_nodes: int | None = None  # None = no limit
     fail_on: tuple[str, ...] = ("fail",)
 
 
@@ -22,13 +23,20 @@ class Thresholds:
 class Config:
     graph_entrypoint: str  # "<module or file.py>:<attr>"
     cassette_dir: str = "cassettes"
-    taxonomy: str | None = None
+    taxonomy_path: str | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
     ignore_paths: tuple[str, ...] = ()  # JSON pointers into node I/O, e.g. /meta/nonce
 
 
-_KEYS = ("cassette_dir", "graph_entrypoint", "ignore_paths", "taxonomy", "thresholds")
-_THRESHOLD_KEYS = ("fail_on", "min_node_coverage")
+_KEYS = (
+    "cassette_dir",
+    "graph_entrypoint",
+    "ignore_paths",
+    "taxonomy",  # alias for taxonomy_path
+    "taxonomy_path",
+    "thresholds",
+)
+_THRESHOLD_KEYS = ("fail_on", "max_drifted_nodes", "min_node_coverage")
 
 
 def _check_keys(d: Mapping[str, object], valid: tuple[str, ...], where: str) -> None:
@@ -49,6 +57,12 @@ def _str_list(value: object, key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _nonneg_int(value: object, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"lgcov.yaml: '{key}' must be a non-negative integer")
+    return value
+
+
 def _thresholds(raw: object) -> Thresholds:
     if not isinstance(raw, dict):
         raise ValueError("lgcov.yaml: 'thresholds' must be a mapping")
@@ -60,7 +74,25 @@ def _thresholds(raw: object) -> Thresholds:
     bad = sorted(set(fail_on) - set(FAIL_ON_VALUES))
     if bad:
         raise ValueError(f"lgcov.yaml: 'fail_on' values {bad} not in {list(FAIL_ON_VALUES)}")
-    return Thresholds(min_node_coverage=float(cov), fail_on=fail_on)
+    max_drifted = raw.get("max_drifted_nodes")
+    capped = None if max_drifted is None else _nonneg_int(max_drifted, "max_drifted_nodes")
+    return Thresholds(
+        min_node_coverage=float(cov),
+        max_drifted_nodes=capped,
+        fail_on=fail_on,
+    )
+
+
+def _taxonomy_path(d: Mapping[str, object]) -> str | None:
+    path = d.get("taxonomy_path")
+    alias = d.get("taxonomy")
+    if path is not None and alias is not None and path != alias:
+        raise ValueError(
+            "lgcov.yaml: 'taxonomy_path' and 'taxonomy' both set and disagree; "
+            "use taxonomy_path only"
+        )
+    chosen = path if path is not None else alias
+    return None if chosen is None else _str(chosen, "taxonomy_path")
 
 
 def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None) -> Config:
@@ -82,11 +114,10 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
     ignore = _str_list(d.get("ignore_paths", []), "ignore_paths")
     if not all(p.startswith("/") for p in ignore):
         raise ValueError("lgcov.yaml: 'ignore_paths' must be JSON pointers starting with '/'")
-    taxonomy = d.get("taxonomy")
     return Config(
         graph_entrypoint=entry,
         cassette_dir=_str(d.get("cassette_dir", "cassettes"), "cassette_dir"),
-        taxonomy=None if taxonomy is None else _str(taxonomy, "taxonomy"),
+        taxonomy_path=_taxonomy_path(d),
         thresholds=_thresholds(d.get("thresholds", {})),
         ignore_paths=ignore,
     )

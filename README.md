@@ -59,9 +59,20 @@ lgcov cassette accept respond
 lgcov replay                 # "No cassette drift (2 runs)."
 ```
 
-`lgcov.yaml` keys: `graph_entrypoint` (required), `cassette_dir`, `taxonomy`,
-`thresholds` (`min_node_coverage`, `fail_on`) and `ignore_paths`. CLI flags
-override the file.
+Example `lgcov.yaml`:
+
+```yaml
+graph_entrypoint: graph.py:graph   # required, "<file.py>:<attr>"
+cassette_dir: cassettes
+taxonomy_path: taxonomy.yaml       # optional; `taxonomy:` is an alias
+thresholds:
+  min_node_coverage: 80            # percent, 0..100
+  max_drifted_nodes: 3             # optional; omit for no limit
+  fail_on: [fail]
+ignore_paths: [/meta/nonce]        # JSON pointers into node I/O
+```
+
+Precedence: CLI flag > file > default.
 
 ## Development
 
