@@ -34,6 +34,16 @@ every PR. Python 3.12, managed with uv.
 - Never print or log secret values. `.env` stays in `.gitignore`.
 - No employer code or data in this repo. Personal accounts and public examples only.
 
+## 5. Gotchas
+- CI writes `.pyc` files, but a dev shell with `PYTHONDONTWRITEBYTECODE=1` never does, so
+  stale-bytecode bugs only show up in CI. When a change loads user `.py` files (graph
+  loading in `replay`, `record`, `cassette accept`), also run
+  `PYTHONDONTWRITEBYTECODE= uv run pytest -q` twice: the second run reads the cached `.pyc`.
+- Demo PRs edit `examples/demo_agent/` on purpose, and the `demo/prompt-tweak` PR stays red
+  until it is shown live: don't fix, re-baseline or merge it. Only `tests/test_demo_agent.py`
+  (the baseline guard) runs the live example; other tests use the frozen copies in
+  `tests/fixtures/` (`demo_graph.py`, `demo_baseline.json`).
+
 ## Layout
 - `src/lgcov/`: library code
 - `tests/`: pytest tests
