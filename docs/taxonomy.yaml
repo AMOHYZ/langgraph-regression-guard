@@ -1,0 +1,52 @@
+# Failure-mode taxonomy for open_deep_research, from the PR #163 audit.
+#
+# How the agent builds one of these for a team:
+#   1. Observe traces of the agent in real use, node by node.
+#   2. Group what goes wrong into failure modes, one per node that can break.
+#   3. Write one pass/fail case (KPI) per mode: a code check when a rule can decide it,
+#      an LLM judge with a one-question rubric when it can't.
+#   4. Gate every PR on those cases.
+#
+# Audit findings: PR #163 rewrote the supervisor prompt (lead_researcher_prompt), wired
+# think_tool into supervisor/supervisor_tools and the researcher, and changed what
+# reaches final_report. Nothing ran the 6-judge eval suite on that PR automatically.
+#
+# Node and tool names come from the audit notes; check them against the repo's graph.
+# Validate with: lgcov taxonomy check docs/taxonomy.yaml
+version: 1
+system: open_deep_research
+failure_modes:
+  - id: supervisor_bad_delegation
+    description: The rewritten supervisor prompt makes the supervisor answer itself instead of delegating research.
+    evidence:
+      - PR #163 rewrote lead_researcher_prompt (think_tool protocol, hard tool-call limits)
+  - id: researcher_skips_think_tool
+    description: The researcher skips think_tool, or misuses it, after it was wired into the research loop.
+    evidence:
+      - PR #163 wired think_tool into supervisor/supervisor_tools and the researcher
+  - id: final_report_unsupported_claims
+    description: Upstream changes make final_report state claims the gathered notes don't support.
+    evidence:
+      - PR #163 changed nodes upstream of final_report; no eval ran on push
+kpis:
+  - name: supervisor_delegates
+    failure_mode: supervisor_bad_delegation
+    node: supervisor
+    judge: code
+    description: The supervisor hands research to researchers via ConductResearch.
+    rubric: Did the supervisor call ConductResearch at least once?
+    check: {type: tool_called, tool: ConductResearch}
+  - name: researcher_uses_think_tool
+    failure_mode: researcher_skips_think_tool
+    node: researcher
+    judge: code
+    description: The researcher reflects with think_tool during its research loop.
+    rubric: Did the researcher call think_tool at least once?
+    check: {type: tool_called, tool: think_tool}
+  - name: report_claims_supported
+    failure_mode: final_report_unsupported_claims
+    node: final
+    judge: jev
+    description: Every claim in the final report is backed by the gathered research notes.
+    rubric: Is every claim in the report supported by the research notes it was written from?
+    labels: [pass, fail]

@@ -218,3 +218,22 @@ def test_example_open_deep_research_builds_two_judges() -> None:
     judges = judges_from_taxonomy(load_taxonomy(EXAMPLE), FAKES)
     assert set(judges) == {"delegates_research", "report_grounded"}
     assert all(isinstance(j, FakeJudge) for j in judges.values())
+
+
+# The PR #163 failure-mode taxonomy in docs/: one KPI per changed node.
+DOCS_TAXONOMY = EXAMPLE.parents[2] / "docs" / "taxonomy.yaml"
+
+
+def test_docs_pr163_taxonomy_has_one_kpi_per_failure_mode() -> None:
+    from lgcov.code_judges import ToolCalled
+
+    tax = load_taxonomy(DOCS_TAXONOMY)
+    assert sorted(spec.failure_mode for spec in tax.kpi_specs) == sorted(
+        mode.id for mode in tax.failure_modes
+    )
+    assert len(tax.failure_modes) == 3
+    judges = judges_from_taxonomy(tax, FAKES)
+    by_node = {spec.node: judges[spec.name] for spec in tax.kpi_specs}
+    assert by_node["supervisor"] == ToolCalled(by_node["supervisor"].kpi, "ConductResearch")
+    assert by_node["researcher"] == ToolCalled(by_node["researcher"].kpi, "think_tool")
+    assert isinstance(by_node["final"], FakeJudge)  # judge: jev, faked offline
