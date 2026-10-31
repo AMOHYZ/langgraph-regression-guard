@@ -6,9 +6,12 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
@@ -17,6 +20,15 @@ from typing import Any
 
 import yaml
 
+from lgcov.attribution import (
+    Benchmark,
+    Result,
+    Score,
+    parse_benchmark,
+    render_markdown,
+    results_json,
+    score,
+)
 from lgcov.calibration import (
     Band,
     Bands,
@@ -1277,6 +1289,106 @@ def _calibration_changes(args: argparse.Namespace, specs: list[KPISpec], cfg: Co
     return lines
 
 
+def _bench_sides(b: Benchmark, tmp: Path) -> tuple[str, str, list[Path]]:
+    """T101a: the base and head graphs as targets, from whole-file patches or git refs, and
+    the git worktrees made for them (to remove afterwards)."""
+    file, _, attr = b.graph.rpartition(":")
+    if b.base_patch and b.head_patch:
+        sides = []
+        for side, patch in (("base", b.base_patch), ("head", b.head_patch)):
+            dest = tmp / side / file
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text((b.folder / patch).read_text(encoding="utf-8"), encoding="utf-8")
+            sides.append(f"{dest}:{attr}")
+        return sides[0], sides[1], []
+    repo = (b.folder / b.repo).resolve()
+    worktrees: list[Path] = []
+    for side, ref in (("base", b.base_ref), ("head", b.head_ref)):
+        git = ["git", "-C", str(repo), "worktree", "add", "--detach", str(tmp / side), str(ref)]
+        subprocess.run(git, check=True, capture_output=True, text=True)
+        worktrees.append(tmp / side)
+    return f"{tmp / 'base' / file}:{attr}", f"{tmp / 'head' / file}:{attr}", worktrees
+
+
+def _bench_one(b: Benchmark) -> Result:
+    """Record the cases on base, replay head (unchanged nodes served, as `lgcov ci` does),
+    and score lgcov's root / propagated labels. A benchmark that can't run says why."""
+    start = perf_counter()
+    worktrees: list[Path] = []
+    expected = (tuple(sorted(b.root)), tuple(sorted(b.propagated)))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                base_target, head_target, worktrees = _bench_sides(b, Path(tmp))
+                base = _load_graph(base_target)
+                runs = [record(base, dict(inputs)) for inputs in b.cases]
+                head = _load_graph(head_target)
+                drifts = [replay_steps(head, run, (), serve=True)[0] for run in runs]
+            finally:
+                for worktree in worktrees:
+                    remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]
+                    subprocess.run(remove, check=False, capture_output=True)
+    except Exception as exc:  # user graph code and git can raise anything: a row, not a crash
+        failed = getattr(exc, "stderr", "") or str(exc)
+        return Result(
+            b.name,
+            (),
+            (),
+            Score(0, 0, 0),
+            Score(0, 0, 0),
+            perf_counter() - start,
+            *expected,
+            b.hard_cases,
+            b.notes,
+            error=f"{type(exc).__name__}: {str(failed).strip()[:200]}",
+        )
+    counts, roots = _drift_kinds(runs, drifts)
+    found = (tuple(sorted(roots)), tuple(sorted(counts.keys() - roots)))
+    return Result(
+        b.name,
+        *found,
+        score(found[0], b.root),
+        score(found[1], b.propagated),
+        perf_counter() - start,
+        *expected,
+        b.hard_cases,
+        b.notes,
+    )
+
+
+def _bench_cmd(argv: list[str]) -> int:
+    """T101a: lgcov's root / propagated labels against hand-written ones, one benchmark file
+    each. A report, not a gate: it exits 0 whatever the scores."""
+    ap = argparse.ArgumentParser(prog="lgcov bench")
+    ap.add_argument("dir", nargs="?", default="docs/benchmark", help="benchmark files (*.yaml)")
+    ap.add_argument("--only", action="append", default=[], help="run this one (file name)")
+    ap.add_argument("--out", default="docs/benchmark.md", help="write the table here")
+    ap.add_argument("--json", default="docs/benchmark-results.json", help="and the numbers")
+    args = ap.parse_args(argv)
+    folder = Path(args.dir)
+    files = [f for f in sorted(folder.glob("*.yaml")) if not args.only or f.stem in args.only]
+    if not files:
+        print(f"lgcov bench: no benchmark files (*.yaml) to run in {folder}", file=sys.stderr)
+        return EXIT_ERROR
+    benchmarks = []
+    for f in files:
+        try:
+            raw: object = yaml.safe_load(f.read_text(encoding="utf-8"))
+            benchmarks.append(parse_benchmark(f.stem, raw, f.parent))
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"lgcov bench: {f}: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+    results = [_bench_one(b) for b in benchmarks]
+    command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only)])
+    source = f"the {len(results)} benchmark files in `{folder}`"
+    md = render_markdown(results, command, datetime.now(UTC).date().isoformat(), source)
+    for path, text in ((Path(args.out), md), (Path(args.json), results_json(results))):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    print(md, end="")
+    return 0
+
+
 @dataclass(frozen=True)
 class _Expected:
     outcome: Outcome
@@ -1375,6 +1487,8 @@ def main(argv: list[str] | None = None) -> int:
         return _calibrate_cmd(argv[1:])
     if argv[:1] == ["review"]:
         return _review_cmd(argv[1:])
+    if argv[:1] == ["bench"]:
+        return _bench_cmd(argv[1:])
     if argv[:1] == ["coverage"]:
         return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:

@@ -102,6 +102,12 @@ command to re-run every node.
 
 Served vs `--live` on the demo, measured: [docs/benchmark-speed.md](docs/benchmark-speed.md) (`make bench-speed`).
 
+Root vs propagated attribution, measured: `lgcov bench DIR` records each benchmark's cases
+on base, replays head, and scores lgcov's labels against hand-written ones, precision /
+recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). For now its rows are
+three synthetic fixtures in `tests/fixtures/bench/`; real PRs come with T100. A miss on a
+hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden.
+
 ## Use in your repo
 
 Record a baseline first (see Quickstart), commit `lgcov.yaml` and your cassettes,
