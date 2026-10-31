@@ -73,6 +73,7 @@ class CiResult:
     newly_uncovered: tuple[str, ...] = ()
     under_floor: str = ""  # thresholds.min_node_coverage missed: "Node coverage 80% is under ..."
     l2_lines: tuple[str, ...] = ()  # T091: the KPI gate table, then the sampling table
+    calibration_lines: tuple[str, ...] = ()  # T102: band changes and saved-case re-checks
     blocked: tuple[str, ...] = ()  # T091: blocking KPIs whose verdict is BLOCK
     inconclusive: tuple[str, ...] = ()  # T091: blocking KPIs that are INCONCLUSIVE
     not_checked: tuple[str, ...] = ()  # T089: nodes replay stopped before checking
@@ -126,6 +127,8 @@ def render_ci_report(r: CiResult) -> str:
         lines += ["Newly uncovered: " + ", ".join(f"`{n}`" for n in r.newly_uncovered), ""]
     if r.l2_lines:
         lines += ["### KPI gate (L2)", "", *r.l2_lines, ""]
+    if r.calibration_lines:
+        lines += ["### Judge calibration", "", *r.calibration_lines, ""]
     lines += [*r.notes, ""] if r.notes else []
     lines += [format_timing(r.timing), ""] if r.timing else []
     lines.append(

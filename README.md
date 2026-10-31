@@ -251,13 +251,14 @@ Planned: sequential stopping (mSPRT), to stop judging once a KPI's verdict is cl
 
 ### Calibrate judges against human labels
 
-`lgcov calibrate` compares each judge with human labels. Give it a CSV with the columns
-`case_id, judge_id, judge_label, human_label`, plus optional `judge_confidence` and
-`question_form`; `--overrides` adds the overrides that review decisions saved, and
-`--taxonomy` gives each KPI's labels (default `pass` / `fail`).
+`lgcov calibrate` compares each judge with human labels: every CSV under
+`calibration/labels/` (columns `case_id, judge_id, judge_label, human_label`, plus optional
+`judge_confidence` and `question_form`) and the overrides in `calibration/overrides.jsonl`.
+Name CSVs to read those instead; `--taxonomy` gives each KPI's labels (default `pass` /
+`fail`).
 
 ```bash
-lgcov calibrate examples/demo_agent/labels.csv   # 40 synthetic labels for the demo judge
+lgcov calibrate   # the demo: 40 synthetic labels in calibration/labels/demo.csv
 ```
 
 - A failure is the positive class. TPR: the share of human-failed cases the judge catches;
@@ -291,6 +292,33 @@ elsewhere):
   drop to flag, with a warning, until `lgcov calibrate` runs again.
 - The demo's 40 synthetic labels land on flag on purpose: 18 of 20 failures caught, 19 of 20
   passes cleared, an overconfident question form, and 107 labels needed for κ ±0.10.
+
+#### Overrides move bands, through git
+
+1. A PR's report shows a verdict you disagree with, say `answer_states_order_status` passing
+   `run-0/respond`.
+2. Override it:
+
+   ```bash
+   lgcov review override --kpi answer_states_order_status --case-id run-0/respond \
+     --judge-label pass --human-label fail --reviewer you --note "drops the order status"
+   ```
+
+   The override is saved to `calibration/overrides.jsonl` as a label; when you disagree with
+   the judge, the case goes to `calibration/cases/<kpi>.jsonl` too; and the bands are
+   recalculated, printing any move: "Judge `answer_states_order_status`: flag → advisory
+   (n 42 → 43, lower TPR 0.61 → 0.58)."
+3. Commit `calibration/` with the PR. Its report lists the band changes against main under
+   "Judge calibration". Nothing is committed for you.
+4. The next PR gates with the new bands, and every PR re-judges the saved cases: "the judge
+   agrees with the human on 1 of 3 saved cases", with ⚠️ "judge drifting from human labels"
+   when that falls under half of at least 4. Saved cases check the judge; they never change
+   the gate.
+
+- A band moves up only once the judge has 16 agreed failures and 16 agreed passes; it moves
+  down at once.
+- One label per case and reviewer: overriding the same case again replaces your earlier
+  override, while a second reviewer's counts on its own.
 
 ## Development
 

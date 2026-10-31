@@ -77,8 +77,10 @@ def rows_from_overrides(
     lines: Iterable[str], score_maps: Mapping[str, Mapping[str, float]]
 ) -> tuple[list[Row], int]:
     """One row per override that names its KPI and the judge's label, with the human's
-    score mapped back to the KPI's label of that score. Others are counted, never guessed."""
-    rows, skipped = [], 0
+    score mapped back to the KPI's label of that score. Others are counted, never guessed.
+    T102: one label per case and reviewer; a reviewer's later override of a case wins."""
+    rows: dict[tuple[str, str, object], Row] = {}
+    skipped = 0
     for i, line in enumerate(text for text in lines if text.strip()):
         raw: object = json.loads(line)
         record = raw if isinstance(raw, dict) else {}
@@ -92,10 +94,10 @@ def rows_from_overrides(
             skipped += 1
             continue
         case = record.get("case_id")
-        rows.append(
-            Row(case if isinstance(case, str) and case else f"override-{i}", kpi, judged, human)
-        )
-    return rows, skipped
+        case_id = case if isinstance(case, str) and case else f"override-{i}"
+        rows.pop((kpi, case_id, record.get("reviewer")), None)  # re-inserted last: newest
+        rows[(kpi, case_id, record.get("reviewer"))] = Row(case_id, kpi, judged, human)
+    return list(rows.values()), skipped
 
 
 def _agreement(pairs: Sequence[tuple[str, str]]) -> tuple[float, float]:
@@ -217,6 +219,8 @@ class JudgeStats:
     n: int
     positives: int  # cases a human failed
     negatives: int  # cases a human passed
+    caught: int  # agreed failures: the judge and a human both failed the case
+    cleared: int  # agreed passes
     tpr: float | None  # catches human-failed cases; None with no such case
     tpr_ci: tuple[float, float] | None  # Wilson 95%
     tnr: float | None  # clears human-passed cases
@@ -264,6 +268,8 @@ def judge_stats(
         judge_id=judge_id,
         n=len(rows),
         positives=positives,
+        caught=caught,
+        cleared=cleared,
         negatives=negatives,
         tpr=caught / positives if positives else None,
         tpr_ci=wilson(caught, positives) if positives else None,
@@ -302,6 +308,7 @@ def render_calibration(
     stats: Sequence[JudgeStats],
     kinds: Mapping[str, str] | None = None,
     jev_model: str | None = None,
+    written: Mapping[str, Band] | None = None,
 ) -> list[str]:
     """Markdown: one row per judge with its band, then each judge's operating points,
     temperatures and threshold, in plain words, and the pinned jev_model."""
@@ -318,13 +325,22 @@ def render_calibration(
             else f"{s.needed.n_for_010} (±{s.needed.half_width:.2f} at {s.n})"
         )
         brier = "—" if s.brier is None else f"{s.brier:.3f}"
-        judged = "blocking (code judge)" if (kinds or {}).get(s.judge_id) == "code" else band(s)
+        current = (written or {}).get(s.judge_id) or band(s)
+        judged = "blocking (code judge)" if (kinds or {}).get(s.judge_id) == "code" else current
         lines.append(
             f"| {s.judge_id} | {judged} | {s.n} | {_rate(s.tpr, s.tpr_ci)} "
             f"| {_rate(s.tnr, s.tnr_ci)} "
             f"| {kappa} | {s.agreement:.0%} | {s.prevalence:.0%} | {needed} | {brier} |"
         )
     lines.append("")
+    for s in stats:  # T102: a band held back by the guard says why
+        held = (written or {}).get(s.judge_id)
+        if held is not None and _RANK[band(s)] > _RANK[held]:
+            lines.append(
+                f"`{s.judge_id}` earns {band(s)} but stays {held}: a band moves up only with "
+                f"{MIN_AGREED} agreed failures and {MIN_AGREED} agreed passes "
+                f"({s.caught} and {s.cleared} now)."
+            )
     pinned = f"jev_model: {jev_model}" if jev_model else "jev_model: not pinned in lgcov.yaml"
     lines.append(f"{pinned}. Jev judges are only calibrated for the model their labels came from.")
     for s in stats:
@@ -365,12 +381,29 @@ def _triple(p: float | None, ci: tuple[float, float] | None) -> list[float] | No
     return None if p is None or ci is None else [round(p, 4), round(ci[0], 4), round(ci[1], 4)]
 
 
-def bands_document(stats: Sequence[JudgeStats], jev_model: str | None) -> str:
+# T102: a band moves up only on this many agreed failures and as many agreed passes; at
+# 16/16 the Wilson lower bound is 0.806, T063's minimum for blocking.
+MIN_AGREED = 16
+_RANK: dict[Band, int] = {"advisory": 0, "flag": 1, "blocking": 2}
+
+
+def moved_band(previous: Band, s: JudgeStats) -> Band:
+    """The band `s` earns, from `previous`: down at once, up only once the judge has at
+    least MIN_AGREED agreed failures and MIN_AGREED agreed passes."""
+    earned = band(s)
+    if _RANK[earned] <= _RANK[previous]:
+        return earned
+    return earned if s.caught >= MIN_AGREED and s.cleared >= MIN_AGREED else previous
+
+
+def bands_document(
+    stats: Sequence[JudgeStats], jev_model: str | None, previous: Mapping[str, Band] | None = None
+) -> str:
     """calibration/bands.json: each labelled judge's band and the numbers behind it, and the
     jev_model its labels were made with. It lives in the repo, so a band moves in a diff."""
     judges = {
         s.judge_id: {
-            "band": band(s),
+            "band": moved_band((previous or {}).get(s.judge_id, "advisory"), s),
             "n": s.n,
             "tpr": _triple(s.tpr, s.tpr_ci),
             "tnr": _triple(s.tnr, s.tnr_ci),
@@ -391,7 +424,8 @@ class Bands:
     warnings: tuple[str, ...] = ()
 
 
-def _recorded(document: object) -> tuple[dict[str, Band], str | None]:
+def recorded_bands(document: object) -> tuple[dict[str, Band], str | None]:
+    """bands.json's band per judge, and the jev_model its labels came from."""
     if document is None:
         return {}, None
     judges = document.get("judges") if isinstance(document, dict) else None
@@ -419,7 +453,7 @@ def judge_bands(
     """kinds: KPI name -> judge kind; document: bands.json, parsed (None: no file). Code
     judges always block. A model judge takes its band from bands.json, or `uncalibrated`
     when it has none; a jev judge whose labels came from another jev_model drops to flag."""
-    recorded, labelled_with = _recorded(document)
+    recorded, labelled_with = recorded_bands(document)
     of: dict[str, Band] = {}
     missing, capped = [], []
     for kpi, kind in sorted(kinds.items()):
@@ -456,3 +490,63 @@ def uncalibrated_line(bands: Bands, kinds: Mapping[str, str], uncalibrated: Band
     else:
         what = "no model judge can block this PR" if n == models else "they can't block this PR"
     return f"⚠️ {n} of {m} judges uncalibrated: {what}. Run `lgcov calibrate`."
+
+
+def _entry(document: object, judge: str) -> Mapping[str, object] | None:
+    judges = document.get("judges") if isinstance(document, dict) else None
+    entry = judges.get(judge) if isinstance(judges, dict) else None
+    return entry if isinstance(entry, dict) else None
+
+
+def _lower(entry: Mapping[str, object] | None, rate: str) -> float | None:
+    triple = entry.get(rate) if entry else None
+    low = triple[1] if isinstance(triple, list) and len(triple) == 3 else None
+    return float(low) if isinstance(low, int | float) else None
+
+
+def band_changes(before: object, after: object) -> list[str]:
+    """T102: one line per judge whose band differs between two bands.json documents."""
+    names = {
+        name
+        for doc in (before, after)
+        if isinstance(doc, dict) and isinstance(doc.get("judges"), dict)
+        for name in doc["judges"]
+    }
+    lines = []
+    for judge in sorted(str(n) for n in names):
+        old, new = _entry(before, judge), _entry(after, judge)
+        was = old.get("band") if old else None
+        now = new.get("band") if new else None
+        if was == now:
+            continue
+        details = [f"n {old.get('n', 0) if old else 0} → {new.get('n', 0) if new else 0}"]
+        for rate, label in (("tpr", "lower TPR"), ("tnr", "lower TNR")):
+            a, b = _lower(old, rate), _lower(new, rate)
+            if a is not None and b is not None and f"{a:.2f}" != f"{b:.2f}":
+                details.append(f"{label} {a:.2f} → {b:.2f}")
+        lines.append(
+            f"Judge `{judge}`: {was or 'no labels'} → {now or 'no labels'} ({', '.join(details)})."
+        )
+    return lines
+
+
+def upsert_case(text: str, record: Mapping[str, object]) -> str:
+    """T102: a cases file, as JSON lines, with `record` in it once: the same case_id is
+    replaced, so overriding a case again doesn't add it twice."""
+    kept = [
+        line
+        for line in text.splitlines()
+        if line.strip() and json.loads(line).get("case_id") != record.get("case_id")
+    ]
+    return "".join(f"{line}\n" for line in [*kept, json.dumps(record, sort_keys=True)])
+
+
+def saved_case_lines(kpi: str, agreed: int, judged: int) -> list[str]:
+    """T102: how the judge does on the cases humans overrode it on; a ⚠️ line when it agrees
+    with fewer than half of at least 4."""
+    lines = [f"`{kpi}`: the judge agrees with the human on {agreed} of {judged} saved cases."]
+    if judged >= 4 and agreed * 2 < judged:
+        lines.append(
+            f"⚠️ `{kpi}`: judge drifting from human labels ({agreed} of {judged} saved cases agree)."
+        )
+    return lines

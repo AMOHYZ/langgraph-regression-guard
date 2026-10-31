@@ -1205,7 +1205,7 @@ def test_cli_ci_links_main_s_latest_nightly_run(
 
 
 # T063: `lgcov calibrate` on the demo's 40 synthetic labels.
-DEMO_LABELS = Path(__file__).resolve().parents[1] / "examples" / "demo_agent" / "labels.csv"
+DEMO_LABELS = Path(__file__).resolve().parents[1] / "calibration" / "labels" / "demo.csv"
 
 
 def test_cli_calibrate_prints_a_row_per_judge_in_plain_words(
@@ -1266,3 +1266,90 @@ def test_cli_judge_respects_the_bands(tmp_path: Path, capsys: pytest.CaptureFixt
     _bands(tmp_path / "bands.json", answer_states_order_status="flag")
     assert main(args) == 1  # a flag judge's INCONCLUSIVE counts
     assert "| answer_states_order_status (flag) |" in capsys.readouterr().out
+
+
+# T102: an override on one PR moves the judge's band on the next, through git.
+def _calibrated_project(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    _ci_project(project, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    shutil.copy(DEMO_TAXONOMY, project / "taxonomy.yaml")
+    (project / "calibration" / "labels").mkdir(parents=True)
+    shutil.copy(DEMO_LABELS, project / "calibration" / "labels" / "demo.csv")
+    assert main(["calibrate", "--taxonomy", "taxonomy.yaml"]) == 0  # flag, from 40 labels
+
+
+def _override(case_id: str, reviewer: str) -> int:
+    return main(
+        [
+            *("review", "override", "--kpi", "answer_states_order_status", "--case-id", case_id),
+            *("--judge-label", "pass", "--human-label", "fail", "--reviewer", reviewer),
+            *("--note", "leaves out the order status", "--graph", "graph.py:graph"),
+            *("--cassette-dir", "cassettes", "--taxonomy", "taxonomy.yaml"),
+        ]
+    )
+
+
+def test_three_overrides_move_the_demo_band_and_the_next_ci_comment_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import shutil
+
+    project = tmp_path / "pr"
+    project.mkdir()
+    _calibrated_project(project, monkeypatch)
+    shutil.copytree(project, tmp_path / "base")  # main, before the overrides
+    # The demo has two runs: two reviewers on run-0, one on run-1, all three misses.
+    for case_id, reviewer in [("run-0/respond", "ahmed"), ("run-1/respond", "ahmed")]:
+        assert _override(case_id, reviewer) == 0
+    capsys.readouterr()
+    assert _override("run-0/respond", "sara") == 0
+    # against the bands the last override left (n 42), then the PR's against main's (n 40)
+    since_last = "Judge `answer_states_order_status`: flag → advisory (n 42 → 43, lower TPR 0.61"
+    assert since_last in capsys.readouterr().out
+    change = (
+        "Judge `answer_states_order_status`: flag → advisory (n 40 → 43, lower TPR 0.70 → 0.58)."
+    )
+    bands = json.loads((project / "calibration" / "bands.json").read_text(encoding="utf-8"))
+    assert bands["judges"]["answer_states_order_status"]["band"] == "advisory"
+    cases = (project / "calibration" / "cases" / "answer_states_order_status.jsonl").read_text()
+    saved = [json.loads(line) for line in cases.splitlines()]
+    assert [c["case_id"] for c in saved] == ["run-1/respond", "run-0/respond"]  # one each
+    overrides = (project / "calibration" / "overrides.jsonl").read_text(encoding="utf-8")
+    assert '"reason": "leaves out the order status"' in overrides  # --note
+    _, report, _ = _run_ci(project, "--base-dir", str(tmp_path / "base"))
+    assert "### Judge calibration" in report and change in report
+
+
+def test_cli_calibrate_with_no_label_files_leaves_the_bands_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["calibrate"]) == 0
+    assert "No calibration labels" in capsys.readouterr().out
+    assert not (tmp_path / "calibration" / "bands.json").exists()
+
+
+def test_saved_cases_are_rejudged_and_a_drifting_judge_is_flagged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cases = tmp_path / "calibration" / "cases" / "answer_states_order_status.jsonl"
+    cases.parent.mkdir(parents=True)
+    saved = {"node_input": {"question": "hours?"}, "node_output": {"answer": "9-5"}}
+    cases.write_text(
+        "".join(
+            json.dumps({**saved, "case_id": f"c{i}", "human_label": "fail"}) + "\n"
+            for i in range(4)
+        ),
+        encoding="utf-8",
+    )
+    args = [*_judge_args(tmp_path), "--taxonomy", DEMO_TAXONOMY]
+    args[args.index("--bands") + 1] = str(tmp_path / "calibration" / "bands.json")
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "Planned: 12 judge calls, 8 to model judges" in out  # k = 1, plus 4 saved cases
+    assert (
+        "`answer_states_order_status`: the judge agrees with the human on 0 of 4 saved cases."
+        in out
+    )
+    assert "⚠️ `answer_states_order_status`: judge drifting from human labels" in out

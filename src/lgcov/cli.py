@@ -20,16 +20,23 @@ import yaml
 from lgcov.calibration import (
     Band,
     Bands,
+    JudgeStats,
+    Row,
+    band_changes,
     bands_document,
     calibrate,
     judge_bands,
     read_labels,
+    recorded_bands,
     render_calibration,
     rows_from_overrides,
+    saved_case_lines,
     uncalibrated_line,
+    upsert_case,
 )
 from lgcov.cassette import (
     ON_DIVERGENCE,
+    TRANSPORT_ERRORS,
     Budget,
     Cassette,
     Drift,
@@ -58,7 +65,8 @@ from lgcov.coverage import (
 from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
-from lgcov.judges import KPI, FakeJudge, Judge, NodeState
+from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
+from lgcov.review import ReviewDecision, apply_decision
 from lgcov.sampling import (
     KpiStats,
     gate_exit_code,
@@ -656,11 +664,18 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         not_checked=not_checked,
         timing=replace(timing, total=perf_counter() - start),
     )
+    try:
+        changes = _calibration_changes(args, l2[0] if l2 else [], cfg)
+    except (OSError, ValueError) as exc:  # a broken label file in the PR: say so, don't fail
+        changes = [f"⚠️ could not recompute the bands from {Path(args.bands).parent}/: {exc}"]
+    result = replace(result, calibration_lines=tuple(changes))
     if l2 is None:
         return result
     judge_start = perf_counter()
     try:
-        stats, gate = _ci_gate(args, cfg, policy.k, advisory, flagged, *l2, runs, pairs)
+        saved = _saved_cases(Path(args.bands).parent / "cases", l2[0])
+        extra = sum(len(saved.get(s.name, [])) for s in l2[0] if s.judge != "code")
+        stats, gate = _ci_gate(args, cfg, policy.k, advisory, flagged, *l2, runs, pairs, extra)
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
         return replace(result, exit_code=l1_code or EXIT_ERROR, harness_error=msg)
@@ -687,6 +702,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
         inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
         timing=replace(judged, total=perf_counter() - start),
+        calibration_lines=(*changes, *_rejudge(saved, l2[0], l2[1])),
     )
 
 
@@ -720,10 +736,13 @@ def _ci_gate(
     judges: list[Judge],
     runs: list[Cassette],
     replays: list[tuple[list[Drift], list[Step]]],
+    extra: int = 0,
 ) -> tuple[list[KpiStats], GateConfig]:
-    """T091: the L2 gate on recorded vs replayed outputs, as `lgcov judge` runs it."""
+    """T091: the L2 gate on recorded vs replayed outputs, as `lgcov judge` runs it. `extra`:
+    model judge calls on top of the plan (T102: saved cases)."""
     plan = _l2_plan(specs, runs, replays)
     _, model = _l2_calls(plan, k)
+    model += extra
     if model > args.max_calls:
         raise ValueError(
             f"refusing to make {model} model judge calls (more than --max-calls "
@@ -977,7 +996,10 @@ def _judge_cmd(argv: list[str]) -> int:
     except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
         return _harness_error("lgcov judge", "replay failed outside node code", exc)
     plan = _l2_plan(specs, runs, replays)
+    saved = _saved_cases(Path(args.bands).parent / "cases", specs)
     total, model = _l2_calls(plan, k)
+    total += sum(len(c) for c in saved.values())  # T102: each saved case, judged once more
+    model += sum(len(saved.get(s.name, [])) for s in specs if s.judge != "code")
     print(f"Planned: {total} judge calls, {model} to model judges (--max-calls {args.max_calls})")
     if model > args.max_calls:
         print(
@@ -991,6 +1013,9 @@ def _judge_cmd(argv: list[str]) -> int:
     print(
         "\n".join([*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)])
     )
+    rechecked = _rejudge(saved, specs, judges)
+    if rechecked:
+        print("\n".join(["", *rechecked]))
     return gate_exit_code(stats, gate.inconclusive_blocks)
 
 
@@ -1004,44 +1029,252 @@ def _pinned_jev_model(path: str) -> str | None:
     return load_config(path, {"graph_entrypoint": "calibrate.py:unused"}).jev_model
 
 
-def _calibrate_cmd(argv: list[str]) -> int:
-    """T063: each judge's agreement with human labels, from a CSV and saved overrides."""
-    ap = argparse.ArgumentParser(prog="lgcov calibrate")
-    ap.add_argument(
-        "labels",
-        help="CSV: case_id, judge_id, judge_label, human_label[, judge_confidence, question_form]",
-    )
-    ap.add_argument("--overrides", help="the overrides review decisions saved (JSON lines)")
-    ap.add_argument("--taxonomy", help="taxonomy.yaml with each KPI's labels (default pass/fail)")
-    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml, for jev_model")
-    ap.add_argument("--bands", default=_BANDS, help="write each judge's band here (T063)")
-    args = ap.parse_args(argv)
-    skipped = 0
-    try:
-        jev_model = _pinned_jev_model(args.config)
-        rows = read_labels(Path(args.labels).read_text(encoding="utf-8"))
-        specs = load_taxonomy(args.taxonomy).kpi_specs if args.taxonomy else ()
-        score_maps = {spec.name: spec.score_map for spec in specs}
-        if args.overrides:
-            lines = Path(args.overrides).read_text(encoding="utf-8").splitlines()
-            extra, skipped = rows_from_overrides(lines, score_maps)
-            rows += extra
-        stats = calibrate(rows, score_maps)
-    except (OSError, ValueError) as exc:  # ValueError covers malformed JSON lines too
-        print(f"lgcov calibrate: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+def _calibration_inputs(
+    bands: Path, labels: list[str], overrides: str | None
+) -> tuple[list[Path], Path | None]:
+    """T102: the label files given, else calibration/labels/*.csv and
+    calibration/overrides.jsonl, next to bands.json."""
+    if labels:
+        return [Path(p) for p in labels], Path(overrides) if overrides else None
+    saved = Path(overrides) if overrides else bands.parent / "overrides.jsonl"
+    return sorted((bands.parent / "labels").glob("*.csv")), saved if saved.is_file() else None
+
+
+def _label_rows(
+    labels: list[Path], overrides: Path | None, specs: list[KPISpec]
+) -> tuple[list[Row], int]:
+    score_maps = {spec.name: spec.score_map for spec in specs}
+    rows = [row for path in labels for row in read_labels(path.read_text(encoding="utf-8"))]
+    if overrides is None:
+        return rows, 0
+    lines = overrides.read_text(encoding="utf-8").splitlines()
+    extra, skipped = rows_from_overrides(lines, score_maps)
+    return rows + extra, skipped
+
+
+def _bands_after(
+    stats: list[JudgeStats], before: object, jev_model: str | None
+) -> tuple[str, object]:
+    # T102: the new bands.json, moved from `before` by the up-guard, as text and parsed
+    previous, _ = recorded_bands(before)
+    text = bands_document(stats, jev_model, previous)
+    after: object = json.loads(text)
+    return text, after
+
+
+def _recalibrate(
+    bands: Path,
+    labels: list[Path],
+    overrides: Path | None,
+    specs: list[KPISpec],
+    jev_model: str | None,
+) -> int:
+    """Calibrate from these labels and rewrite bands.json, saying which bands moved."""
+    rows, skipped = _label_rows(labels, overrides, specs)
+    if not rows:
+        print(
+            f"No calibration labels: {bands} unchanged. Add CSVs under "
+            f"{bands.parent / 'labels'}, or override a verdict with `lgcov review override`."
+        )
+        return 0
+    stats = calibrate(rows, {spec.name: spec.score_map for spec in specs})
+    before: object = json.loads(bands.read_text(encoding="utf-8")) if bands.is_file() else None
+    text, after = _bands_after(stats, before, jev_model)
     kinds = {spec.name: spec.judge for spec in specs}
-    print("\n".join(render_calibration(stats, kinds, jev_model)))
-    bands = Path(args.bands)
+    print("\n".join(render_calibration(stats, kinds, jev_model, recorded_bands(after)[0])))
     bands.parent.mkdir(parents=True, exist_ok=True)
-    bands.write_text(bands_document(stats, jev_model), encoding="utf-8")
+    bands.write_text(text, encoding="utf-8")
     print(f"Wrote {bands}: one band per judge, for `lgcov judge` and `lgcov ci`.")
+    for line in band_changes(before, after):
+        print(line)
     if skipped:
         print(
             f"{skipped} override{'' if skipped == 1 else 's'} skipped: no kpi or judge_label "
             "(saved before T063), or a human score that isn't one of the KPI's labels."
         )
     return 0
+
+
+def _calibrate_cmd(argv: list[str]) -> int:
+    """T063, T102: each judge's agreement with human labels, and its band."""
+    ap = argparse.ArgumentParser(prog="lgcov calibrate")
+    ap.add_argument(
+        "labels",
+        nargs="*",
+        help="CSVs: case_id, judge_id, judge_label, human_label[, judge_confidence, "
+        "question_form]; default: calibration/labels/*.csv and calibration/overrides.jsonl",
+    )
+    ap.add_argument("--overrides", help="the overrides `lgcov review override` saved")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml with each KPI's labels (default pass/fail)")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml, for jev_model")
+    ap.add_argument("--bands", default=_BANDS, help="write each judge's band here (T063)")
+    args = ap.parse_args(argv)
+    try:
+        jev_model = _pinned_jev_model(args.config)
+        specs = list(load_taxonomy(args.taxonomy).kpi_specs) if args.taxonomy else []
+        labels, overrides = _calibration_inputs(Path(args.bands), args.labels, args.overrides)
+        return _recalibrate(Path(args.bands), labels, overrides, specs, jev_model)
+    except (OSError, ValueError) as exc:  # ValueError covers malformed JSON lines too
+        print(f"lgcov calibrate: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+_REVIEW_USAGE = (
+    "usage: lgcov review override --kpi KPI --case-id CASE --judge-label LABEL "
+    "--human-label LABEL --reviewer NAME [--note TEXT]"
+)
+
+
+def _review_cmd(argv: list[str]) -> int:
+    """T102: override a judge's verdict on one case. The override is a label; when the
+    human disagrees, the case is saved so the judge is re-checked on it on every PR; and
+    the judge's band is recalculated."""
+    if argv[:1] != ["override"]:
+        print(_REVIEW_USAGE, file=sys.stderr)
+        return EXIT_ERROR
+    ap = argparse.ArgumentParser(prog="lgcov review override")
+    ap.add_argument("--kpi", required=True, help="the KPI whose verdict this overrides")
+    ap.add_argument("--case-id", required=True, help="the case, as reports name it: run-0/respond")
+    ap.add_argument("--judge-label", required=True, help="what the judge said")
+    ap.add_argument("--human-label", required=True, help="what it should have said")
+    ap.add_argument("--reviewer", required=True)
+    ap.add_argument("--note", default="", help="why; saved with the override")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
+    ap.add_argument("--cassette-dir", help="overrides cassette_dir")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml; overrides taxonomy_path")
+    ap.add_argument("--bands", default=_BANDS, help="bands.json; overrides and cases go beside it")
+    args = ap.parse_args(argv[1:])
+    overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
+    try:
+        cfg = load_config(args.config, overrides)
+        taxonomy_path = args.taxonomy or cfg.taxonomy_path
+        if not taxonomy_path:
+            raise ValueError("needs a taxonomy (--taxonomy or taxonomy_path)")
+        specs = list(load_taxonomy(taxonomy_path).kpi_specs)
+        spec = next((s for s in specs if s.name == args.kpi), None)
+        if spec is None:
+            raise ValueError(f"no KPI '{args.kpi}' in {taxonomy_path}")
+        if spec.judge == "code":
+            raise ValueError(f"KPI '{spec.name}' has a code judge, which is deterministic")
+        bad = sorted({args.judge_label, args.human_label} - set(spec.score_map))
+        if bad:
+            raise ValueError(f"labels {bad} not in KPI '{spec.name}': {sorted(spec.score_map)}")
+        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"lgcov review: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        # Exception: importing and running user graph code can raise anything.
+        graph = _load_graph(cfg.graph_entrypoint)
+        fresh = [replay_steps(graph, run, cfg.ignore_paths, serve=True)[1] for run in runs]
+    except Exception as exc:
+        return _harness_error("lgcov review", "cannot replay the graph", exc)
+    cases = _l2_cases(spec, fresh)
+    if args.case_id not in cases:
+        print(f"lgcov review: no case '{args.case_id}'; there are {sorted(cases)}", file=sys.stderr)
+        return EXIT_ERROR
+    node_input, node_output = cases[args.case_id]
+    bands = Path(args.bands)
+    bands.parent.mkdir(parents=True, exist_ok=True)
+    decision = ReviewDecision(
+        node=spec.node,
+        action="override",
+        reviewer=args.reviewer,
+        reason=args.note,
+        label=spec.score_map[args.human_label],
+        kpi=spec.name,
+        judge_label=args.judge_label,
+        case_id=args.case_id,
+    )
+    candidate = {spec.node: {"input": node_input, "output": node_output}}
+    apply_decision(decision, {}, candidate, bands.parent / "overrides.jsonl")
+    print(f"Saved the override to {bands.parent / 'overrides.jsonl'}.")
+    if args.human_label != args.judge_label:  # the judge got it wrong: re-check it every PR
+        saved = bands.parent / "cases" / f"{spec.name}.jsonl"
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "case_id": args.case_id,
+            "kpi": spec.name,
+            "node_input": node_input,
+            "node_output": node_output,
+            "judge_label": args.judge_label,
+            "human_label": args.human_label,
+            "reviewer": args.reviewer,
+            "reason": args.note,
+        }
+        old = saved.read_text(encoding="utf-8") if saved.is_file() else ""
+        saved.write_text(upsert_case(old, record), encoding="utf-8")
+        print(f"Saved the case to {saved}: the judge is re-checked on it on every PR.")
+    try:
+        labels, saved_overrides = _calibration_inputs(bands, [], None)
+        return _recalibrate(bands, labels, saved_overrides, specs, cfg.jev_model)
+    except (OSError, ValueError) as exc:
+        print(f"lgcov review: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+def _saved_cases(folder: Path, specs: list[KPISpec]) -> dict[str, list[dict[str, object]]]:
+    """T102: per KPI, the cases a human overrode its judge on, from calibration/cases/."""
+    saved: dict[str, list[dict[str, object]]] = {}
+    for spec in specs:
+        path = folder / f"{spec.name}.jsonl"
+        if path.is_file():
+            lines = path.read_text(encoding="utf-8").splitlines()
+            records = [json.loads(line) for line in lines if line.strip()]
+            saved[spec.name] = [r for r in records if isinstance(r, dict)]
+    return saved
+
+
+def _rejudge(
+    saved: dict[str, list[dict[str, object]]], specs: list[KPISpec], judges: list[Judge]
+) -> list[str]:
+    """T102: the judge, again, on each saved case; agreement with the human, never the gate."""
+    lines = []
+    for spec, judge in zip(specs, judges, strict=True):
+        if spec.name not in saved:
+            continue
+        agreed = judged = 0
+        for case in saved[spec.name]:
+            node_input, node_output = case.get("node_input"), case.get("node_output")
+            if not isinstance(node_input, dict) or not isinstance(node_output, dict):
+                continue
+            try:
+                verdict = judge.judge(node_input, node_output)
+            except (JudgeInfraError, *TRANSPORT_ERRORS):
+                continue  # not judged: neither agrees nor disagrees
+            judged += 1
+            agreed += verdict.label == case.get("human_label")
+        lines += saved_case_lines(spec.name, agreed, judged)
+    return lines
+
+
+def _tree(folder: Path) -> dict[str, bytes]:
+    if not folder.is_dir():
+        return {}
+    return {str(p.relative_to(folder)): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+
+
+def _calibration_changes(args: argparse.Namespace, specs: list[KPISpec], cfg: Config) -> list[str]:
+    """T102: when the PR changed calibration/, the bands its labels earn, against main's."""
+    here = Path(args.bands)
+    if not args.base_dir or here.is_absolute():
+        return []
+    base = Path(args.base_dir) / here
+    if _tree(here.parent) == _tree(base.parent):
+        return []
+    labels, overrides = _calibration_inputs(here, [], None)
+    rows, _ = _label_rows(labels, overrides, specs)
+    if not rows:
+        return [f"This PR changed {here.parent}/ but it has no calibration labels."]
+    before: object = json.loads(base.read_text(encoding="utf-8")) if base.is_file() else None
+    stats = calibrate(rows, {spec.name: spec.score_map for spec in specs})
+    _, after = _bands_after(stats, before, cfg.jev_model)
+    lines = band_changes(before, after) or ["Calibration changed; no judge's band moved."]
+    committed: object = json.loads(here.read_text(encoding="utf-8")) if here.is_file() else None
+    if recorded_bands(committed) != recorded_bands(after):
+        lines.append(f"⚠️ {here} doesn't match its labels: run `lgcov calibrate` and commit it.")
+    return lines
 
 
 @dataclass(frozen=True)
@@ -1140,6 +1373,8 @@ def main(argv: list[str] | None = None) -> int:
         return _judge_cmd(argv[1:])
     if argv[:1] == ["calibrate"]:
         return _calibrate_cmd(argv[1:])
+    if argv[:1] == ["review"]:
+        return _review_cmd(argv[1:])
     if argv[:1] == ["coverage"]:
         return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:

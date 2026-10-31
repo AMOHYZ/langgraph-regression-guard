@@ -7,15 +7,19 @@ import pytest
 from lgcov.calibration import (
     Row,
     band,
+    band_changes,
     bands_document,
     cohen_kappa,
     fit_temperature,
     judge_bands,
     judge_stats,
     labels_needed,
+    moved_band,
     read_labels,
     rows_from_overrides,
+    saved_case_lines,
     tune_threshold,
+    upsert_case,
 )
 
 
@@ -174,3 +178,63 @@ def test_a_jev_model_other_than_the_labels_caps_jev_judges_at_flag_with_a_warnin
     moved = judge_bands({"grounded": "jev"}, doc, "jev-2026-11")
     assert moved.of == {"grounded": "flag"}
     assert "jev-2026-11" in moved.warnings[0] and "jev-2026-10" in moved.warnings[0]
+
+
+# T102: overrides move bands, through git; a band moves up only on enough agreed labels.
+def _judge(caught: int, missed: int, cleared: int, alarms: int) -> list[Row]:
+    rows = [("fail", "fail")] * caught + [("pass", "fail")] * missed
+    return _rows(rows + [("pass", "pass")] * cleared + [("fail", "pass")] * alarms)
+
+
+def test_twenty_agreeing_failures_raise_a_flag_judge_to_blocking() -> None:
+    assert band(judge_stats("grounded", _judge(16, 1, 20, 0))) == "flag"
+    s = judge_stats("grounded", _judge(16 + 20, 1, 20, 0))
+    assert moved_band("flag", s) == "blocking"  # lower bounds 0.86 and 0.84; 36 and 20 agreed
+
+
+def test_five_misses_lower_a_blocking_judge_to_flag_at_once() -> None:
+    s = judge_stats("grounded", _judge(20, 5, 20, 0))  # TPR 0.80, lower bound 0.61
+    assert moved_band("blocking", s) == "flag"
+
+
+def test_a_band_moves_up_only_with_16_agreed_failures_and_16_agreed_passes() -> None:
+    s = judge_stats("grounded", _judge(2, 0, 2, 0))
+    assert band(s) == "flag"  # the point rates say flag...
+    assert moved_band("advisory", s) == "advisory"  # ...but 2 and 2 is too few to move up
+
+
+def test_the_band_change_line_names_the_judge_n_and_the_bound_that_moved() -> None:
+    before = json.loads(bands_document([judge_stats("grounded", _judge(18, 2, 19, 1))], None))
+    after = json.loads(bands_document([judge_stats("grounded", _judge(18, 5, 19, 1))], None))
+    assert band_changes(before, after) == [
+        "Judge `grounded`: flag → advisory (n 40 → 43, lower TPR 0.70 → 0.58)."
+    ]
+    assert band_changes(after, after) == []
+
+
+def test_a_saved_case_appears_once_even_if_overridden_again() -> None:
+    first = {"case_id": "run-0/respond", "human_label": "fail", "reviewer": "ahmed"}
+    text = upsert_case("", first)
+    text = upsert_case(text, {**first, "reviewer": "sara"})
+    lines = [json.loads(line) for line in text.splitlines()]
+    assert [(r["case_id"], r["reviewer"]) for r in lines] == [("run-0/respond", "sara")]
+
+
+def test_saved_case_agreement_and_the_drift_line() -> None:
+    assert saved_case_lines("grounded", 1, 3) == [
+        "`grounded`: the judge agrees with the human on 1 of 3 saved cases."
+    ]
+    assert saved_case_lines("grounded", 1, 4)[1] == (
+        "⚠️ `grounded`: judge drifting from human labels (1 of 4 saved cases agree)."
+    )
+
+
+def test_one_label_per_case_and_reviewer_the_latest_kept() -> None:
+    record = {"kpi": "grounded", "judge_label": "pass", "case_id": "run-0/answer"}
+    lines = [
+        json.dumps({**record, "human_label": 1.0, "reviewer": "ahmed"}),
+        json.dumps({**record, "human_label": 0.0, "reviewer": "ahmed"}),  # ahmed again: replaces
+        json.dumps({**record, "human_label": 0.0, "reviewer": "sara"}),  # a second reviewer counts
+    ]
+    rows, skipped = rows_from_overrides(lines, {})
+    assert [r.human_label for r in rows] == ["fail", "fail"] and skipped == 0
