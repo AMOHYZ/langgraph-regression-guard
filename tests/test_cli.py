@@ -393,6 +393,53 @@ def test_cli_replay_serves_unchanged_nodes_unless_live(
     edited = baseline.read_text(encoding="utf-8").replace('"A1"', '"AX"')
     baseline.write_text(edited, encoding="utf-8")
     assert main(["replay", "--config", str(cfg)]) == 0
+    # ...and --live re-runs every node, which catches the edit.
+    capsys.readouterr()
+    assert main(["replay", "--live", "--config", str(cfg)]) == 1
+    assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
+
+
+def test_cli_replay_still_reports_root_and_downstream_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # b's code is unchanged but it reads a's output, so it re-runs once a changes.
+    src = AB_GRAPH.replace('return {"b": "B1"}', 'return {"b": state["a"] + "!"}')
+    graph = tmp_path / "graph.py"
+    graph.write_text(src, encoding="utf-8")
+    cfg = tmp_path / "lgcov.yaml"
+    cfg.write_text(
+        f"graph_entrypoint: {graph}:graph\ncassette_dir: {tmp_path / 'cassettes'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "inputs.json").write_text("[{}]", encoding="utf-8")
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    graph.write_text(src.replace("A1", "A2"), encoding="utf-8")
+    capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert "| `a` | root | 1/1 |" in lines
+    assert "| `b` | downstream | 1/1 |" in lines
+
+
+def test_cli_replay_reads_a_baseline_recorded_before_node_inputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Older baselines have no node inputs or code fingerprints: every node runs live.
+    runs = json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))["runs"]
+    legacy = [
+        {
+            "inputs": r["inputs"],
+            "steps": [{"node": s["node"], "output": s["output"]} for s in r["steps"]],
+        }
+        for r in runs
+    ]
+    (tmp_path / "baseline.json").write_text(json.dumps({"runs": legacy}), encoding="utf-8")
+    src = DEMO_GRAPH.read_text(encoding="utf-8")
+    (tmp_path / "graph.py").write_text(
+        src.replace("a concise support", "a friendly, detailed support"), encoding="utf-8"
+    )
+    assert main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")]) == 1
+    assert "| `respond` | root | 2/2 |" in capsys.readouterr().out.splitlines()
 
 
 # T078 PR A: `lgcov snapshot`, `replay --fail-on/--summary-json`, harness errors exit 2.
@@ -577,3 +624,18 @@ def test_cli_ci_fail_on_never_passes_but_still_shows_drift(
     code, report, outputs = _run_ci(tmp_path, "--fail-on", "never")
     assert (code, outputs["verdict"], outputs["root-drift-count"]) == (0, "pass", "1")
     assert "| `respond` | root | 2/2 |" in report
+
+
+def test_cli_ci_serves_unchanged_nodes_unless_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    # A hand-edited tool result is served as recorded, which shows the nodes did not run...
+    edited = baseline.read_text(encoding="utf-8").replace("#42: shipped", "#42: lost")
+    baseline.write_text(edited, encoding="utf-8")
+    assert _run_ci(tmp_path)[0] == 0
+    # ...and --live re-runs every node, which catches the edit.
+    code, report, _ = _run_ci(tmp_path, "--live")
+    assert code == 1
+    assert "| `lookup_order` | root | 1/2 |" in report

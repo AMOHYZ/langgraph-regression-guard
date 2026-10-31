@@ -79,6 +79,24 @@ ignore_paths: [/meta/nonce]        # JSON pointers into node I/O
 
 Precedence: CLI flag > file > default.
 
+### Which nodes replay re-runs
+
+`lgcov replay` and `lgcov ci` (the Action) treat a node as unchanged, and serve
+its recorded output without running it, when two things match the recording:
+
+- **Its input**, with volatile fields and `ignore_paths` masked as in the
+  comparison. A node downstream of a change gets a new input, so it re-runs.
+- **Its code fingerprint**: the node function's source, defaults and closure
+  values, plus the values of the module-level names it uses, following the
+  functions, classes and modules of your project the same way. Library code
+  counts by name, and other objects (a chat model client, say) by their repr.
+
+Everything else runs live: changed nodes, nodes that are not plain functions
+(subgraphs, `ToolNode`) and every node of an older cassette with no recorded
+inputs. What a node reads at run time (files, environment variables, network) and
+dependency upgrades are not part of the fingerprint: pass `--live` to either
+command to re-run every node.
+
 ## Use in your repo
 
 Record a baseline first (see Quickstart), commit `lgcov.yaml` and your cassettes,
@@ -102,8 +120,9 @@ jobs:
 
 - Each PR gets one report comment, updated in place on every push. PRs from forks get
   a read-only token, so there the report goes to the job summary instead.
-- `root-drift` and `any-drift` fail the same PRs for now: until replay records node
-  inputs, the first node to drift in each run counts as root.
+- `root-drift` and `any-drift` fail the same PRs for now: until replay classifies
+  drift by the node inputs it records, the first node to drift in each run counts
+  as root.
 - Exit codes: 0 pass, 1 drift that `fail-on` cares about, 2 harness error (install,
   graph load or replay crashed), which is never reported as a regression.
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
