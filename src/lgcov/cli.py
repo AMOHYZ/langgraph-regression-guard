@@ -7,26 +7,57 @@ import importlib.util
 import json
 import os
 import sys
-from dataclasses import asdict, replace
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
+from time import perf_counter
 from types import CodeType
 from typing import Any
 
-from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay, replay_steps
-from lgcov.ci_report import CiResult, render_ci_report
+import yaml
+
+from lgcov.cassette import (
+    ON_DIVERGENCE,
+    Budget,
+    Cassette,
+    Drift,
+    NodeError,
+    OnDivergence,
+    Replay,
+    Step,
+    accept_nodes,
+    record,
+    replay,
+    replay_run,
+    replay_steps,
+    unservable,
+)
+from lgcov.ci_report import CiResult, Timing, render_ci_report
+from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
-from lgcov.config import load_config
+from lgcov.config import TIERS, Config, GateConfig, Tier, load_config, tier_policy
 from lgcov.coverage import (
     CoverageSnapshot,
     coverage_delta,
     format_coverage_line,
     snapshot_coverage,
 )
-from lgcov.drift_gate import FailOn, drift_exit_code, parse_fail_on, verdict
+from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
 from lgcov.graph_diff import GraphDiff, diff_graphs
+from lgcov.jev_judge import JevJudge
+from lgcov.judges import KPI, FakeJudge, Judge, NodeState
+from lgcov.sampling import (
+    KpiStats,
+    gate_exit_code,
+    gate_kpis,
+    judge_samples,
+    kpi_stats,
+    render_gate_table,
+    render_kpi_table,
+)
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
-from lgcov.taxonomy import load_taxonomy
+from lgcov.taxonomy import KPISpec, load_taxonomy
 
 # 0 = no change / accepted, 1 = graph/replay changed or named node not drifted,
 # 2 = bad input (missing/unreadable/invalid).
@@ -111,17 +142,24 @@ def _drift_kinds(
     counts: dict[str, int] = {}
     roots: set[str] = set()
     for run, run_drifts in zip(runs, drifts, strict=True):
-        drifted = {d.node for d in run_drifts}
-        for node in drifted:
+        for node in {d.node for d in run_drifts}:
             counts[node] = counts.get(node, 0) + 1
-        # nodes the change added are not in the baseline steps; they sort last
-        ordered = [s.node for s in run.steps if s.node in drifted] + sorted(drifted)
-        if ordered:
-            roots.add(ordered[0])
+        root = _run_root(run, run_drifts)
+        if root:
+            roots.add(root)
     return counts, roots
 
 
-def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[str]:
+def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
+    drifted = {d.node for d in run_drifts}
+    # nodes the change added are not in the baseline steps; they sort last
+    ordered = [s.node for s in run.steps if s.node in drifted] + sorted(drifted)
+    return ordered[0] if ordered else None
+
+
+def _replay_markdown(
+    runs: list[Cassette], drifts: list[list[Drift]], not_checked: tuple[str, ...] = ()
+) -> list[str]:
     """Per-node drift table: root or downstream, and in how many runs."""
     counts, roots = _drift_kinds(runs, drifts)
     lines = ["### Cassette replay", ""]
@@ -131,9 +169,32 @@ def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[st
     for node in sorted(counts):
         kind = "root" if node in roots else "downstream"
         lines.append(f"| `{node}` | {kind} | {counts[node]}/{len(runs)} |")
-    unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys())
+    unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys() - set(not_checked))
     if unchanged:
         lines += ["", "Unchanged: " + ", ".join(f"`{n}`" for n in unchanged)]
+    return lines
+
+
+def _divergence_lines(replays: list[Replay], on_divergence: OnDivergence) -> list[str]:
+    """T089: the runs that diverged from the recording, and what that did to them."""
+    runs = list(enumerate(replays, 1))
+    calls = [(f"`{c.node}` in run {i}", c.how) for i, r in runs for c in r.calls]
+    first = [where for where, how in calls if how == "diverged"]
+    after = [where for where, how in calls if how == "after_divergence"]
+    lines = []
+    if first and on_divergence == "flag":
+        lines.append(f"Diverged, so run live (on-divergence: flag): {', '.join(first)}.")
+        lines += [f"Re-executed after divergence: {', '.join(after)}."] if after else []
+    if first and on_divergence == "live":
+        what = "Diverged, so the rest of the run ran live (on-divergence: live)"
+        lines.append(f"{what}: {', '.join(first)}.")
+    for why, label in (("diverged", "on-divergence: fail"), ("budget", "budget hit")):
+        stopped = [
+            f"run {i} from `{r.halt.node}` ({', '.join(f'`{n}`' for n in r.not_checked)})"
+            for i, r in runs
+            if r.halt is not None and r.halt.why == why
+        ]
+        lines += [f"Not checked ({label}): {', '.join(stopped)}."] if stopped else []
     return lines
 
 
@@ -148,7 +209,31 @@ def _harness_error(prog: str, what: str, exc: BaseException) -> int:
     return EXIT_ERROR
 
 
+def _node_failure(prog: str, exc: NodeError) -> int:
+    """T074: a node's own code raised. AGENT_FAIL whatever fail-on says (it governs drift
+    only); network trouble inside the node is INFRA_ERROR instead, and still names the node.
+    """
+    if exc.transport:
+        original = f"{type(exc.original).__name__}: {exc.original}"
+        where = f"harness error (transport) in node `{exc.node}`, not a regression"
+        print(f"{prog}: {where}: {original}", file=sys.stderr)
+        return Outcome.INFRA_ERROR
+    print(f"{prog}: agent failure: {exc}")
+    return Outcome.AGENT_FAIL
+
+
 _LIVE_HELP = "re-run every node; by default a node whose code and input match is served"
+_INCONCLUSIVE_HELP = "exit 1 on an INCONCLUSIVE blocking KPI; overrides gate.inconclusive_blocks"
+
+
+def _budget_arg(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = -1.0
+    if not seconds >= 0:  # also catches nan
+        raise argparse.ArgumentTypeError(f"must be a number of seconds >= 0, got {value!r}")
+    return seconds
 
 
 def _fail_on_arg(value: str) -> FailOn:
@@ -186,8 +271,10 @@ def _replay(argv: list[str]) -> int:
         return _harness_error("lgcov replay", "cannot read baseline", exc)
     try:
         drifts = [replay(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
-    except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
-        return _harness_error("lgcov replay", "the graph crashed during replay", exc)
+    except NodeError as exc:
+        return _node_failure("lgcov replay", exc)
+    except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
+        return _harness_error("lgcov replay", "replay failed outside node code", exc)
     print("\n".join(_replay_markdown(runs, drifts)))
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
@@ -441,6 +528,8 @@ def _base_diff(base_dir: str | None, target: str, head: GraphSnapshot) -> tuple[
 
 
 def _ci_result(args: argparse.Namespace) -> CiResult:
+    start = perf_counter()
+    budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
     fail_on: FailOn = args.fail_on
     if args.harness_error:
         return CiResult(fail_on, EXIT_ERROR, harness_error=args.harness_error)
@@ -449,16 +538,25 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         cfg = load_config(args.config, overrides)
     except (OSError, ValueError) as exc:
         return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
-    notes: list[str] = []
+    tier: Tier = args.tier or cfg.tier
+    policy = tier_policy(tier, cfg.samples_per_case)
+    budget.seconds = policy.budget if args.budget_seconds is None else args.budget_seconds
+    l2, advisory, llm_code = None, frozenset[str](), 0
+    llm_notes: list[str] = []
     if args.taxonomy:
         try:
-            tax = load_taxonomy(args.taxonomy)
+            specs = list(load_taxonomy(args.taxonomy).kpi_specs)
+            llm = [s.name for s in specs if s.judge == "llm"]
+            if not policy.llm_judges or _llm_judge is None:
+                specs = [s for s in specs if s.judge != "llm"]
+            l2 = (specs, [_l2_judge(spec) for spec in specs])
         except (OSError, ValueError) as exc:
             return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid taxonomy: {exc}")
-        notes.append(
-            f"Taxonomy `{args.taxonomy}`: {len(tax.kpi_specs)} KPIs, validated. "
-            "L2 judges don't run in the Action yet."
-        )
+        try:
+            advisory = cfg.gate.advisory([*(spec.name for spec in specs), *llm])
+        except ValueError as exc:
+            return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
+        llm_notes, llm_code = _llm_notes(llm, advisory, policy.llm_judges)
     try:
         # Exception: importing user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
@@ -468,35 +566,149 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
             fail_on, EXIT_ERROR, harness_error=_harness_message("cannot load graph", exc)
         )
     graph_lines, graph_note = _base_diff(args.base_dir, cfg.graph_entrypoint, head)
-    partial = CiResult(fail_on, EXIT_ERROR, tuple(graph_lines), graph_note, notes=tuple(notes))
+    partial = CiResult(fail_on, EXIT_ERROR, tuple(graph_lines), graph_note)
     try:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
+    serve = policy.serve and not args.live
+    budget.expected_live = unservable(graph, runs) if serve else sum(len(r.steps) for r in runs)
+    agent_start = perf_counter()
     try:
-        replays = [replay_steps(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
-    except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
-        msg = _harness_message("the graph crashed during replay", exc)
+        replays = [
+            replay_run(graph, run, cfg.ignore_paths, serve, args.on_divergence, budget)
+            for run in runs
+        ]
+    except NodeError as exc:
+        original = f"{type(exc.original).__name__}: {exc.original}"
+        if exc.transport:
+            return replace(partial, harness_error=original, harness_node=exc.node)
+        return replace(
+            partial,
+            exit_code=Outcome.AGENT_FAIL,  # whatever fail-on says: fail-on governs drift only
+            crash=f"Node `{exc.node}` raised {original}",
+            root_drift=(exc.node,),
+        )
+    except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
+        msg = _harness_message("replay failed outside node code", exc)
         return replace(partial, harness_error=msg)
-    drifts = [d for d, _ in replays]
+    agent = perf_counter() - agent_start
+    pairs = [(list(r.drifts), list(r.steps)) for r in replays]
+    drifts = [d for d, _ in pairs]
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
     # T083: coverage of the runs replay just did; nothing executes again for it.
-    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in replays], args.commit)
+    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in pairs], args.commit)
     if args.coverage_out:
         Path(args.coverage_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.coverage_out).write_text(cov.to_json(), encoding="utf-8")
     base, note = _coverage_baseline(args.coverage_baseline)
-    return replace(
+    # T089: nodes a run stopped before (divergence or budget) are INCONCLUSIVE, never a fail.
+    not_checked = tuple(dict.fromkeys(n for r in replays for n in r.not_checked))
+    blocks = args.fail_on_inconclusive or cfg.gate.inconclusive_blocks
+    drift_code = drift_exit_code(fail_on, len(root), len(downstream))
+    l1_code = max(drift_code, int(blocks and bool(not_checked)))
+    diverged = _divergence_lines(replays, args.on_divergence)
+    calls = [c for r in replays for c in r.calls]
+    timing = Timing(
+        0.0,
+        agent,
+        live=sum(1 for c in calls if c.how != "served"),
+        served=sum(1 for c in calls if c.how == "served"),
+        budget=budget.seconds,
+        budget_hit=budget.hit,
+    )
+    result = replace(
         partial,
-        exit_code=drift_exit_code(fail_on, len(root), len(downstream)),
-        replay_lines=tuple(_replay_markdown(runs, drifts)),
+        exit_code=l1_code,
+        replay_lines=(
+            *_replay_markdown(runs, drifts, not_checked),
+            *([""] if diverged else []),
+            *diverged,
+        ),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
-        notes=(*partial.notes, note) if note else partial.notes,
+        notes=(
+            *llm_notes,
+            *([note] if note else []),
+            *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
+        ),
+        tier=tier,
+        not_checked=not_checked,
+        timing=replace(timing, total=perf_counter() - start),
     )
+    if l2 is None:
+        return result
+    judge_start = perf_counter()
+    try:
+        stats, gate = _ci_gate(args, cfg, policy.k, advisory, *l2, runs, pairs)
+    except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
+        msg = _harness_message("L2 gate failed", exc)
+        return replace(result, exit_code=l1_code or EXIT_ERROR, harness_error=msg)
+    tokens = [s.tokens_total for s in stats if s.tokens_total]  # code judges report 0
+    judged = replace(
+        timing,
+        judges=perf_counter() - judge_start,
+        judge_calls=sum(s.samples for s in stats),
+        tokens=sum(tokens) if tokens else None,
+    )
+    gate_code = gate_exit_code(stats, gate.inconclusive_blocks)
+    return replace(
+        result,
+        exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code, llm_code),
+        l2_lines=(
+            (*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats))
+            if stats
+            else ()
+        ),
+        blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
+        inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
+        timing=replace(judged, total=perf_counter() - start),
+    )
+
+
+def _llm_notes(
+    llm: list[str], advisory: frozenset[str], tier_runs_them: bool
+) -> tuple[list[str], int]:
+    """T089: the `judge: llm` KPIs this run won't judge, and the exit code that leaves: on
+    nightly, INFRA_ERROR when one with no client blocks; an advisory one is only shown."""
+    if not llm or (tier_runs_them and _llm_judge is not None):
+        return [], 0
+    if not tier_runs_them:
+        return [f"Nightly only (`judge: llm`): {_quoted(llm)}."], 0
+    blocking = [n for n in llm if n not in advisory]
+    notes = [f"⚠️ No llm client for {_quoted(blocking)}: INFRA_ERROR."] if blocking else []
+    quiet = [n for n in llm if n in advisory]
+    notes += [f"⚠️ Skipped, no llm client: {_quoted(quiet)} (advisory)."] if quiet else []
+    return notes, EXIT_ERROR if blocking else 0
+
+
+def _quoted(names: list[str]) -> str:
+    return ", ".join(f"`{n}`" for n in names)
+
+
+def _ci_gate(
+    args: argparse.Namespace,
+    cfg: Config,
+    k: int,
+    advisory: frozenset[str],
+    specs: list[KPISpec],
+    judges: list[Judge],
+    runs: list[Cassette],
+    replays: list[tuple[list[Drift], list[Step]]],
+) -> tuple[list[KpiStats], GateConfig]:
+    """T091: the L2 gate on recorded vs replayed outputs, as `lgcov judge` runs it."""
+    plan = _l2_plan(specs, runs, replays)
+    _, model = _l2_calls(plan, k)
+    if model > args.max_calls:
+        raise ValueError(
+            f"refusing to make {model} model judge calls (more than --max-calls "
+            f"{args.max_calls}); lower samples_per_case or raise --max-calls"
+        )
+    gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
+    return _l2_gate(plan, judges, k, gate, runs, replays, advisory), gate
 
 
 def _coverage_baseline(path: str | None) -> tuple[CoverageSnapshot | None, str]:
@@ -517,7 +729,7 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
     ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
     ap.add_argument("--cassette-dir", help="overrides cassette_dir")
-    ap.add_argument("--taxonomy", help="validate this taxonomy.yaml (L2 doesn't run yet)")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml: gate its KPIs (L2) on the replay")
     ap.add_argument("--base-dir", help="checkout of the PR's base commit, for the graph diff")
     ap.add_argument("--fail-on", type=_fail_on_arg, default="root-drift", help="exit 1 on")
     ap.add_argument("--harness-error", help="an earlier step failed; report it and exit 2")
@@ -525,6 +737,23 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--coverage-out", help="write this run's coverage.json here")
     ap.add_argument("--coverage-baseline", help="main's coverage.json; missing = no baseline yet")
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""), help="commit SHA")
+    ap.add_argument("--max-calls", type=int, default=200, help="refuse more model judge calls")
+    ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
+    ap.add_argument(
+        "--on-divergence",
+        choices=ON_DIVERGENCE,
+        default="flag",
+        help="a served node's input no longer matches: flag (run it live), live (run the "
+        "rest of the run live) or fail (leave the rest of the run not checked)",
+    )
+    ap.add_argument(
+        "--budget-seconds",
+        type=_budget_arg,
+        help="stop starting live node calls once the run is projected to take longer; "
+        "default: the tier's (90 on pr, none on nightly)",
+    )
+    ap.add_argument("--tier", choices=TIERS, help="pr (default) or nightly; overrides tier")
+    ap.add_argument("--nightly-url", help="main's latest nightly run, linked in the report")
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()
@@ -538,11 +767,260 @@ def _ci(argv: list[str]) -> int:
             "propagated-drift-count": len(result.propagated_drift),
             "report-path": report,
             "root-drift-count": len(result.root_drift),
+            "tier": result.tier,
             "verdict": verdict(result.exit_code),
         }
         with open(args.github_output, "a", encoding="utf-8") as f:
             f.writelines(f"{k}={v}\n" for k, v in outputs.items())
     return result.exit_code
+
+
+_FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
+# T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
+# never runs one, and a nightly run reports the KPIs it couldn't judge.
+_llm_judge: Callable[[KPI], Judge] | None = None
+
+
+def _l2_judge(spec: KPISpec) -> Judge:
+    kpi = spec.to_kpi()
+    if spec.judge == "code":
+        return code_judge(kpi, spec.check or {})
+    if spec.judge == "llm":
+        if _llm_judge is None:
+            raise ValueError(f"KPI '{spec.name}': judge llm needs a general LLM judge client")
+        return _llm_judge(kpi)
+    if spec.judge == "fake":
+        check = spec.check or {}
+        unknown = sorted(set(check) - set(_FAKE_CHECK_KEYS))
+        if unknown:
+            raise ValueError(
+                f"KPI '{spec.name}': fake check keys {unknown} not in {_FAKE_CHECK_KEYS}"
+            )
+        every = check.get("fail_every", "0")
+        if not every.isdigit():
+            raise ValueError(f"KPI '{spec.name}': fail_every must be a whole number")
+        when = check.get("when_input_contains", "")
+        return FakeJudge(kpi, "pass", fail_every=int(every), when_input_contains=when)
+    return JevJudge(kpi)
+
+
+_Cases = dict[str, tuple[NodeState, NodeState]]
+
+
+def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> _Cases:
+    """One case per run: the trace for code judges, else the node's own input and output."""
+    cases: _Cases = {}
+    for i, steps in enumerate(runs):
+        case_id = f"run-{i}/{spec.node}"
+        if spec.judge == "code":
+            cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps]}})
+            continue
+        if spec.node == "final":
+            step = steps[-1] if steps else None
+        else:
+            step = next((s for s in steps if s.node == spec.node), None)
+        if step is not None:
+            node_in = step.input if isinstance(step.input, dict) else {}
+            node_out = step.output if isinstance(step.output, dict) else {"output": step.output}
+            cases[case_id] = (node_in, node_out)
+    return cases
+
+
+def _l2_plan(
+    specs: list[KPISpec], runs: list[Cassette], replays: list[tuple[list[Drift], list[Step]]]
+) -> list[tuple[KPISpec, _Cases, _Cases]]:
+    base, fresh = [r.steps for r in runs], [steps for _, steps in replays]
+    return [(spec, _l2_cases(spec, base), _l2_cases(spec, fresh)) for spec in specs]
+
+
+def _l2_calls(plan: list[tuple[KPISpec, _Cases, _Cases]], k: int) -> tuple[int, int]:
+    """Judge calls in all, and those to model judges (every judge but code ones)."""
+    total = sum((len(b) + len(n)) * k for _, b, n in plan)
+    return total, sum((len(b) + len(n)) * k for spec, b, n in plan if spec.judge != "code")
+
+
+def _l2_gate(
+    plan: list[tuple[KPISpec, _Cases, _Cases]],
+    judges: list[Judge],
+    k: int,
+    gate: GateConfig,
+    runs: list[Cassette],
+    replays: list[tuple[list[Drift], list[Step]]],
+    advisory: frozenset[str],
+) -> list[KpiStats]:
+    """T091: k samples per case on both sides, each case paired, then gated across KPIs."""
+    run_roots = [_run_root(r, d) for r, (d, _) in zip(runs, replays, strict=True)]
+    stats = []
+    for (spec, base, new), judge in zip(plan, judges, strict=True):
+        base_samples = {c: judge_samples(judge, i, o, k) for c, (i, o) in base.items()}
+        new_samples = {c: judge_samples(judge, i, o, k) for c, (i, o) in new.items()}
+        roots = {f"run-{i}/{spec.node}": r for i, r in enumerate(run_roots) if r}
+        stats.append(
+            kpi_stats(
+                spec.to_kpi(),
+                k,
+                base_samples,
+                new_samples,
+                gate.margin if spec.margin is None else spec.margin,
+                code=spec.judge == "code",
+                alpha=gate.alpha,
+                power=gate.power,
+                case_roots=roots,
+            )
+        )
+    return gate_kpis(stats, advisory, gate.alpha)
+
+
+def _judge_cmd(argv: list[str]) -> int:
+    """T073: the taxonomy's judges, k samples per case, on recorded and fresh outputs."""
+    ap = argparse.ArgumentParser(prog="lgcov judge")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
+    ap.add_argument("--cassette-dir", help="overrides cassette_dir")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml; overrides taxonomy_path")
+    ap.add_argument("--samples", type=int, help="k samples per case; overrides samples_per_case")
+    ap.add_argument("--max-calls", type=int, default=200, help="refuse more model judge calls")
+    ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
+    ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
+    args = ap.parse_args(argv)
+    overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
+    try:
+        cfg = load_config(args.config, overrides)
+    except (OSError, ValueError) as exc:
+        print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
+    k = (cfg.samples_per_case or 1) if args.samples is None else args.samples
+    taxonomy_path = args.taxonomy or cfg.taxonomy_path
+    if k < 1 or not taxonomy_path:
+        print(
+            "lgcov judge: needs a taxonomy (--taxonomy or taxonomy_path) and k >= 1",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    try:
+        specs = list(load_taxonomy(taxonomy_path).kpi_specs)
+        skipped = [s.name for s in specs if s.judge == "llm" and _llm_judge is None]
+        specs = [s for s in specs if s.name not in skipped]
+        judges = [_l2_judge(spec) for spec in specs]
+    except (OSError, ValueError) as exc:
+        print(f"lgcov judge: invalid taxonomy: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if skipped:
+        print("Skipped, no llm client: " + ", ".join(f"`{n}`" for n in skipped) + ".")
+    try:
+        advisory = gate.advisory([*(spec.name for spec in specs), *skipped])
+    except ValueError as exc:
+        print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        # Exception: importing user graph code can raise anything.
+        graph = _load_graph(cfg.graph_entrypoint)
+    except Exception as exc:
+        return _harness_error("lgcov judge", "cannot load graph", exc)
+    try:
+        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _harness_error("lgcov judge", "cannot read baseline", exc)
+    try:
+        replays = [replay_steps(graph, r, cfg.ignore_paths, serve=not args.live) for r in runs]
+    except NodeError as exc:
+        return _node_failure("lgcov judge", exc)
+    except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
+        return _harness_error("lgcov judge", "replay failed outside node code", exc)
+    plan = _l2_plan(specs, runs, replays)
+    total, model = _l2_calls(plan, k)
+    print(f"Planned: {total} judge calls, {model} to model judges (--max-calls {args.max_calls})")
+    if model > args.max_calls:
+        print(
+            f"lgcov judge: refusing to make {model} model judge calls (more than "
+            f"--max-calls {args.max_calls}); lower --samples or raise --max-calls",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    stats = _l2_gate(plan, judges, k, gate, runs, replays, advisory)
+    print(
+        "\n".join([*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)])
+    )
+    return gate_exit_code(stats, gate.inconclusive_blocks)
+
+
+@dataclass(frozen=True)
+class _Expected:
+    outcome: Outcome
+    root: str | None  # the node lgcov must blame, if any
+    fail_on: FailOn
+    cassette_dir: str  # relative to the fixture folder
+
+
+def _expected(path: Path) -> _Expected:
+    raw: object = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("must be a mapping")
+    names = {o.name: o for o in Outcome}
+    outcome, root = raw.get("outcome"), raw.get("root")
+    if outcome not in names:
+        raise ValueError(f"outcome must be one of {sorted(names)}, got {outcome!r}")
+    if root is not None and not isinstance(root, str):
+        raise ValueError("root must be a node name")
+    return _Expected(
+        outcome=names[str(outcome)],
+        root=root,
+        fail_on=parse_fail_on(str(raw.get("fail_on", "root-drift"))),
+        cassette_dir=str(raw.get("cassette_dir", "../cassettes")),
+    )
+
+
+def _selfcheck_cmd(argv: list[str]) -> int:
+    """T074: run the harness on fixtures whose outcome is known; a mismatch is a lgcov bug."""
+    ap = argparse.ArgumentParser(prog="lgcov selfcheck")
+    ap.add_argument("--dir", default="tests/fixtures/selfcheck", help="fixture folders")
+    args = ap.parse_args(argv)
+    fixtures = sorted(p.parent for p in Path(args.dir).glob("*/expected.yaml"))
+    if not fixtures:
+        print(f"lgcov selfcheck: no fixtures (*/expected.yaml) under {args.dir}", file=sys.stderr)
+        return EXIT_ERROR
+    rows, all_ok = [], True
+    for fixture in fixtures:
+        try:
+            want = _expected(fixture / "expected.yaml")
+        except (OSError, ValueError) as exc:
+            print(f"lgcov selfcheck: {fixture.name}/expected.yaml: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        # The same path the GitHub Action takes (`lgcov ci`), on this fixture alone.
+        result = _ci_result(
+            argparse.Namespace(
+                fail_on=want.fail_on,
+                harness_error=None,
+                graph=f"{fixture / 'graph.py'}:graph",
+                cassette_dir=str(fixture / want.cassette_dir),
+                config=str(fixture / "lgcov.yaml"),  # usually absent: defaults
+                taxonomy=None,
+                base_dir=None,
+                live=False,
+                coverage_out=None,
+                coverage_baseline=None,
+                commit="",
+                max_calls=200,
+                fail_on_inconclusive=False,
+                on_divergence="flag",
+                budget_seconds=None,
+                tier=None,
+                nightly_url=None,
+            )
+        )
+        actual = Outcome(result.exit_code)
+        ok = actual == want.outcome and (want.root is None or want.root in result.root_drift)
+        all_ok = all_ok and ok
+        expected = want.outcome.name + (f" @ {want.root}" if want.root else "")
+        root = ", ".join(result.root_drift) or "—"
+        rows.append(
+            f"| {fixture.name} | {expected} | {actual.name} | {root} | {'✓' if ok else '✗'} |"
+        )
+    print(
+        "\n".join(["| fixture | expected | actual | root | ok |", "|---|---|---|---|---|", *rows])
+    )
+    return 0 if all_ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -556,6 +1034,10 @@ def main(argv: list[str] | None = None) -> int:
         return _replay(argv[1:])
     if argv[:1] == ["snapshot"]:
         return _snapshot(argv[1:])
+    if argv[:1] == ["selfcheck"]:
+        return _selfcheck_cmd(argv[1:])
+    if argv[:1] == ["judge"]:
+        return _judge_cmd(argv[1:])
     if argv[:1] == ["coverage"]:
         return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:

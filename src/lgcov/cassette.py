@@ -1,11 +1,16 @@
 import json
 import threading
+import time
+from collections import Counter
 from collections.abc import Callable, Sequence
 from copy import copy, deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from statistics import fmean
 from types import FunctionType
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
+import httpx
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import START
 
 from lgcov.fingerprint import fingerprint
@@ -52,7 +57,7 @@ def record(graph: Any, inputs: dict[str, Any]) -> Cassette:
     versions and would break mypy --strict on upgrades. A Protocol can replace
     it later.
     """
-    return Cassette(inputs=inputs, steps=_run(graph, inputs, (), ()))
+    return Cassette(inputs=inputs, steps=_run(graph, inputs, (), ())[0])
 
 
 def _key(value: Any, ignore_paths: Sequence[str]) -> str | None:
@@ -63,33 +68,169 @@ def _key(value: Any, ignore_paths: Sequence[str]) -> str | None:
         return None
 
 
+# Network trouble is not the agent's fault, even when it surfaces inside a node (T074).
+TRANSPORT_ERRORS = (TimeoutError, ConnectionError, httpx.TransportError)
+
+
+class NodeError(Exception):
+    """A node's own code raised during replay: the agent broke, unless `transport`."""
+
+    def __init__(self, node: str, original: Exception) -> None:
+        super().__init__(f"node `{node}` raised {type(original).__name__}: {original}")
+        self.node = node
+        self.original = original
+        self.transport = isinstance(original, TRANSPORT_ERRORS)
+
+
+# T089: what replay does when a node's code matches the recording but its input doesn't.
+OnDivergence = Literal["fail", "flag", "live"]
+ON_DIVERGENCE: tuple[OnDivergence, ...] = ("fail", "flag", "live")
+
+
+@dataclass(frozen=True)
+class Call:
+    """T089: one node call in a replay. `diverged`: the first call in its run whose code
+    matched the recording but whose input didn't, so it ran live; `after_divergence`: a
+    call that ran live after that."""
+
+    node: str
+    how: Literal["served", "live", "diverged", "after_divergence"]
+    seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class Halt:
+    """T089: where a replayed run stopped. That node and the rest of the run aren't checked."""
+
+    node: str
+    why: Literal["diverged", "budget"]
+
+
+class _Halted(Exception):
+    def __init__(self, halt: Halt) -> None:
+        super().__init__(f"replay stopped at `{halt.node}` ({halt.why})")
+        self.halt = halt
+
+
+def over_budget(elapsed: float, live: Sequence[float], remaining: int, budget: float) -> bool:
+    """T089: elapsed time plus the mean live call times the calls still to come is over."""
+    return elapsed + fmean(live) * remaining > budget
+
+
+@dataclass
+class Budget:
+    """T089: one wall-clock budget for a run's live node calls. It is checked before each
+    live call, never during one: a call that has started finishes."""
+
+    seconds: float | None
+    clock: Callable[[], float] = time.perf_counter
+    expected_live: int = 0  # live calls expected in all, from `unservable`
+    live: list[float] = field(default_factory=list)  # each live call's seconds so far
+    hit: tuple[str, float] | None = None  # the node it stopped at, and seconds elapsed
+    start: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.start = self.clock()
+
+    def allows(self, node: str) -> bool:
+        if self.hit is not None:
+            return False
+        if self.seconds is None or not self.live:
+            return True  # nothing measured yet: the first live call always runs
+        elapsed = self.clock() - self.start
+        if over_budget(
+            elapsed, self.live, max(1, self.expected_live - len(self.live)), self.seconds
+        ):
+            self.hit = (node, elapsed)
+            return False
+        return True
+
+
+def _codes(graph: Any) -> dict[str, str | None]:
+    # The plain-function nodes replay wraps, by name; subgraphs and the like run untouched.
+    codes: dict[str, str | None] = {}
+    for name, spec in getattr(graph, "nodes", {}).items():
+        fn = getattr(spec.bound, "func", None)
+        if name != START and isinstance(fn, FunctionType):
+            codes[name] = fingerprint(fn)
+    return codes
+
+
+def unservable(graph: Any, cassettes: Sequence[Cassette]) -> int:
+    """T089: recorded steps replay can't serve, since their node's code changed or they
+    have no input or fingerprint: the live calls a budget projects from."""
+    codes = _codes(graph)
+    return sum(
+        1
+        for c in cassettes
+        for s in c.steps
+        if s.code is None or s.input is None or codes.get(s.node) != s.code
+    )
+
+
 def _run(
-    graph: Any, inputs: dict[str, Any], served: Sequence[Step], ignore_paths: Sequence[str]
-) -> list[Step]:
-    """Stream the graph once; return its steps with each node's input and fingerprint.
+    graph: Any,
+    inputs: dict[str, Any],
+    served: Sequence[Step],
+    ignore_paths: Sequence[str],
+    on_divergence: OnDivergence = "flag",
+    budget: Budget | None = None,
+) -> tuple[list[Step], list[Call], Halt | None]:
+    """Stream the graph once; return its steps with each node's input and fingerprint, how
+    each call ran, and where the run stopped, if it stopped early.
 
     Each plain-function node is wrapped: a call whose fingerprint and masked input match an
     unused step of `served` returns that step's output instead of running the node.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     unused = [(s, _key(s.input, ignore_paths)) for s in served if s.code is not None]
+    recorded = {(s.node, s.code) for s in served if s.code is not None}
     calls: list[tuple[str, Any, Any, str | None]] = []  # node, input, returned, fingerprint
+    log: list[Call] = []
+    run = {"diverged": False, "live": False}  # diverged yet; on_divergence="live" took over
+    clock = time.perf_counter if budget is None else budget.clock
 
     def wrap(name: str, fn: Callable[..., Any], code: str | None) -> Callable[..., Any]:
         def call(state: Any, *args: Any, **kwargs: Any) -> Any:
             key = _key(state, ignore_paths)
             snapshot = deepcopy(state) if key is not None else None  # before fn can mutate it
             hit: Step | None = None
+            diverged = False
             if code is not None and key is not None:
                 with lock:
                     want = (name, code, key)
                     i = next(
                         (i for i, (s, k) in enumerate(unused) if (s.node, s.code, k) == want), None
                     )
-                    hit = None if i is None else unused.pop(i)[0]
-            out = deepcopy(hit.output) if hit is not None else fn(state, *args, **kwargs)
-            if key is not None:
-                with lock:
+                    if i is not None and not run["live"]:
+                        hit = unused.pop(i)[0]
+                    diverged = hit is None and not run["diverged"] and (name, code) in recorded
+                    run["diverged"] = run["diverged"] or diverged
+            how: Literal["served", "live", "diverged", "after_divergence"] = "served"
+            seconds = 0.0
+            if hit is not None:
+                out = deepcopy(hit.output)
+            else:
+                how = "diverged" if diverged else "after_divergence" if run["diverged"] else "live"
+                if diverged and on_divergence == "fail":
+                    raise _Halted(Halt(name, "diverged"))
+                if diverged and on_divergence == "live":
+                    run["live"] = True
+                if budget is not None and not budget.allows(name):
+                    raise _Halted(Halt(name, "budget"))
+                start = clock()
+                try:
+                    out = fn(state, *args, **kwargs)
+                except GraphBubbleUp:
+                    raise  # LangGraph's own control flow (interrupt, Command), not a crash
+                except Exception as exc:
+                    raise NodeError(name, exc) from exc
+                seconds = clock() - start
+            with lock:
+                log.append(Call(name, how, seconds))
+                if budget is not None and hit is None:
+                    budget.live.append(seconds)
+                if key is not None:
                     calls.append((name, snapshot, out, code))
             return out
 
@@ -97,25 +238,28 @@ def _run(
 
     original = getattr(graph, "nodes", {})  # an object with only .stream() runs as it is
     nodes = dict(original)
-    for name, spec in original.items():
-        fn = getattr(spec.bound, "func", None)
-        if name != START and isinstance(fn, FunctionType):  # subgraphs etc. run untouched
-            bound = copy(spec.bound)  # LangGraph's node runnable calls .func on invoke
-            bound.func = wrap(name, fn, fingerprint(fn))
-            nodes[name] = spec.copy({"bound": bound})
+    for name, code in _codes(graph).items():
+        spec = original[name]
+        bound = copy(spec.bound)  # LangGraph's node runnable calls .func on invoke
+        bound.func = wrap(name, spec.bound.func, code)
+        nodes[name] = spec.copy({"bound": bound})
     runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
-    for chunk in runner.stream(inputs, stream_mode="updates"):
-        for node, update in chunk.items():
-            with lock:  # the call that made this update (a returned {} streams as None)
-                i = next(
-                    (i for i, c in enumerate(calls) if (c[0], c[2] or None) == (node, update)), None
+    try:
+        for chunk in runner.stream(inputs, stream_mode="updates"):
+            for node, update in chunk.items():
+                with lock:  # the call that made this update (a returned {} streams as None)
+                    i = next(
+                        (i for i, c in enumerate(calls) if (c[0], c[2] or None) == (node, update)),
+                        None,
+                    )
+                    call = None if i is None else calls.pop(i)
+                steps.append(
+                    Step(node, update) if call is None else Step(node, update, call[1], call[3])
                 )
-                call = None if i is None else calls.pop(i)
-            steps.append(
-                Step(node, update) if call is None else Step(node, update, call[1], call[3])
-            )
-    return steps
+    except _Halted as stop:
+        return steps, log, stop.halt
+    return steps, log, None
 
 
 def _by_node(steps: list[Step], ignore_paths: Sequence[str] = ()) -> dict[str, list[str]]:
@@ -146,15 +290,51 @@ def replay_steps(
     """`replay`, plus the fresh run's steps in order (served ones included), so coverage
     can reuse the run instead of executing the graph again.
     """
-    expected = _by_node(cassette.steps, ignore_paths)
-    fresh = _run(graph, cassette.inputs, cassette.steps if serve else (), ignore_paths)
-    actual = _by_node(fresh, ignore_paths)
-    drifts = [
+    r = replay_run(graph, cassette, ignore_paths, serve)
+    return list(r.drifts), list(r.steps)
+
+
+@dataclass(frozen=True)
+class Replay:
+    """T089: one cassette replayed: drift, the fresh steps, how each call ran and, if the
+    run stopped early, the nodes from there on that weren't checked."""
+
+    drifts: tuple[Drift, ...]
+    steps: tuple[Step, ...]
+    calls: tuple[Call, ...]
+    halt: Halt | None = None
+    not_checked: tuple[str, ...] = ()  # the halted node first, then the recorded ones after
+
+
+def replay_run(
+    graph: Any,
+    cassette: Cassette,
+    ignore_paths: Sequence[str] = (),
+    serve: bool = False,
+    on_divergence: OnDivergence = "flag",
+    budget: Budget | None = None,
+) -> Replay:
+    """`replay_steps` under a divergence policy and a budget, with how each call ran."""
+    served = cassette.steps if serve else ()
+    fresh, calls, halt = _run(graph, cassette.inputs, served, ignore_paths, on_divergence, budget)
+    recorded = cassette.steps
+    not_checked: tuple[str, ...] = ()
+    if halt is not None:  # compare only what the run reached: each node's first k steps
+        reached, seen = Counter(s.node for s in fresh), Counter[str]()
+        recorded = []
+        for s in cassette.steps:
+            if seen[s.node] < reached[s.node]:
+                recorded.append(s)
+                seen[s.node] += 1
+        later = [n for n in dict.fromkeys(s.node for s in cassette.steps) if n not in reached]
+        not_checked = (halt.node, *(n for n in later if n != halt.node))
+    expected, actual = _by_node(recorded, ignore_paths), _by_node(fresh, ignore_paths)
+    drifts = tuple(
         Drift(node=n, expected=expected.get(n), actual=actual.get(n))
         for n in sorted(expected.keys() | actual.keys())
         if expected.get(n) != actual.get(n)
-    ]
-    return drifts, fresh
+    )
+    return Replay(drifts, tuple(fresh), tuple(calls), halt, not_checked)
 
 
 def accept_nodes(baseline: Cassette, fresh: Cassette, nodes: set[str]) -> tuple[Cassette, set[str]]:

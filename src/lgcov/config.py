@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import yaml
 
@@ -20,23 +21,82 @@ class Thresholds:
 
 
 @dataclass(frozen=True)
+class GateConfig:
+    """T091: the L2 gate's paired test. Every KPI blocks unless it is advisory."""
+
+    alpha: float = 0.05
+    power: float = 0.8
+    margin: float = 0.05  # non-inferiority margin δ; a KPI's own margin in taxonomy.yaml wins
+    blocking_kpis: tuple[str, ...] | None = None  # None: every KPI not in advisory_kpis
+    advisory_kpis: tuple[str, ...] = ()
+    inconclusive_blocks: bool = False  # True: an INCONCLUSIVE blocking KPI exits 1, not 0
+
+    def advisory(self, kpis: Collection[str]) -> frozenset[str]:
+        """The advisory KPIs among a taxonomy's. A name the taxonomy doesn't have is an error."""
+        unknown = sorted((set(self.advisory_kpis) | set(self.blocking_kpis or ())) - set(kpis))
+        if unknown:
+            raise ValueError(
+                f"lgcov.yaml: gate names KPIs {unknown} that the taxonomy doesn't have "
+                f"(it has {sorted(kpis)})"
+            )
+        if self.blocking_kpis is None:
+            return frozenset(self.advisory_kpis)
+        return frozenset(k for k in kpis if k not in self.blocking_kpis)
+
+
+# T089: pr runs on every push, cheap and within a budget; nightly runs everything, live.
+Tier = Literal["pr", "nightly"]
+TIERS: tuple[Tier, ...] = ("pr", "nightly")
+
+
+@dataclass(frozen=True)
+class TierPolicy:
+    serve: bool  # serve unchanged nodes from the cassette
+    k: int  # judge samples per case
+    budget: float | None  # seconds for live node calls; None: no budget
+    llm_judges: bool  # run `judge: llm` KPIs
+
+
+def tier_policy(tier: Tier, samples_per_case: int | None) -> TierPolicy:
+    """pr: unchanged nodes served, k = 1, 90 s, no general LLM judges. nightly: every node
+    live, every judge, k from samples_per_case (3 if unset), no budget."""
+    if tier == "pr":
+        return TierPolicy(serve=True, k=1, budget=90.0, llm_judges=False)
+    return TierPolicy(serve=False, k=samples_per_case or 3, budget=None, llm_judges=True)
+
+
+@dataclass(frozen=True)
 class Config:
     graph_entrypoint: str  # "<module or file.py>:<attr>"
     cassette_dir: str = "cassettes"
     taxonomy_path: str | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
     ignore_paths: tuple[str, ...] = ()  # JSON pointers into node I/O, e.g. /meta/nonce
+    samples_per_case: int | None = None  # T073: k verdicts per case; None: the tier's (T089)
+    gate: GateConfig = field(default_factory=GateConfig)
+    tier: Tier = "pr"
 
 
 _KEYS = (
     "cassette_dir",
+    "gate",
     "graph_entrypoint",
     "ignore_paths",
+    "samples_per_case",
     "taxonomy",  # alias for taxonomy_path
     "taxonomy_path",
     "thresholds",
+    "tier",
 )
 _THRESHOLD_KEYS = ("fail_on", "max_drifted_nodes", "min_node_coverage")
+_GATE_KEYS = (
+    "advisory_kpis",
+    "alpha",
+    "blocking_kpis",
+    "inconclusive_blocks",
+    "margin",
+    "power",
+)
 
 
 def _check_keys(d: Mapping[str, object], valid: tuple[str, ...], where: str) -> None:
@@ -55,6 +115,12 @@ def _str_list(value: object, key: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ValueError(f"lgcov.yaml: '{key}' must be a list of strings")
     return tuple(value)
+
+
+def _positive_int(value: object, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"lgcov.yaml: '{key}' must be a positive integer")
+    return value
 
 
 def _nonneg_int(value: object, key: str) -> int:
@@ -81,6 +147,45 @@ def _thresholds(raw: object) -> Thresholds:
         max_drifted_nodes=capped,
         fail_on=fail_on,
     )
+
+
+def _probability(value: object, key: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 < value < 1:
+        raise ValueError(f"lgcov.yaml: 'gate.{key}' must be a number between 0 and 1")
+    return float(value)
+
+
+def _gate(raw: object) -> GateConfig:
+    if not isinstance(raw, dict):
+        raise ValueError("lgcov.yaml: 'gate' must be a mapping")
+    _check_keys(raw, _GATE_KEYS, "lgcov.yaml: gate")
+    margin = raw.get("margin", 0.05)
+    if isinstance(margin, bool) or not isinstance(margin, int | float) or not 0 <= margin <= 1:
+        raise ValueError("lgcov.yaml: 'gate.margin' must be a number in 0..1")
+    blocking = raw.get("blocking_kpis")
+    blocking_kpis = None if blocking is None else _str_list(blocking, "gate.blocking_kpis")
+    advisory_kpis = _str_list(raw.get("advisory_kpis", []), "gate.advisory_kpis")
+    both = sorted(set(blocking_kpis or ()) & set(advisory_kpis))
+    if both:
+        raise ValueError(f"lgcov.yaml: gate KPIs {both} are both blocking and advisory")
+    inconclusive_blocks = raw.get("inconclusive_blocks", False)
+    if not isinstance(inconclusive_blocks, bool):
+        raise ValueError("lgcov.yaml: 'gate.inconclusive_blocks' must be true or false")
+    return GateConfig(
+        alpha=_probability(raw.get("alpha", 0.05), "alpha"),
+        power=_probability(raw.get("power", 0.8), "power"),
+        margin=float(margin),
+        blocking_kpis=blocking_kpis,
+        advisory_kpis=advisory_kpis,
+        inconclusive_blocks=inconclusive_blocks,
+    )
+
+
+def _tier(value: object) -> Tier:
+    for tier in TIERS:
+        if value == tier:
+            return tier
+    raise ValueError(f"lgcov.yaml: 'tier' must be one of {list(TIERS)}, got {value!r}")
 
 
 def _taxonomy_path(d: Mapping[str, object]) -> str | None:
@@ -120,6 +225,13 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         taxonomy_path=_taxonomy_path(d),
         thresholds=_thresholds(d.get("thresholds", {})),
         ignore_paths=ignore,
+        samples_per_case=(
+            None
+            if "samples_per_case" not in d
+            else _positive_int(d["samples_per_case"], "samples_per_case")
+        ),
+        gate=_gate(d.get("gate", {})),
+        tier=_tier(d.get("tier", "pr")),
     )
 
 

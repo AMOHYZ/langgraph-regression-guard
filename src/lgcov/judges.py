@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -90,15 +91,34 @@ class Judge(Protocol):
 
 
 class FakeJudge:
-    """Deterministic judge for tests: always the same label and confidence."""
+    """Deterministic judge for tests and offline demos: always the same label and confidence.
 
-    def __init__(self, kpi: KPI, label: str, confidence: float = 1.0) -> None:
+    With fail_every=n, every nth call whose input contains `when_input_contains` returns the
+    KPI's lowest-scoring label instead: a reproducible flaky case for pass@k demos (T073).
+    """
+
+    def __init__(
+        self,
+        kpi: KPI,
+        label: str,
+        confidence: float = 1.0,
+        fail_every: int = 0,
+        when_input_contains: str = "",
+    ) -> None:
         self.kpi = kpi
         self.label = label
         self.confidence = confidence
+        self.fail_every = fail_every
+        self.when_input_contains = when_input_contains
+        self._matching_calls = 0
 
     def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
-        return Verdict(self.kpi, self.label, self.kpi.score_map[self.label], self.confidence, {})
+        label = self.label
+        if self.fail_every and self.when_input_contains in json.dumps(node_input, default=str):
+            self._matching_calls += 1
+            if self._matching_calls % self.fail_every == 0:
+                label = min(self.kpi.labels, key=self.kpi.score_map.__getitem__)
+        return Verdict(self.kpi, label, self.kpi.score_map[label], self.confidence, {})
 
 
 def build_judges(kpis: Sequence[KPI], factory: Callable[[KPI], Judge]) -> list[Judge]:

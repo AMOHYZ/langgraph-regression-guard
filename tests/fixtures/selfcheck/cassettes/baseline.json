@@ -1,0 +1,72 @@
+{
+  "runs": [
+    {
+      "inputs": {
+        "question": "Where is my order?"
+      },
+      "steps": [
+        {
+          "code": "3ee93c4f4d2617a0",
+          "input": {
+            "question": "Where is my order?"
+          },
+          "node": "classify",
+          "output": {
+            "needs_tool": true
+          }
+        },
+        {
+          "code": "fc1aebf0ee71fe9a",
+          "input": {
+            "needs_tool": true,
+            "question": "Where is my order?"
+          },
+          "node": "lookup_order",
+          "output": {
+            "tool_result": "order #42: shipped"
+          }
+        },
+        {
+          "code": "396faa94ac0873f3",
+          "input": {
+            "needs_tool": true,
+            "question": "Where is my order?",
+            "tool_result": "order #42: shipped"
+          },
+          "node": "respond",
+          "output": {
+            "answer": "[70] t.\norder #42: shipped\nWhere is my order?"
+          }
+        }
+      ]
+    },
+    {
+      "inputs": {
+        "question": "What are your hours?"
+      },
+      "steps": [
+        {
+          "code": "3ee93c4f4d2617a0",
+          "input": {
+            "question": "What are your hours?"
+          },
+          "node": "classify",
+          "output": {
+            "needs_tool": false
+          }
+        },
+        {
+          "code": "396faa94ac0873f3",
+          "input": {
+            "needs_tool": false,
+            "question": "What are your hours?"
+          },
+          "node": "respond",
+          "output": {
+            "answer": "[54] ise support agent.\n\nWhat are your hours?"
+          }
+        }
+      ]
+    }
+  ]
+}

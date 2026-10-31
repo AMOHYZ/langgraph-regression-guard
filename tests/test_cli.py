@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from lgcov.cli import main
+from lgcov.judges import KPI, NodeState, Verdict
 
 
 def test_cli_prints_added_and_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -482,17 +483,38 @@ def test_cli_unloadable_entrypoint_is_a_harness_error(
     assert "Traceback" not in err
 
 
-def test_cli_replay_crash_inside_the_graph_exits_two(
+def test_cli_replay_node_crash_is_an_agent_failure_even_with_fail_on_never(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cfg, _ = _ab_project(tmp_path)
     crashing = AB_GRAPH.replace('return {"b": "B1"}', 'raise RuntimeError("node b crashed")')
     (tmp_path / "graph.py").write_text(crashing, encoding="utf-8")
     capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 1
+    assert "agent failure: node `b` raised RuntimeError: node b crashed" in capsys.readouterr().out
+    # fail-on governs drift only: a graph that throws is never swallowed.
+    assert main(["replay", "--config", str(cfg), "--fail-on", "never"]) == 1
+
+
+def test_cli_replay_network_error_in_a_node_is_a_harness_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, _ = _ab_project(tmp_path)
+    slow = AB_GRAPH.replace('return {"b": "B1"}', 'raise TimeoutError("provider timed out")')
+    (tmp_path / "graph.py").write_text(slow, encoding="utf-8")
+    capsys.readouterr()
     assert main(["replay", "--config", str(cfg)]) == 2
-    err = capsys.readouterr().err
-    assert "harness error, not a regression" in err
-    assert "node b crashed" in err
+    assert "harness error (transport) in node `b`, not a regression" in capsys.readouterr().err
+
+
+def test_cli_replay_missing_cassette_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    baseline.unlink()
+    capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 2
+    assert "harness error, not a regression" in capsys.readouterr().err
 
 
 def test_cli_replay_summary_json_counts_root_and_propagated(tmp_path: Path) -> None:
@@ -575,6 +597,7 @@ def test_cli_ci_reports_root_drift_and_sets_outputs(
         "propagated-drift-count": "0",
         "report-path": str(tmp_path / "out" / "report.md"),
         "root-drift-count": "1",
+        "tier": "pr",  # T089: the effective tier, for the Action's nightly upload
         "verdict": "fail",
     }
 
@@ -737,3 +760,392 @@ def test_cli_ci_unreadable_coverage_baseline_is_no_baseline_yet(
     assert code == 0  # a bad baseline is a note, never a failure
     assert "(no baseline yet)" in report
     assert "could not read main's coverage.json" in report.lower()
+
+
+# T073: `lgcov judge` runs the taxonomy's judges k times per case, base and fresh outputs.
+DEMO_TAXONOMY = str(FIXTURES / "demo_taxonomy.yaml")
+
+
+def _judge_args(tmp_path: Path) -> list[str]:
+    (tmp_path / "cassettes").mkdir(exist_ok=True)
+    (tmp_path / "cassettes" / "baseline.json").write_text(
+        Path(DEMO_BASELINE).read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    cassettes = str(tmp_path / "cassettes")
+    return ["judge", "--graph", f"{DEMO_GRAPH}:graph", "--cassette-dir", cassettes]
+
+
+def test_cli_judge_samples_three_and_shows_a_flaky_row(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([*_judge_args(tmp_path), "--taxonomy", DEMO_TAXONOMY, "--samples", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "Planned: 24 judge calls, 12 to model judges (--max-calls 200)" in out
+    assert "| respond_runs (n=2, k=3) | 100% | 100% | 0% |" in out
+    assert "| answer_states_order_status (n=2, k=3) | 100% | 50% | ⚠️ 50% |" in out
+    assert "Top flaky cases, answer_states_order_status: `run-0/respond`" in out
+    # T091: the paired gate table; the same flaky case on both sides is no change, and
+    # with no spread in the differences there is no MDE to give.
+    assert "| KPI | n | base | PR | Δ (95% CI) | p adj. | δ | MDE | N* | verdict | root |" in out
+    assert (
+        "| answer_states_order_status | 2 | 83% | 83% | +0.00 [+0.00, +0.00] | 1.000 | 0.05 "
+        "| — | — | 🟢 SHIP | — |"
+    ) in out
+
+
+# T091: base passes both cases and the PR fails its order case: n=2 can't decide that.
+UNDECIDED_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: respond_drift
+    description: The answer loses the order status.
+kpis:
+  - name: answer_states_order_status
+    failure_mode: respond_drift
+    node: respond
+    judge: fake
+    description: The 2nd order answer judged fails; with k=1 that is the PR's.
+    rubric: Does the answer state the order's status?
+    check: {fail_every: "2", when_input_contains: "order"}
+"""
+
+
+def test_cli_judge_inconclusive_exits_zero_unless_gate_inconclusive_blocks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    taxonomy = tmp_path / "taxonomy.yaml"
+    taxonomy.write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    args = [*_judge_args(tmp_path), "--taxonomy", str(taxonomy)]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "| answer_states_order_status | 2 | 100% | 50% |" in out
+    assert "⚠️ INCONCLUSIVE" in out
+    assert "| ⚠️ underpowered: need 6 more cases for answer_states_order_status (N*=8) |" in out
+    config = tmp_path / "lgcov.yaml"
+    config.write_text("gate: {inconclusive_blocks: true}\n", encoding="utf-8")
+    assert main([*args, "--config", str(config)]) == 1
+    assert main([*args, "--fail-on-inconclusive"]) == 1
+
+
+def test_cli_judge_refuses_more_model_calls_than_max_calls(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = [*_judge_args(tmp_path), "--taxonomy", DEMO_TAXONOMY, "--samples", "3"]
+    assert main([*args, "--max-calls", "5"]) == 2
+    err = capsys.readouterr().err
+    assert "12 model judge calls" in err
+    assert "--max-calls 5" in err
+
+
+def test_cli_judge_needs_a_taxonomy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main([*_judge_args(tmp_path), "--config", str(tmp_path / "none.yaml")]) == 2
+    assert "taxonomy" in capsys.readouterr().err
+
+
+# T074: in the Action, a node crash is an agent failure that names the node.
+def test_cli_ci_node_crash_is_an_agent_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    crashing = demo.replace(
+        'return {"needs_tool": "order" in state["question"].lower()}',
+        'raise ValueError("cannot classify")',
+    )
+    assert crashing != demo
+    _ci_project(tmp_path, monkeypatch, crashing)
+    code, report, outputs = _run_ci(tmp_path, "--fail-on", "never")
+    assert code == 1
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: agent failure")
+    assert "Node `classify` raised ValueError: cannot classify" in report
+    assert (outputs["verdict"], outputs["root-drift-count"]) == ("fail", "1")
+
+
+def test_cli_ci_network_error_in_a_node_names_the_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    slow = demo.replace(
+        'return {"needs_tool": "order" in state["question"].lower()}',
+        'raise TimeoutError("provider timed out")',
+    )
+    _ci_project(tmp_path, monkeypatch, slow)
+    code, report, outputs = _run_ci(tmp_path)
+    assert (code, outputs["verdict"]) == (2, "error")
+    assert "⚠️ Harness error (transport) in node `classify`, not a regression" in report
+
+
+def test_cli_ci_missing_cassette_is_a_harness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "cassettes" / "baseline.json").unlink()
+    code, report, _ = _run_ci(tmp_path)
+    assert code == 2
+    assert "⚠️ Harness error, not a regression" in report
+
+
+# T091: with a taxonomy, the Action's run gates the KPIs and the PR comment shows the table.
+def test_cli_ci_gates_kpis_and_fails_on_inconclusive_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    assert (code, outputs["verdict"]) == (0, "pass")
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: inconclusive, needs a human")
+    assert "| answer_states_order_status | 2 | 100% | 50% |" in report
+    assert "| ⚠️ underpowered: need 6 more cases for answer_states_order_status" in report
+    code, report, outputs = _run_ci(
+        tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on-inconclusive"
+    )
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: inconclusive")
+
+
+def test_cli_ci_refuses_more_model_judge_calls_than_max_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--max-calls", "3")
+    assert code == 2  # 4 model judge calls planned: a harness limit, not a regression
+    assert "refusing to make 4 model judge calls" in report
+
+
+# T089: classify rewrites the question (the demo's classify has no prompt), so the nodes
+# after it get inputs the recording doesn't have: they diverge.
+def _rewriting_classify() -> str:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    src = demo.replace(
+        'return {"needs_tool": "order" in state["question"].lower()}',
+        'return {"question": state["question"].lower(), '
+        '"needs_tool": "order" in state["question"].lower()}',
+    )
+    assert src != demo
+    return src
+
+
+def test_cli_ci_divergence_flag_reruns_live_and_marks_what_ran_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    code, report, _ = _run_ci(tmp_path)  # on-divergence: flag, the default
+    assert code == 1  # classify is root drift
+    assert "Diverged, so run live (on-divergence: flag): `lookup_order` in run 1, " in report
+    assert "`respond` in run 2" in report
+    assert "Re-executed after divergence: `respond` in run 1." in report
+    assert "(5 live / 0 served)" in report
+
+
+def test_cli_ci_divergence_fail_leaves_the_rest_of_the_run_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    args = ("--on-divergence", "fail", "--fail-on", "never")
+    code, report, outputs = _run_ci(tmp_path, *args)
+    assert (code, outputs["verdict"]) == (0, "pass")  # INCONCLUSIVE exits 0 by default
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: inconclusive, needs a human")
+    assert (
+        "Not checked (on-divergence: fail): run 1 from `lookup_order` (`lookup_order`, "
+        "`respond`), run 2 from `respond` (`respond`)."
+    ) in report
+    assert "Unchanged:" not in report  # never claim a node that wasn't checked
+    code, _, _ = _run_ci(tmp_path, *args, "--fail-on-inconclusive")
+    assert code == 1  # never 2
+
+
+def test_cli_ci_divergence_live_runs_the_rest_of_each_run_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    _, report, _ = _run_ci(tmp_path, "--on-divergence", "live")
+    assert (
+        "Diverged, so the rest of the run ran live (on-divergence: live): `lookup_order` in "
+        "run 1, `respond` in run 2."
+    ) in report
+
+
+def test_cli_ci_budget_hit_leaves_nodes_not_checked_and_is_never_a_harness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    # 0 s: the first live call runs (nothing measured yet), the next one doesn't start.
+    code, report, _ = _run_ci(tmp_path, "--budget-seconds", "0", "--fail-on", "never")
+    assert code == 0
+    assert "· budget 0 s · budget hit at node `lookup_order` after " in report
+    assert "Not checked (budget hit): run 1 from `lookup_order` (`lookup_order`, " in report
+    assert "run 2 from `classify` (`classify`, `respond`)." in report
+    assert "Harness error" not in report
+
+
+def test_cli_ci_timing_line_counts_served_calls_and_its_phases_add_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import itertools
+    import re
+
+    ticks = itertools.count()  # every clock read is 1 s later
+    monkeypatch.setattr("lgcov.cli.perf_counter", lambda: float(next(ticks)))
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--budget-seconds", "900")
+    line = re.search(
+        r"⏱ (\d+) s · agent (\d+) s \(0 live / 5 served\) · judges (\d+) s \(4 calls\) "
+        r"· budget 900 s",
+        report,
+    )
+    assert line is not None, report
+    total, agent, judges = (int(g) for g in line.groups())
+    assert agent > 0 and judges > 0 and agent + judges < total  # the rest is overhead
+
+
+def test_cli_judge_node_crash_is_an_agent_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = tmp_path / "crashing.py"
+    graph.write_text(
+        DEMO_GRAPH.read_text(encoding="utf-8").replace(
+            'return {"needs_tool": "order" in state["question"].lower()}',
+            'raise ValueError("cannot classify")',
+        ),
+        encoding="utf-8",
+    )
+    args = [*_judge_args(tmp_path), "--taxonomy", DEMO_TAXONOMY, "--graph", f"{graph}:graph"]
+    assert main(args) == 1
+    assert "agent failure: node `classify` raised ValueError" in capsys.readouterr().out
+
+
+# T074 PR B: `lgcov selfcheck` runs the harness on fixtures whose outcome is known.
+SELFCHECK = FIXTURES / "selfcheck"
+
+
+def test_cli_selfcheck_passes_on_its_fixtures(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["selfcheck", "--dir", str(SELFCHECK)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "| broken_harness | INFRA_ERROR | INFRA_ERROR | — | ✓ |" in out
+    assert "| broken_node | AGENT_FAIL @ classify | AGENT_FAIL | classify | ✓ |" in out
+    assert "| broken_prompt | AGENT_FAIL @ respond | AGENT_FAIL | respond | ✓ |" in out
+    assert "| good_change | PASS | PASS | — | ✓ |" in out
+
+
+def test_cli_selfcheck_exits_one_on_a_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import shutil
+
+    shutil.copytree(SELFCHECK, tmp_path / "selfcheck")
+    expected = tmp_path / "selfcheck" / "good_change" / "expected.yaml"
+    expected.write_text("outcome: AGENT_FAIL\n", encoding="utf-8")
+    assert main(["selfcheck", "--dir", str(tmp_path / "selfcheck")]) == 1
+    assert "| good_change | AGENT_FAIL | PASS | — | ✗ |" in capsys.readouterr().out.splitlines()
+
+
+def test_cli_selfcheck_without_fixtures_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["selfcheck", "--dir", str(tmp_path)]) == 2
+    assert "lgcov selfcheck:" in capsys.readouterr().err
+
+
+def test_good_change_is_a_real_refactor_of_respond_only() -> None:
+    # Whitespace wouldn't change the fingerprint, so serving would skip the node and the
+    # fixture would prove nothing; a real refactor makes respond re-run live.
+    import importlib.util
+
+    from lgcov.fingerprint import fingerprint
+
+    spec = importlib.util.spec_from_file_location(
+        "good_change", SELFCHECK / "good_change" / "graph.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    baseline = json.loads((SELFCHECK / "cassettes" / "baseline.json").read_text(encoding="utf-8"))
+    recorded = {s["node"]: s["code"] for s in baseline["runs"][0]["steps"]}
+    assert fingerprint(module.respond) != recorded["respond"]
+    assert fingerprint(module.classify) == recorded["classify"]
+
+
+# T089 PR B: tiers. pr serves unchanged nodes, judges each case once and never runs a
+# general LLM judge; nightly runs every node live with every judge, k = 3.
+LLM_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: respond_drift
+    description: The answer loses the order status.
+kpis:
+  - name: respond_runs
+    failure_mode: respond_drift
+    node: respond
+    judge: code
+    description: Every run ends by responding.
+    rubric: Did the run visit respond?
+    check: {type: node_visited, node: respond}
+  - name: answer_tone
+    failure_mode: respond_drift
+    node: respond
+    judge: llm
+    description: A general LLM judge, so nightly only.
+    rubric: Is the answer polite?
+"""
+
+
+class _NoCallsJudge:
+    """A general LLM judge client that fails any test that calls it."""
+
+    def __init__(self, kpi: KPI) -> None:
+        self.kpi = kpi
+
+    def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
+        raise AssertionError("the pr tier called a general LLM judge")
+
+
+def test_cli_ci_pr_tier_never_calls_a_general_llm_judge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("lgcov.cli._llm_judge", _NoCallsJudge)
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(LLM_TAXONOMY, encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")  # tier: pr
+    assert code == 0
+    assert "Nightly only (`judge: llm`): `answer_tone`." in report
+    assert "| respond_runs | 2 | 100% | 100% |" in report
+    assert "(0 live / 5 served)" in report and "· budget 90 s" in report
+    assert "tier: `pr`" in report
+
+
+def test_cli_ci_nightly_tier_runs_every_node_live_with_k_3_and_no_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", DEMO_TAXONOMY, "--tier", "nightly")
+    assert code == 0
+    assert "(5 live / 0 served)" in report and "· no budget" in report
+    assert "| answer_states_order_status (n=2, k=3) | 100% | 50% | ⚠️ 50% |" in report
+    assert "tier: `nightly`" in report
+
+
+def test_cli_ci_nightly_llm_kpi_without_a_client_is_infra_error_only_when_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(LLM_TAXONOMY, encoding="utf-8")
+    args = ("--taxonomy", "taxonomy.yaml", "--tier", "nightly")
+    code, report, _ = _run_ci(tmp_path, *args)
+    assert code == 2  # answer_tone blocks: nothing judged it
+    assert "⚠️ No llm client for `answer_tone`: INFRA_ERROR." in report
+    (tmp_path / "lgcov.yaml").write_text("gate: {advisory_kpis: [answer_tone]}\n", encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, *args)
+    assert code == 0  # a misconfigured advisory judge doesn't fail every night
+    assert "⚠️ Skipped, no llm client: `answer_tone` (advisory)." in report
+
+
+def test_cli_ci_links_main_s_latest_nightly_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    url = "https://github.com/o/r/actions/runs/123"
+    _, report, _ = _run_ci(tmp_path, "--nightly-url", url)
+    assert f"Latest nightly run on main: {url}" in report

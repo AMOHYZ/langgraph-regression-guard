@@ -39,6 +39,10 @@ def test_action_is_composite_with_the_documented_inputs_and_outputs() -> None:
         "python-version": "3.12",
         "github-token": "${{ github.token }}",
         "live": "false",
+        "fail-on-inconclusive": "false",
+        "on-divergence": "flag",
+        "budget-seconds": "",
+        "tier": "",  # T089: empty is lgcov.yaml's tier, else pr
     }
     assert set(_dict(action["outputs"])) == {
         "report-path",
@@ -86,6 +90,26 @@ def test_live_input_reaches_lgcov_ci() -> None:
     run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
     assert _dict(run["env"])["LIVE"] == "${{ inputs.live }}"
     assert "--live" in str(run["run"])
+
+
+def test_fail_on_inconclusive_is_checked_first_and_reaches_lgcov_ci() -> None:
+    # T091: INCONCLUSIVE exits 0 unless this is true; then 1, never 2.
+    assert "fail-on-inconclusive must be true or false" in str(_steps()[0].get("run", ""))
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    assert _dict(run["env"])["FAIL_ON_INCONCLUSIVE"] == "${{ inputs.fail-on-inconclusive }}"
+    assert "--fail-on-inconclusive" in str(run["run"])
+
+
+def test_divergence_and_budget_inputs_are_checked_first_and_reach_lgcov_ci() -> None:
+    # T089: a served node whose input diverged, and a wall-clock budget for live calls.
+    first = str(_steps()[0].get("run", ""))
+    assert "on-divergence must be one of fail, flag, live" in first
+    assert "budget-seconds must be a number of seconds" in first
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    env = _dict(run["env"])
+    assert env["ON_DIVERGENCE"] == "${{ inputs.on-divergence }}"
+    assert env["BUDGET_SECONDS"] == "${{ inputs.budget-seconds }}"
+    assert "--on-divergence" in str(run["run"]) and "--budget-seconds" in str(run["run"])
 
 
 def test_release_ignores_the_floating_v0_tag() -> None:
@@ -141,6 +165,11 @@ def test_run_step_survives_drift_under_github_bash_flags(tmp_path: Path) -> None
         "BASE_DIR": "",
         "HARNESS_ERROR": "",
         "LIVE": "false",
+        "FAIL_ON_INCONCLUSIVE": "false",
+        "ON_DIVERGENCE": "flag",
+        "BUDGET_SECONDS": "",
+        "TIER": "pr",
+        "NIGHTLY_URL": "",
         "COVERAGE_BASELINE": "",
     }
     script = _step("Run lgcov")
@@ -196,3 +225,54 @@ def test_coverage_download_failure_is_a_warning_under_github_bash_flags(tmp_path
     assert result.returncode == 0, result.stderr
     assert "::warning" in result.stdout
     assert "path=" not in out.read_text(encoding="utf-8")
+
+
+def test_tier_input_is_checked_first_and_reaches_lgcov_ci() -> None:
+    # T089 PR B: pr on every push; nightly runs everything live, on a schedule.
+    assert "tier must be pr or nightly" in str(_steps()[0].get("run", ""))
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    assert _dict(run["env"])["TIER"] == "${{ inputs.tier }}"
+    assert "--tier" in str(run["run"])
+
+
+def test_the_nightly_report_is_uploaded_and_prs_link_main_s_latest() -> None:
+    steps = {str(s.get("name")): s for s in _steps()}
+    upload = steps["Upload the nightly report"]
+    assert str(upload["uses"]).startswith("actions/upload-artifact@")
+    assert _dict(upload["with"])["name"] == "lgcov-nightly"
+    assert "nightly" in str(upload["if"])
+    assert "pull_request" in str(steps["Find main's latest nightly run"]["if"])
+    run = steps["Run lgcov"]
+    assert _dict(run["env"])["NIGHTLY_URL"] == "${{ steps.nightly.outputs.url }}"
+    assert "--nightly-url" in str(run["run"])
+
+
+def test_no_nightly_run_yet_is_fine_under_github_bash_flags(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    _executable(bin_dir / "gh", "echo 'HTTP 404: Not Found' >&2; exit 1\n")
+    out = tmp_path / "github_output"
+    out.touch()
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "GH_TOKEN": "x",
+        "REPO": "o/r",
+        "DEFAULT_BRANCH": "main",
+    }
+    script = _step("Find main's latest nightly run")
+    result = subprocess.run(
+        [*GITHUB_BASH, script], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert "url=" not in out.read_text(encoding="utf-8")
+
+
+def test_ci_runs_the_harness_selfcheck_on_every_push() -> None:
+    # T074: a separate job, so a harness that misclassifies outcomes fails CI.
+    workflow = _yaml(ROOT / ".github" / "workflows" / "ci.yml")
+    assert "push" in _dict(workflow.get("on", workflow.get(True)))
+    steps = _dict(_dict(workflow["jobs"])["selfcheck"])["steps"]
+    assert isinstance(steps, list)
+    assert any("lgcov selfcheck" in str(_dict(s).get("run", "")) for s in steps)

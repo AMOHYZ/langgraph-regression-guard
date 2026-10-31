@@ -105,4 +105,7 @@ class JevJudge:
             raise ValueError(
                 f"kpi '{self.kpi.name}': judge returned label '{label}' not in {self.kpi.labels}"
             )
-        return Verdict(self.kpi, label, self.kpi.score_map[label], confidence, answer)
+        raw = dict(answer)
+        if isinstance(body.get("usage"), dict):
+            raw["usage"] = body["usage"]  # T073: token cost per judgment
+        return Verdict(self.kpi, label, self.kpi.score_map[label], confidence, raw)
