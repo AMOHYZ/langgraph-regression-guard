@@ -9,6 +9,7 @@ import pytest
 from lgcov.stats import (
     bca_ci,
     benjamini_hochberg,
+    benjamini_hochberg_adjusted,
     decide,
     holm,
     holm_adjusted,
@@ -72,6 +73,12 @@ def test_holm_rejects_only_the_first_of_three() -> None:
 def test_benjamini_hochberg_step_up() -> None:
     assert benjamini_hochberg([0.01, 0.02, 0.03, 0.04], alpha=0.05) == [True] * 4
     assert benjamini_hochberg([0.04, 0.5], alpha=0.05) == [False, False]
+
+
+def test_benjamini_hochberg_adjusted_p_values_are_monotone() -> None:
+    # T091 PR B: the advisory KPIs' "p adj." column; adjusted <= alpha iff BH rejects.
+    assert benjamini_hochberg_adjusted([0.04, 0.5]) == pytest.approx([0.08, 0.5])
+    assert benjamini_hochberg_adjusted([0.01, 0.04, 0.03, 0.02]) == pytest.approx([0.04] * 4)
 
 
 def test_mde_shrinks_with_one_over_sqrt_n() -> None:

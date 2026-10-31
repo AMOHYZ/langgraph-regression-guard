@@ -23,8 +23,9 @@ Three layers, one per level of confidence:
   and are compared with it. The diff tells you whether a change breaks a node at
   its root or only propagates from upstream.
 - **L2 — Judge gate.** Typed LLM judges and deterministic code checks score
-  KPIs, each verdict with a confidence: low-confidence verdicts defer to a
-  human instead of guessing.
+  KPIs, each verdict with a confidence, and a paired test per KPI decides SHIP,
+  BLOCK or INCONCLUSIVE: an unclear or low-confidence result goes to a human
+  instead of guessing.
 - **L3 — Review loop.** An accept / reject / override decision per verdict;
   accepting re-baselines the cassette, and an override is saved as a labelled
   example for calibrating the judge.
@@ -75,6 +76,8 @@ thresholds:
   max_drifted_nodes: 3             # optional; omit for no limit
   fail_on: [fail]
 ignore_paths: [/meta/nonce]        # JSON pointers into node I/O
+gate:                              # the L2 KPI gate; see "The gate" below
+  margin: 0.05                     # δ; a KPI's own `margin:` in taxonomy.yaml wins
 ```
 
 Precedence: CLI flag > file > default.
@@ -133,20 +136,27 @@ jobs:
   `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
   baseline yet". A missing or unreadable baseline is a warning, never a failure.
 - Unchanged nodes are served from the cassette; `live: true` runs every node live.
+- With `taxonomy:`, the run also gates the taxonomy's KPIs on the replayed outputs (see
+  [The gate](#the-gate-ship-block-or-inconclusive)) and adds the table to the report, at
+  most 200 model judge calls per run. `judge: jev` KPIs read `JEV_API_URL` and
+  `JEV_API_KEY`: set them in the job's `env:` from secrets.
 - Outcomes and exit codes are in the table below.
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
-  `cassette-dir`, `taxonomy` (validated only; L2 judges don't run in the Action yet),
-  `fail-on`, `python-version`, `github-token`, `live`. Outputs: `report-path`,
-  `root-drift-count`, `propagated-drift-count`, `verdict`.
+  `cassette-dir`, `taxonomy` (turns on the KPI gate; `taxonomy_path` isn't read here),
+  `fail-on`, `fail-on-inconclusive`, `python-version`, `github-token`, `live`. Outputs:
+  `report-path`, `root-drift-count`, `propagated-drift-count`, `verdict`.
 - Runs on Linux and macOS runners.
 
 ### Outcomes
 
 | Outcome | Exit | When |
 |---|---|---|
-| PASS | 0 | No drift that `fail-on` cares about. |
-| AGENT_FAIL | 1 | Drift that `fail-on` cares about, or a node in the PR's graph raised; the report names the node. A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
-| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, or network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
+| PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI is SHIP. |
+| AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, or a node in the PR's graph raised; the report names the node. A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
+| INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK: shown as ⚠️ `needs_human`, with the cases it still needs. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1, never 2. |
+| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, or a blocking KPI left with no valid judgment on a side. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
+
+A regression found in the same run wins over a judge's infra error: exit 1.
 
 Known limit: an exception in a router (a conditional-edge function) or inside a
 subgraph isn't attributed to a node yet, so it counts as INFRA_ERROR (T109).
@@ -160,15 +170,15 @@ mismatch. CI runs it as its own job on every push.
 ## Judge KPIs locally (L2)
 
 `lgcov judge` runs a taxonomy's judges k times per case, on the recorded outputs and on a
-fresh replay, and gates each KPI on its pass^k rate with the bootstrap CI:
+fresh replay, and gates each KPI with a paired test (below):
 
 ```bash
 lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
 ```
 
 - pass@k: at least one of a case's k samples passes; pass^k: all of them do. A case is
-  flaky when it's pass@k but not pass^k. Flakiness is shown as ⚠️ and never fails on
-  its own; an infra error doesn't count toward k and is never a fail.
+  flaky when it's pass@k but not pass^k. Flakiness is shown as ⚠️ and never changes a
+  verdict; an infra error doesn't count toward k and is never a fail.
 - It prints the planned number of judge calls (2·n·k per KPI) first, and refuses to
   make more than `--max-calls` (default 200) calls to model judges.
 - Cost per KPI: ms and tokens per judgment, and totals. Tokens come from the judge's
@@ -176,6 +186,40 @@ lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
   code judges cost 0, and "—" means the judge reported none.
 - `samples_per_case` in `lgcov.yaml` sets k; `--samples` overrides it. The demo's
   `fake` judge has a seeded flaky mode, so its table shows a real ⚠️ row.
+
+### The gate: SHIP, BLOCK or INCONCLUSIVE
+
+Each case is judged on base and on the PR, so its two scores pair up: d = PR − base, with
+a case's k samples averaged first. Per KPI, against a non-inferiority margin δ:
+
+- **BLOCK** (exit 1): the whole 95% CI of Δ is below 0, Δ ≤ −δ, and the adjusted p is
+  under α. A BLOCK the judge isn't confident of (mean confidence under 0.7) is
+  INCONCLUSIVE instead.
+- **SHIP** (exit 0): the CI's low end is above −δ, so any drop is smaller than δ.
+- **INCONCLUSIVE** (exit 0, or 1 with the switch): neither. A ⚠️ row says how many more
+  cases it needs: N* is the number needed to detect Δ at α and the set power (Kotawala
+  2026, Eq. 6, for paired binary outcomes).
+
+How it's computed:
+
+- A binary KPI with k = 1 gets an exact McNemar test; graded scores or k > 1 get a paired
+  sign-flip test (exact up to 20 cases). The CI is a seeded BCa bootstrap; MDE is the
+  smallest drop this many cases detects.
+- p is adjusted with Holm across the blocking KPIs and Benjamini–Hochberg across the
+  advisory ones, so adding KPIs doesn't add false alarms. Advisory KPIs never fail a PR.
+- The old outcome names stay as aliases: `pass` = SHIP, `fail` = BLOCK, `needs_human` =
+  INCONCLUSIVE; `infra_error` stays its own path.
+
+```yaml
+gate:                          # lgcov.yaml; these are the defaults
+  alpha: 0.05
+  power: 0.8
+  margin: 0.05                 # δ; a KPI's own `margin:` in taxonomy.yaml wins
+  advisory_kpis: []            # or blocking_kpis: [...]; by default every KPI blocks
+  inconclusive_blocks: false   # true: INCONCLUSIVE exits 1, like --fail-on-inconclusive
+```
+
+Planned: sequential stopping (mSPRT), to stop judging once a KPI's verdict is clear.
 
 ## Development
 
@@ -190,7 +234,7 @@ uv run graph-diff old.json new.json   # node/edge diff of two graph snapshots
 
 - Judges you can trust: Cohen's kappa with a confidence interval, and TPR/TNR
   against human labels, per KPI.
-- A paired significance test per KPI, with p-value and effect size.
+- Sequential stopping (mSPRT) for the KPI gate.
 - Self-improvement loop: reviewer overrides feed back into judge calibration.
 
 ## License

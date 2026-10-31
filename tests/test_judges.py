@@ -101,6 +101,12 @@ def test_unconfident_drop_needs_human() -> None:
     assert verdict_gate(base, new) == "needs_human"
 
 
+def test_verdicts_pair_up_by_position() -> None:
+    # T091: the same scores on both sides, but every case flipped: paired, that's no SHIP.
+    good, bad = _verdicts(GOOD_BAD, "good", 6, 0.9), _verdicts(GOOD_BAD, "bad", 6, 0.9)
+    assert verdict_gate(good + bad, bad + good) == "needs_human"
+
+
 def test_infra_error_in_candidates_gates_to_infra_error() -> None:
     base = _verdicts(GOOD_BAD, "good", 12, 0.9)
     new: Sequence[Verdict | JudgeInfraError] = [

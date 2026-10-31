@@ -39,6 +39,7 @@ def test_action_is_composite_with_the_documented_inputs_and_outputs() -> None:
         "python-version": "3.12",
         "github-token": "${{ github.token }}",
         "live": "false",
+        "fail-on-inconclusive": "false",
     }
     assert set(_dict(action["outputs"])) == {
         "report-path",
@@ -86,6 +87,14 @@ def test_live_input_reaches_lgcov_ci() -> None:
     run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
     assert _dict(run["env"])["LIVE"] == "${{ inputs.live }}"
     assert "--live" in str(run["run"])
+
+
+def test_fail_on_inconclusive_is_checked_first_and_reaches_lgcov_ci() -> None:
+    # T091: INCONCLUSIVE exits 0 unless this is true; then 1, never 2.
+    assert "fail-on-inconclusive must be true or false" in str(_steps()[0].get("run", ""))
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    assert _dict(run["env"])["FAIL_ON_INCONCLUSIVE"] == "${{ inputs.fail-on-inconclusive }}"
+    assert "--fail-on-inconclusive" in str(run["run"])
 
 
 def test_release_ignores_the_floating_v0_tag() -> None:
@@ -141,6 +150,7 @@ def test_run_step_survives_drift_under_github_bash_flags(tmp_path: Path) -> None
         "BASE_DIR": "",
         "HARNESS_ERROR": "",
         "LIVE": "false",
+        "FAIL_ON_INCONCLUSIVE": "false",
         "COVERAGE_BASELINE": "",
     }
     script = _step("Run lgcov")

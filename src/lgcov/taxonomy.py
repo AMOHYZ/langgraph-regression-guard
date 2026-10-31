@@ -37,6 +37,7 @@ class KPISpec:
     score_map: dict[str, float] = field(default_factory=lambda: {"pass": 1.0, "fail": 0.0})
     label_hints: dict[str, str] = field(default_factory=dict)
     check: dict[str, str] | None = None  # only for judge: code (T072)
+    margin: float | None = None  # T091: non-inferiority margin δ; None = gate.margin
 
     def to_kpi(self) -> KPI:
         return KPI(
@@ -115,6 +116,12 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
         extra = sorted(set(hints) - set(labels))
         raise ValueError(f"{where}: label_hints keys {extra} not in labels {labels}")
     check = _mapping(d["check"], "check", where) if "check" in d else None
+    margin: float | None = None
+    if "margin" in d:
+        value = d["margin"]
+        if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
+            raise ValueError(f"{where}: 'margin' must be a number in 0..1")
+        margin = float(value)
     spec = KPISpec(
         name=name,
         failure_mode=failure_mode,
@@ -126,6 +133,7 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
         score_map=score_map,
         label_hints={k: str(v) for k, v in hints.items()},
         check={k: str(v) for k, v in check.items()} if check is not None else None,
+        margin=margin,
     )
     spec.to_kpi()  # KPI's own label/score checks, at load time rather than build time
     if judge == "code":

@@ -73,6 +73,29 @@ def test_labels_and_score_map_default_to_binary(tmp_path: Path) -> None:
     assert kpi.score_map == {"pass": 1.0, "fail": 0.0}
 
 
+# T091: a KPI's own non-inferiority margin δ; without one, gate.margin from lgcov.yaml.
+_ONE_KPI = """\
+  - name: kpi_a
+    failure_mode: mode_a
+    node: final
+    judge: fake
+    description: one line
+    rubric: Is the report grounded?
+"""
+
+
+def test_kpi_margin_is_optional(tmp_path: Path) -> None:
+    assert load_taxonomy(_write(tmp_path, _doc(_ONE_KPI))).kpi_specs[0].margin is None
+    doc = _doc(_ONE_KPI + "    margin: 0.1\n")
+    assert load_taxonomy(_write(tmp_path, doc)).kpi_specs[0].margin == 0.1
+
+
+@pytest.mark.parametrize("value", ["'0.1'", "1.5", "-0.1", "true"])
+def test_bad_kpi_margin_names_the_kpi(tmp_path: Path, value: str) -> None:
+    with pytest.raises(ValueError, match="KPI 'kpi_a'.*margin"):
+        load_taxonomy(_write(tmp_path, _doc(_ONE_KPI + f"    margin: {value}\n")))
+
+
 def test_unknown_failure_mode_names_the_kpi(tmp_path: Path) -> None:
     doc = _doc(
         """\
