@@ -137,14 +137,24 @@ def replay(
     step returns that step's output without running. A node whose code changed, and any
     node whose input changed because of it, still runs and is compared.
     """
+    return replay_steps(graph, cassette, ignore_paths, serve)[0]
+
+
+def replay_steps(
+    graph: Any, cassette: Cassette, ignore_paths: Sequence[str] = (), serve: bool = False
+) -> tuple[list[Drift], list[Step]]:
+    """`replay`, plus the fresh run's steps in order (served ones included), so coverage
+    can reuse the run instead of executing the graph again.
+    """
     expected = _by_node(cassette.steps, ignore_paths)
     fresh = _run(graph, cassette.inputs, cassette.steps if serve else (), ignore_paths)
     actual = _by_node(fresh, ignore_paths)
-    return [
+    drifts = [
         Drift(node=n, expected=expected.get(n), actual=actual.get(n))
         for n in sorted(expected.keys() | actual.keys())
         if expected.get(n) != actual.get(n)
     ]
+    return drifts, fresh
 
 
 def accept_nodes(baseline: Cassette, fresh: Cassette, nodes: set[str]) -> tuple[Cassette, set[str]]:

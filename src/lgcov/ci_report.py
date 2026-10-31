@@ -26,6 +26,8 @@ class CiResult:
     propagated_drift: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     harness_error: str = ""
+    coverage_line: str = ""  # T083, e.g. "Nodes 75% (−25% vs main) · Edges 60% (±0)"
+    newly_uncovered: tuple[str, ...] = ()
 
 
 def render_ci_report(r: CiResult) -> str:
@@ -48,6 +50,10 @@ def render_ci_report(r: CiResult) -> str:
         lines += [*r.graph_lines, ""]
     if r.replay_lines:
         lines += [*r.replay_lines, ""]
+    if r.coverage_line:
+        lines += [f"Coverage: {r.coverage_line}", ""]
+    if r.newly_uncovered:
+        lines += ["Newly uncovered: " + ", ".join(f"`{n}`" for n in r.newly_uncovered), ""]
     lines += [*r.notes, ""] if r.notes else []
     lines.append(
         f"fail-on: `{r.fail_on}` · root drift: {len(r.root_drift)} · "

@@ -104,10 +104,15 @@ then add this workflow:
 
 ```yaml
 name: lgcov
-on: pull_request  # not pull_request_target: the Action runs your PR's own graph code
+on:
+  # Not pull_request_target: the Action runs your PR's own graph code.
+  pull_request:
+  push:
+    branches: [main]  # main's runs record the coverage baseline PRs compare against
 permissions:
   contents: read
   pull-requests: write
+  actions: read  # to download main's coverage baseline
 jobs:
   lgcov:
     runs-on: ubuntu-latest
@@ -123,11 +128,16 @@ jobs:
 - `root-drift` and `any-drift` fail the same PRs for now: until replay classifies
   drift by the node inputs it records, the first node to drift in each run counts
   as root.
+- The report includes coverage of the replayed runs, e.g. `Coverage: Nodes 75% (−25% vs
+  main) · Edges 60% (±0)`, and lists nodes main reached that this PR doesn't. Pushes to
+  `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
+  baseline yet". A missing or unreadable baseline is a warning, never a failure.
+- Unchanged nodes are served from the cassette; `live: true` runs every node live.
 - Exit codes: 0 pass, 1 drift that `fail-on` cares about, 2 harness error (install,
   graph load or replay crashed), which is never reported as a regression.
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
   `cassette-dir`, `taxonomy` (validated only; L2 judges don't run in the Action yet),
-  `fail-on`, `python-version`, `github-token`. Outputs: `report-path`,
+  `fail-on`, `python-version`, `github-token`, `live`. Outputs: `report-path`,
   `root-drift-count`, `propagated-drift-count`, `verdict`.
 - Runs on Linux and macOS runners.
 

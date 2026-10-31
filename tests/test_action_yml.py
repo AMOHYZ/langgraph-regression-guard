@@ -38,6 +38,7 @@ def test_action_is_composite_with_the_documented_inputs_and_outputs() -> None:
         "fail-on": "root-drift",
         "python-version": "3.12",
         "github-token": "${{ github.token }}",
+        "live": "false",
     }
     assert set(_dict(action["outputs"])) == {
         "report-path",
@@ -59,15 +60,32 @@ def test_no_expression_is_interpolated_into_a_shell_script() -> None:
         assert "${{" not in str(step.get("run", "")), step.get("name")
 
 
-def test_dogfood_workflow_runs_this_action_on_pull_request_only() -> None:
+def test_dogfood_workflow_runs_on_prs_and_on_pushes_to_main() -> None:
     path = ROOT / ".github" / "workflows" / "graph-diff.yml"
     workflow = _yaml(path)
-    trigger = workflow.get("on", workflow.get(True))  # PyYAML reads a bare `on` as True
-    assert set(_dict(trigger)) == {"pull_request"}
+    trigger = _dict(workflow.get("on", workflow.get(True)))  # PyYAML reads `on` as True
+    assert set(trigger) == {"pull_request", "push"}
+    assert _dict(trigger["push"])["branches"] == ["main"]  # main uploads the coverage baseline
     assert "pull_request_target" not in path.read_text(encoding="utf-8")
+    assert _dict(workflow["permissions"])["actions"] == "read"  # to download that baseline
     steps = _dict(_dict(workflow["jobs"])["report"])["steps"]
     assert isinstance(steps, list)
     assert {"uses": "./"} in steps
+
+
+def test_coverage_artifact_is_uploaded_on_main_and_downloaded_on_prs() -> None:
+    steps = {str(s.get("name")): s for s in _steps()}
+    upload = steps["Upload coverage for main"]
+    assert str(upload["uses"]).startswith("actions/upload-artifact@")
+    assert _dict(upload["with"])["name"] == "lgcov-coverage"
+    assert "push" in str(upload["if"]) and "default_branch" in str(upload["if"])
+    assert "pull_request" in str(steps["Download main's coverage"]["if"])
+
+
+def test_live_input_reaches_lgcov_ci() -> None:
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    assert _dict(run["env"])["LIVE"] == "${{ inputs.live }}"
+    assert "--live" in str(run["run"])
 
 
 def test_release_ignores_the_floating_v0_tag() -> None:
@@ -79,7 +97,8 @@ def test_release_ignores_the_floating_v0_tag() -> None:
 def test_readme_snippet_uses_the_action_on_pull_request() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "uses: AMOHYZ/langgraph-regression-guard@v0" in readme
-    assert "on: pull_request" in readme
+    assert "  pull_request:\n" in readme
+    assert "actions: read" in readme
 
 
 # Regression: Actions runs `shell: bash` as `bash --noprofile --norc -e -o pipefail`, so
@@ -121,6 +140,8 @@ def test_run_step_survives_drift_under_github_bash_flags(tmp_path: Path) -> None
         "FAIL_ON": "root-drift",
         "BASE_DIR": "",
         "HARNESS_ERROR": "",
+        "LIVE": "false",
+        "COVERAGE_BASELINE": "",
     }
     script = _step("Run lgcov")
     result = subprocess.run(
@@ -152,3 +173,26 @@ def test_install_step_records_a_failed_install_under_github_bash_flags(tmp_path:
     outputs = out.read_text(encoding="utf-8")
     assert "harness-error<<LGCOV_EOF" in outputs
     assert "lockfile out of date" in outputs
+
+
+def test_coverage_download_failure_is_a_warning_under_github_bash_flags(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    _executable(bin_dir / "gh", "echo 'HTTP 403: Resource not accessible' >&2; exit 1\n")
+    out = tmp_path / "github_output"
+    out.touch()
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "GH_TOKEN": "x",
+        "REPO": "o/r",
+        "DEFAULT_BRANCH": "main",
+    }
+    script = _step("Download main's coverage")
+    result = subprocess.run(
+        [*GITHUB_BASH, script], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert "::warning" in result.stdout
+    assert "path=" not in out.read_text(encoding="utf-8")

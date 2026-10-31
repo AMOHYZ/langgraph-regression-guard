@@ -599,6 +599,7 @@ def test_cli_ci_unloadable_graph_is_a_harness_error(
     assert code == 2
     assert "⚠️ Harness error, not a regression" in report
     assert "boom at import" in report
+    assert "Coverage:" not in report
     assert (outputs["verdict"], outputs["exit-code"], outputs["root-drift-count"]) == (
         "error",
         "2",
@@ -693,3 +694,46 @@ def test_cli_coverage_malformed_baseline_exits_two(
     bad.write_text("{}", encoding="utf-8")
     assert main([*_coverage_args(tmp_path), "--baseline", str(bad)]) == 2
     assert "lgcov coverage:" in capsys.readouterr().err
+
+
+# T083 C2: `lgcov ci` reports coverage of the runs replay just did, and the trend vs main.
+def test_cli_ci_reports_coverage_with_no_baseline_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lgcov.coverage import CoverageSnapshot
+
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    cov_out = tmp_path / "out" / "coverage.json"
+    code, report, _ = _run_ci(tmp_path, "--coverage-out", str(cov_out), "--commit", "abc123")
+    assert code == 0
+    assert "Coverage: Nodes 100% · Edges 100% (no baseline yet)" in report
+    cov = CoverageSnapshot.from_json(cov_out.read_text(encoding="utf-8"))
+    assert (cov.nodes_hit, cov.commit_sha) == (5, "abc123")
+
+
+def test_cli_ci_coverage_trend_lists_newly_uncovered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    never_the_tool = demo.replace('"order" in state["question"].lower()', "False")
+    assert never_the_tool != demo
+    _ci_project(tmp_path, monkeypatch, never_the_tool)
+    main_cov = tmp_path / "coverage.main.json"
+    args = ["coverage", "--graph", f"{DEMO_GRAPH}:graph", "--cassette-dir", "cassettes"]
+    assert main([*args, "--out", str(main_cov)]) == 0  # main covered every node
+    code, report, _ = _run_ci(tmp_path, "--coverage-baseline", str(main_cov))
+    assert code == 1  # classify drifted
+    assert "Coverage: Nodes 80% (−20% vs main) · Edges 60% (−40% vs main)" in report
+    assert "Newly uncovered: `lookup_order`" in report
+
+
+def test_cli_ci_unreadable_coverage_baseline_is_no_baseline_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    bad = tmp_path / "coverage.main.json"
+    bad.write_text("not json", encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--coverage-baseline", str(bad))
+    assert code == 0  # a bad baseline is a note, never a failure
+    assert "(no baseline yet)" in report
+    assert "could not read main's coverage.json" in report.lower()
