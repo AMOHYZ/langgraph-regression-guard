@@ -72,7 +72,8 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         UV_PYTHON: ${{ inputs.python-version }}
       run: |
-        set -uo pipefail
+        # Actions runs bash with -e; this step checks exit codes itself.
+        set +e -uo pipefail
         log="$RUNNER_TEMP/lgcov-install.log"
         {
           if [ -f uv.lock ]; then
@@ -128,7 +129,8 @@ runs:
         BASE_DIR: ${{ steps.base.outputs.dir }}
         HARNESS_ERROR: ${{ steps.install.outputs.harness-error }}
       run: |
-        set -uo pipefail
+        # Actions runs bash with -e; this step checks exit codes itself.
+        set +e -uo pipefail
         report="$RUNNER_TEMP/lgcov/report.md"
         args=(ci --report "$report" --github-output "$GITHUB_OUTPUT" --fail-on "$FAIL_ON")
         [ -n "$GRAPH" ] && args+=(--graph "$GRAPH")
