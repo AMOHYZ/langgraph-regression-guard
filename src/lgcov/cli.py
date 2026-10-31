@@ -141,6 +141,9 @@ def _harness_error(prog: str, what: str, exc: BaseException) -> int:
     return EXIT_ERROR
 
 
+_LIVE_HELP = "re-run every node; by default a node whose code and input match is served"
+
+
 def _fail_on_arg(value: str) -> FailOn:
     try:
         return parse_fail_on(value)
@@ -157,6 +160,7 @@ def _replay(argv: list[str]) -> int:
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
     ap.add_argument("--fail-on", type=_fail_on_arg, default="any-drift", help="exit 1 on")
     ap.add_argument("--summary-json", help="also write drift counts and verdict here")
+    ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
     args = ap.parse_args(argv)
     try:
         cfg = load_config(args.config, {"graph_entrypoint": args.target})
@@ -174,7 +178,7 @@ def _replay(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return _harness_error("lgcov replay", "cannot read baseline", exc)
     try:
-        drifts = [replay(graph, run, cfg.ignore_paths) for run in runs]
+        drifts = [replay(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
     except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
         return _harness_error("lgcov replay", "the graph crashed during replay", exc)
     print("\n".join(_replay_markdown(runs, drifts)))
@@ -420,7 +424,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
     try:
-        drifts = [replay(graph, run, cfg.ignore_paths) for run in runs]
+        drifts = [replay(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
     except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
         msg = _harness_message("the graph crashed during replay", exc)
         return replace(partial, harness_error=msg)
@@ -447,6 +451,7 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--base-dir", help="checkout of the PR's base commit, for the graph diff")
     ap.add_argument("--fail-on", type=_fail_on_arg, default="root-drift", help="exit 1 on")
     ap.add_argument("--harness-error", help="an earlier step failed; report it and exit 2")
+    ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()
