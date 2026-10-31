@@ -1,7 +1,7 @@
 # langgraph-regression-guard
 
 Catch silent regressions in LangGraph agents on every PR: cassette replay of
-node I/O, calibrated LLM judges, and human review, as a GitHub Action.
+node I/O, LLM judges with a confidence gate, and human review.
 
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
 
@@ -18,14 +18,18 @@ graph still compiles, the edges still fire, the output just gets worse.
 
 Three layers, one per level of confidence:
 
-- **L1 — Cassettes.** Record each node's inputs and outputs once, then replay
-  them on every PR. The diff tells you whether a change breaks a node at its
-  root or only propagates from upstream.
-- **L2 — Judge gate.** Typed, calibrated LLM judges score KPIs with explicit
-  probabilities and a confidence gate: low-confidence verdicts defer to a
+- **L1 — Cassettes.** Record each node's output once, then re-run the graph on
+  every PR and compare every node with the recording. The diff tells you
+  whether a change breaks a node at its root or only propagates from upstream.
+- **L2 — Judge gate.** Typed LLM judges and deterministic code checks score
+  KPIs, each verdict with a confidence: low-confidence verdicts defer to a
   human instead of guessing.
 - **L3 — Review loop.** An accept / reject / override decision per verdict;
-  accepting re-baselines the cassette, overriding recalibrates the judge.
+  accepting re-baselines the cassette, and an override is saved as a labelled
+  example for calibrating the judge.
+
+How this compares with Reenact and EvalView, and what is built today:
+[docs/why-us.md](docs/why-us.md).
 
 ## Quickstart
 
@@ -85,7 +89,11 @@ uv run graph-diff old.json new.json   # node/edge diff of two graph snapshots
 
 ## Roadmap
 
-- Calibrated typed judges: verified probability calibration per KPI.
+- Serve unchanged nodes from cassettes, so a PR only calls the model for the
+  nodes it changed.
+- Judges you can trust: Cohen's kappa with a confidence interval, and TPR/TNR
+  against human labels, per KPI.
+- A paired significance test per KPI, with p-value and effect size.
 - Self-improvement loop: reviewer overrides feed back into judge calibration.
 - Ship as a GitHub Action that posts the regression report on every PR.
 
