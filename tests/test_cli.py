@@ -172,7 +172,7 @@ def test_cli_version_matches_package_metadata(capsys: pytest.CaptureFixture[str]
     from importlib.metadata import version
 
     assert main(["--version"]) == 0
-    assert capsys.readouterr().out == f"lgcov {version('langgraph-regression-guard')}\n"
+    assert capsys.readouterr().out == f"lgcov {version('lgcov')}\n"  # the distribution is lgcov
 
 
 # T077: `lgcov record --inputs inputs.json` writes the baseline that `lgcov replay` reads.

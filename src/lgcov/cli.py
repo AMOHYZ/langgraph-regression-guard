@@ -1651,7 +1651,7 @@ def _selfcheck_cmd(argv: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--version"]:
-        print(f"lgcov {version('langgraph-regression-guard')}")
+        print(f"lgcov {version('lgcov')}")
         return 0
     if argv[:2] == ["taxonomy", "draft"]:
         return _taxonomy_draft(argv[2:])

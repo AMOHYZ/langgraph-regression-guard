@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: testpypi
-      url: https://test.pypi.org/project/langgraph-regression-guard/
+      url: https://test.pypi.org/project/lgcov/
     permissions:
       id-token: write  # trusted publishing (OIDC); no API token
     steps:
