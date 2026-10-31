@@ -247,3 +247,24 @@ def test_4xx_fails_immediately_without_retry(monkeypatch: pytest.MonkeyPatch) ->
         JevJudge(GOOD_BAD, client=client).judge({}, {})
     assert len(client.payloads) == 1
     assert "test-key" not in str(excinfo.value)
+
+
+# T073: a deterministic flaky mode for offline pass@k demos, and Jev's token usage.
+def test_fake_judge_fails_every_nth_call_on_matching_inputs() -> None:
+    kpi = KPI.binary("k", "d", "r")
+    judge = FakeJudge(kpi, "pass", fail_every=3, when_input_contains="order")
+    order = [judge.judge({"question": "Where is my order?"}, {}).label for _ in range(6)]
+    assert order == ["pass", "pass", "fail", "pass", "pass", "fail"]
+    assert {judge.judge({"question": "What are your hours?"}, {}).label for _ in range(5)} == {
+        "pass"
+    }
+
+
+def test_jev_keeps_the_response_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_env(monkeypatch)
+    usage = {"input_tokens": 462, "output_tokens": 77}
+    payload = {**_jev_response(GOOD_BAD, "good", 0.9), "usage": usage}
+    verdict = JevJudge(GOOD_BAD, client=_FakeClient([_FakeResponse(payload)])).judge({}, {})
+    assert verdict.raw["usage"] == usage
+    plain = JevJudge(GOOD_BAD, client=_FakeClient([_ok(GOOD_BAD, "good", 0.9)])).judge({}, {})
+    assert "usage" not in plain.raw

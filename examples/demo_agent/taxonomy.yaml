@@ -1,0 +1,22 @@
+# T073: L2 KPIs for the demo agent. Run: lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
+version: 1
+system: demo_agent
+failure_modes:
+  - id: respond_drift
+    description: The respond node stops answering, or its answer loses the order status.
+kpis:
+  - name: respond_runs
+    failure_mode: respond_drift
+    node: respond
+    judge: code
+    description: Every run ends by responding.
+    rubric: Did the run visit respond?
+    check: {type: node_visited, node: respond}
+  - name: answer_states_order_status
+    failure_mode: respond_drift
+    node: respond
+    judge: fake
+    description: Offline stand-in for an LLM judge; use judge jev with JEV_API_URL/KEY set.
+    rubric: Does the answer state the order's status?
+    # Seeded flaky mode for offline demos: every 3rd judgment of an order question fails.
+    check: {fail_every: "3", when_input_contains: "order"}

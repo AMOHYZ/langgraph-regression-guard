@@ -15,6 +15,7 @@ from typing import Any
 
 from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay, replay_steps
 from lgcov.ci_report import CiResult, render_ci_report
+from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import load_config
 from lgcov.coverage import (
@@ -25,8 +26,11 @@ from lgcov.coverage import (
 )
 from lgcov.drift_gate import FailOn, drift_exit_code, parse_fail_on, verdict
 from lgcov.graph_diff import GraphDiff, diff_graphs
+from lgcov.jev_judge import JevJudge
+from lgcov.judges import FakeJudge, Judge, NodeState
+from lgcov.sampling import judge_samples, kpi_stats, render_kpi_table
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
-from lgcov.taxonomy import load_taxonomy
+from lgcov.taxonomy import KPISpec, load_taxonomy
 
 # 0 = no change / accepted, 1 = graph/replay changed or named node not drifted,
 # 2 = bad input (missing/unreadable/invalid).
@@ -545,6 +549,115 @@ def _ci(argv: list[str]) -> int:
     return result.exit_code
 
 
+_FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
+
+
+def _l2_judge(spec: KPISpec) -> Judge:
+    kpi = spec.to_kpi()
+    if spec.judge == "code":
+        return code_judge(kpi, spec.check or {})
+    if spec.judge == "fake":
+        check = spec.check or {}
+        unknown = sorted(set(check) - set(_FAKE_CHECK_KEYS))
+        if unknown:
+            raise ValueError(
+                f"KPI '{spec.name}': fake check keys {unknown} not in {_FAKE_CHECK_KEYS}"
+            )
+        every = check.get("fail_every", "0")
+        if not every.isdigit():
+            raise ValueError(f"KPI '{spec.name}': fail_every must be a whole number")
+        when = check.get("when_input_contains", "")
+        return FakeJudge(kpi, "pass", fail_every=int(every), when_input_contains=when)
+    return JevJudge(kpi)
+
+
+def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> dict[str, tuple[NodeState, NodeState]]:
+    """One case per run: the trace for code judges, else the node's own input and output."""
+    cases: dict[str, tuple[NodeState, NodeState]] = {}
+    for i, steps in enumerate(runs):
+        case_id = f"run-{i}/{spec.node}"
+        if spec.judge == "code":
+            cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps]}})
+            continue
+        if spec.node == "final":
+            step = steps[-1] if steps else None
+        else:
+            step = next((s for s in steps if s.node == spec.node), None)
+        if step is not None:
+            node_in = step.input if isinstance(step.input, dict) else {}
+            node_out = step.output if isinstance(step.output, dict) else {"output": step.output}
+            cases[case_id] = (node_in, node_out)
+    return cases
+
+
+def _judge_cmd(argv: list[str]) -> int:
+    """T073: the taxonomy's judges, k samples per case, on recorded and fresh outputs."""
+    ap = argparse.ArgumentParser(prog="lgcov judge")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
+    ap.add_argument("--cassette-dir", help="overrides cassette_dir")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml; overrides taxonomy_path")
+    ap.add_argument("--samples", type=int, help="k samples per case; overrides samples_per_case")
+    ap.add_argument("--max-calls", type=int, default=200, help="refuse more model judge calls")
+    ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
+    args = ap.parse_args(argv)
+    overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
+    try:
+        cfg = load_config(args.config, overrides)
+    except (OSError, ValueError) as exc:
+        print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    k = cfg.samples_per_case if args.samples is None else args.samples
+    taxonomy_path = args.taxonomy or cfg.taxonomy_path
+    if k < 1 or not taxonomy_path:
+        print(
+            "lgcov judge: needs a taxonomy (--taxonomy or taxonomy_path) and k >= 1",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    try:
+        specs = load_taxonomy(taxonomy_path).kpi_specs
+        judges = [_l2_judge(spec) for spec in specs]
+    except (OSError, ValueError) as exc:
+        print(f"lgcov judge: invalid taxonomy: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        # Exception: importing user graph code can raise anything.
+        graph = _load_graph(cfg.graph_entrypoint)
+    except Exception as exc:
+        return _harness_error("lgcov judge", "cannot load graph", exc)
+    try:
+        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _harness_error("lgcov judge", "cannot read baseline", exc)
+    try:
+        fresh = [replay_steps(graph, r, cfg.ignore_paths, serve=not args.live)[1] for r in runs]
+    except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
+        return _harness_error("lgcov judge", "the graph crashed during replay", exc)
+    base_runs = [r.steps for r in runs]
+    plan = [(spec, _l2_cases(spec, base_runs), _l2_cases(spec, fresh)) for spec in specs]
+    total = sum((len(b) + len(n)) * k for _, b, n in plan)
+    model = sum((len(b) + len(n)) * k for spec, b, n in plan if spec.judge != "code")
+    print(f"Planned: {total} judge calls, {model} to model judges (--max-calls {args.max_calls})")
+    if model > args.max_calls:
+        print(
+            f"lgcov judge: refusing to make {model} model judge calls (more than "
+            f"--max-calls {args.max_calls}); lower --samples or raise --max-calls",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    stats = []
+    for (spec, base, new), judge in zip(plan, judges, strict=True):
+        base_samples = {c: judge_samples(judge, i, o, k) for c, (i, o) in base.items()}
+        new_samples = {c: judge_samples(judge, i, o, k) for c, (i, o) in new.items()}
+        stats.append(
+            kpi_stats(spec.to_kpi(), k, base_samples, new_samples, code=spec.judge == "code")
+        )
+    print("\n".join(render_kpi_table(stats)))
+    outcomes = {s.outcome for s in stats}
+    return 1 if "fail" in outcomes else EXIT_ERROR if "infra_error" in outcomes else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--version"]:
@@ -556,6 +669,8 @@ def main(argv: list[str] | None = None) -> int:
         return _replay(argv[1:])
     if argv[:1] == ["snapshot"]:
         return _snapshot(argv[1:])
+    if argv[:1] == ["judge"]:
+        return _judge_cmd(argv[1:])
     if argv[:1] == ["coverage"]:
         return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:
