@@ -1,8 +1,8 @@
 # Why lgcov
 
 lgcov tells you which LangGraph node a PR actually changed and which ones only inherited
-the damage, gates each KPI in your taxonomy with a paired test, and (planned) lets a
-judge block only once it has earned that against human labels. First report in 2
+the damage, gates each KPI in your taxonomy with a paired test, and lets a judge block
+only once it has earned that against human labels. First report in 2
 minutes (L1 only, measured 27 Oct 2026). Other tools as of 31 Oct 2026.
 
 ## The problem
@@ -32,19 +32,20 @@ PR. Benchmark in progress (T101).
 
 **(c) Judges that earn the right to block.** A KPI's judge may block a PR only once the
 lower bounds of the 95% intervals of its TPR and TNR against human labels both clear
-0.80. Below that it advises, with the number of labels it still needs printed next to
-it.
-*Status: planned.* Built today: a BLOCK the judge isn't confident of (mean confidence
-under 0.7) goes to a human as INCONCLUSIVE, and any KPI can be made advisory in
-`lgcov.yaml`. Reenact sets a criterion blocking or advisory from its raw agreement with
+0.80. Below that it flags or advises, with the number of labels it still needs printed
+next to it.
+*Status: built (T063, [PR #32](https://github.com/AMOHYZ/langgraph-regression-guard/pull/32)):
+`lgcov calibrate` gives TPR and TNR with Wilson intervals, and a judge's band follows their
+lower bounds.* Reenact sets a criterion blocking or advisory from its raw agreement with
 human labels, and graphtrace reports Cohen's kappa per criterion; neither gates on
 interval bounds of TPR and TNR.
 
 **(e) Calibration that lives in the repo.** A reviewer's override is a label versioned in
 git, and the next PR re-estimates the judge's κ, TPR and TNR from those labels and moves
 the judge between advising and blocking. No hosted service.
-*Status: half built.* `review.apply_decision` saves an override as a labelled example in
-a calibration file in the repo; nothing reads it back into a judge yet. Kitaru also
+*Status: built (T102, [PR #33](https://github.com/AMOHYZ/langgraph-regression-guard/pull/33)):
+`lgcov review override` saves a label, the judge's band moves on the next PR, and saved
+cases re-judge the judge.* Kitaru also
 calibrates evaluators from human judgments, on a Kitaru server you run or on its managed
 cloud.
 
@@ -106,7 +107,6 @@ replay recorded calls too. lgcov's unit is the graph node.
 - A taxonomy without human review: KPIs come from failure modes a person has checked.
 - Attribute a crash in a router or a subgraph to a node: it counts as a harness error
   for now (T109). Subgraphs and `ToolNode`s always run live instead of being served.
-- (c), and the read-back half of (e), above.
 
 ## How this was checked
 

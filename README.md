@@ -2,8 +2,8 @@
 
 Catch silent regressions in LangGraph agents on every PR. lgcov tells you which node a
 PR actually changed and which ones only inherited the damage, gates each KPI in your
-taxonomy with a paired test, and (planned) lets a judge block only once it has earned
-that against human labels. A GitHub Action; first report in 2 minutes.
+taxonomy with a paired test, and lets a judge block only once it has earned that against
+human labels. A GitHub Action; first report in 2 minutes.
 
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
 
