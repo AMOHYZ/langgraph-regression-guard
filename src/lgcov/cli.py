@@ -78,6 +78,7 @@ from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, ve
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
+from lgcov.lint import lint, routers_of, summary
 from lgcov.review import ReviewDecision, apply_decision
 from lgcov.sampling import (
     KpiStats,
@@ -577,9 +578,11 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     l2, advisory, flagged, llm_code = None, frozenset[str](), frozenset[str](), 0
     llm_notes: list[str] = []
     calibration: list[str] = []
+    kpi_nodes: set[str] | None = None  # T104: for lint; None: no taxonomy, no check
     if args.taxonomy:
         try:
             every = list(load_taxonomy(args.taxonomy).kpi_specs)
+            kpi_nodes = {s.node for s in every}
             llm = [s.name for s in every if s.judge == "llm"]
             runs_llm = policy.llm_judges and _llm_judge is not None
             specs = every if runs_llm else [s for s in every if s.judge != "llm"]
@@ -606,6 +609,10 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
+    found = lint(head, routers_of(graph), {s.node for r in runs for s in r.steps}, kpi_nodes)
+    partial = replace(  # T104: before replay; warnings only, it never blocks
+        partial, lint_summary=summary(found), lint_lines=tuple(f.line() for f in found)
+    )
     serve = policy.serve and not args.live
     budget.expected_live = unservable(graph, runs) if serve else sum(len(r.steps) for r in runs)
     agent_start = perf_counter()
@@ -1440,6 +1447,58 @@ def _expected(path: Path) -> _Expected:
     )
 
 
+def _lint_cmd(argv: list[str]) -> int:
+    """T104: `lgcov lint`: what is wrong with the graph's shape, one line per finding, then
+    "🧹 Lint: N warnings". Exit 0; --strict exits 1 on a warning (info never counts)."""
+    ap = argparse.ArgumentParser(prog="lgcov lint")
+    ap.add_argument(
+        "target",
+        nargs="?",
+        help="<file.py>:<attr> (overrides graph_entrypoint), or a folder with graph.py and "
+        "maybe cassettes/ and taxonomy.yaml",
+    )
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    ap.add_argument("--cassette-dir", help="overrides cassette_dir")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml; overrides taxonomy_path")
+    ap.add_argument("--strict", action="store_true", help="exit 1 on any warning")
+    args = ap.parse_args(argv)
+    folder = Path(args.target) if args.target and Path(args.target).is_dir() else None
+    if folder is not None:  # a project folder, like examples/demo_agent: no lgcov.yaml
+        tax = folder / "taxonomy.yaml"
+        entry = f"{folder / 'graph.py'}:graph"
+        cassettes = args.cassette_dir or str(folder / "cassettes")
+        taxonomy = args.taxonomy or (str(tax) if tax.is_file() else None)
+    else:
+        overrides = {
+            "graph_entrypoint": args.target,
+            "cassette_dir": args.cassette_dir,
+            "taxonomy_path": args.taxonomy,
+        }
+        try:
+            cfg = load_config(args.config, overrides)
+        except (OSError, ValueError) as exc:
+            print(f"lgcov lint: invalid config: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        entry, cassettes, taxonomy = cfg.graph_entrypoint, cfg.cassette_dir, cfg.taxonomy_path
+    try:
+        # Exception: importing user graph code can raise anything.
+        graph = _load_graph(entry)
+        kpi_nodes = {s.node for s in load_taxonomy(taxonomy).kpi_specs} if taxonomy else None
+    except Exception as exc:
+        return _harness_error("lgcov lint", "cannot load the graph or the taxonomy", exc)
+    baseline, hit = Path(cassettes) / "baseline.json", None
+    if baseline.is_file():
+        try:
+            hit = {s.node for run in _load_runs(str(baseline)) for s in run.steps}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return _harness_error("lgcov lint", "cannot read baseline", exc)
+    else:
+        print(f"No {baseline}: never-hit check skipped.")
+    found = lint(snapshot_from_compiled(graph), routers_of(graph), hit, kpi_nodes)
+    print("\n".join([*(f.line() for f in found), summary(found)]))
+    return 1 if args.strict and any(f.severity == "warn" for f in found) else 0
+
+
 def _selfcheck_cmd(argv: list[str]) -> int:
     """T074: run the harness on fixtures whose outcome is known; a mismatch is a lgcov bug."""
     ap = argparse.ArgumentParser(prog="lgcov selfcheck")
@@ -1506,6 +1565,8 @@ def main(argv: list[str] | None = None) -> int:
         return _snapshot(argv[1:])
     if argv[:1] == ["selfcheck"]:
         return _selfcheck_cmd(argv[1:])
+    if argv[:1] == ["lint"]:
+        return _lint_cmd(argv[1:])
     if argv[:1] == ["judge"]:
         return _judge_cmd(argv[1:])
     if argv[:1] == ["calibrate"]:

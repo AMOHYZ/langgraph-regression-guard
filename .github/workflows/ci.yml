@@ -64,3 +64,6 @@ jobs:
 
       - name: Harness self-check
         run: uv run lgcov selfcheck
+
+      - name: Graph lint (T104; the demo stays clean)
+        run: uv run lgcov lint examples/demo_agent --strict

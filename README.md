@@ -198,6 +198,24 @@ must be AGENT_FAIL with the right root; and a missing cassette that must be
 INFRA_ERROR), prints expected vs actual, and exits 1 on any mismatch. CI runs it as its
 own job on every push.
 
+### Lint the graph
+
+`lgcov lint` reads the graph's shape before anything runs and prints one line per
+finding (severity, node, a one-line fix), then `🧹 Lint: N warnings`:
+
+- warn: a node unreachable from START; a router or an edge naming a node that doesn't
+  exist; a node no run in `<cassette_dir>/baseline.json` reached.
+- info: a node no KPI in the taxonomy names.
+
+```bash
+lgcov lint examples/demo_agent  # a folder: its graph.py, cassettes/ and taxonomy.yaml
+```
+
+Warnings never block: it exits 0, or 1 with `--strict`. `lgcov ci` runs it before replay
+and puts the 🧹 line in the PR comment, with the findings under it. LangGraph's
+`compile()` already refuses a router or an edge naming a node that doesn't exist, so on
+a compiled graph those two checks only catch a snapshot that skipped it.
+
 ## Judge KPIs locally (L2)
 
 `lgcov judge` runs a taxonomy's judges k times per case, on the recorded outputs and on a

@@ -79,6 +79,8 @@ class CiResult:
     not_checked: tuple[str, ...] = ()  # T089: nodes replay stopped before checking
     timing: Timing | None = None  # T089
     tier: str = ""  # T089: pr or nightly
+    lint_summary: str = ""  # T104: "🧹 Lint: 2 warnings"; never changes the exit code
+    lint_lines: tuple[str, ...] = ()  # T104: one per finding
 
 
 def _title(r: CiResult, v: ActionVerdict) -> str:
@@ -117,6 +119,11 @@ def render_ci_report(r: CiResult) -> str:
         lines += ["### Graph changes", ""]
         lines += [r.graph_note, ""] if r.graph_note else []
         lines += [*r.graph_lines, ""]
+    if r.lint_summary:
+        lines += [r.lint_summary, ""]
+    if r.lint_lines:
+        lines += ["<details>", "<summary>Lint findings</summary>", ""]
+        lines += [*(f"- {x}" for x in r.lint_lines), "", "</details>", ""]
     if r.replay_lines:
         lines += [*r.replay_lines, ""]
     if r.coverage_line:
