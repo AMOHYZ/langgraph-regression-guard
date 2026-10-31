@@ -4,7 +4,7 @@ Rows come from a labels CSV (case_id, judge_id, judge_label, human_label, and op
 judge_confidence and question_form) and from the overrides `review.apply_decision` saves.
 The positive class is a failure, a label scoring under 0.5 in the KPI's score_map: TPR is
 the share of human-failed cases the judge also failed, TNR the share of human-passed cases
-it passed.
+it passed. A judge's band (PR B) is what it may do to a PR: block, flag or advise.
 """
 
 from __future__ import annotations
@@ -18,10 +18,13 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from statistics import fmean
+from typing import Literal
 
 from lgcov.stats import wilson
 
 BINARY: Mapping[str, float] = {"pass": 1.0, "fail": 0.0}
+Band = Literal["blocking", "flag", "advisory"]
+BANDS: tuple[Band, ...] = ("blocking", "flag", "advisory")
 COLUMNS = ("case_id", "judge_id", "judge_label", "human_label")
 OPTIONAL = ("judge_confidence", "question_form")
 _Z = 1.959963984540054
@@ -295,13 +298,17 @@ def _rate(p: float | None, ci: tuple[float, float] | None) -> str:
     return "—" if p is None or ci is None else f"{p:.2f} [{ci[0]:.2f}, {ci[1]:.2f}]"
 
 
-def render_calibration(stats: Sequence[JudgeStats]) -> list[str]:
-    """Markdown: one row per judge, then each judge's operating points, temperatures and
-    threshold, in plain words."""
+def render_calibration(
+    stats: Sequence[JudgeStats],
+    kinds: Mapping[str, str] | None = None,
+    jev_model: str | None = None,
+) -> list[str]:
+    """Markdown: one row per judge with its band, then each judge's operating points,
+    temperatures and threshold, in plain words, and the pinned jev_model."""
     lines = [
-        "| judge | n | TPR: catches human-failed cases | TNR: clears human-passed cases "
+        "| judge | band | n | TPR: catches human-failed cases | TNR: clears human-passed cases "
         "| κ | agreement | failed by humans | labels for κ ±0.10 | Brier |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for s in stats:
         kappa = "—" if s.kappa is None else _rate(s.kappa, s.kappa_ci or (s.kappa, s.kappa))
@@ -311,11 +318,15 @@ def render_calibration(stats: Sequence[JudgeStats]) -> list[str]:
             else f"{s.needed.n_for_010} (±{s.needed.half_width:.2f} at {s.n})"
         )
         brier = "—" if s.brier is None else f"{s.brier:.3f}"
+        judged = "blocking (code judge)" if (kinds or {}).get(s.judge_id) == "code" else band(s)
         lines.append(
-            f"| {s.judge_id} | {s.n} | {_rate(s.tpr, s.tpr_ci)} | {_rate(s.tnr, s.tnr_ci)} "
+            f"| {s.judge_id} | {judged} | {s.n} | {_rate(s.tpr, s.tpr_ci)} "
+            f"| {_rate(s.tnr, s.tnr_ci)} "
             f"| {kappa} | {s.agreement:.0%} | {s.prevalence:.0%} | {needed} | {brier} |"
         )
     lines.append("")
+    pinned = f"jev_model: {jev_model}" if jev_model else "jev_model: not pinned in lgcov.yaml"
+    lines.append(f"{pinned}. Jev judges are only calibrated for the model their labels came from.")
     for s in stats:
         if s.brier is None:
             lines.append(f"No confidences for {s.judge_id}: no Brier, reliability or threshold.")
@@ -338,3 +349,110 @@ def render_calibration(stats: Sequence[JudgeStats]) -> list[str]:
                 f" (5-fold CV balanced accuracy {s.threshold.cv_balanced_accuracy:.2f})."
             )
     return lines
+
+
+def band(s: JudgeStats | None) -> Band:
+    """blocking: the lower bounds of both the TPR and the TNR interval reach 0.80; flag:
+    both point rates do; advisory: anything less, or no labels of both kinds."""
+    if s is None or s.tpr is None or s.tnr is None or s.tpr_ci is None or s.tnr_ci is None:
+        return "advisory"
+    if s.tpr_ci[0] >= 0.80 and s.tnr_ci[0] >= 0.80:
+        return "blocking"
+    return "flag" if s.tpr >= 0.80 and s.tnr >= 0.80 else "advisory"
+
+
+def _triple(p: float | None, ci: tuple[float, float] | None) -> list[float] | None:
+    return None if p is None or ci is None else [round(p, 4), round(ci[0], 4), round(ci[1], 4)]
+
+
+def bands_document(stats: Sequence[JudgeStats], jev_model: str | None) -> str:
+    """calibration/bands.json: each labelled judge's band and the numbers behind it, and the
+    jev_model its labels were made with. It lives in the repo, so a band moves in a diff."""
+    judges = {
+        s.judge_id: {
+            "band": band(s),
+            "n": s.n,
+            "tpr": _triple(s.tpr, s.tpr_ci),
+            "tnr": _triple(s.tnr, s.tnr_ci),
+            "kappa": _triple(s.kappa, s.kappa_ci),
+            "labels_for_kappa_010": None if s.needed is None else s.needed.n_for_010,
+            "brier": None if s.brier is None else round(s.brier, 4),
+        }
+        for s in stats
+    }
+    doc = {"version": 1, "jev_model": jev_model, "judges": judges}
+    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
+
+
+@dataclass(frozen=True)
+class Bands:
+    of: Mapping[str, Band]  # each KPI's band for this run
+    uncalibrated: tuple[str, ...] = ()  # model judges bands.json has no labels for
+    warnings: tuple[str, ...] = ()
+
+
+def _recorded(document: object) -> tuple[dict[str, Band], str | None]:
+    if document is None:
+        return {}, None
+    judges = document.get("judges") if isinstance(document, dict) else None
+    if not isinstance(document, dict) or not isinstance(judges, dict):
+        raise ValueError("bands.json: needs a 'judges' mapping")
+    model = document.get("jev_model")
+    if model is not None and not isinstance(model, str):
+        raise ValueError("bands.json: 'jev_model' must be a string or null")
+    out: dict[str, Band] = {}
+    for name, entry in judges.items():
+        value = entry.get("band") if isinstance(entry, dict) else None
+        found = next((b for b in BANDS if b == value), None)
+        if not isinstance(name, str) or found is None:
+            raise ValueError(f"bands.json: judge {name!r} needs a band, one of {list(BANDS)}")
+        out[name] = found
+    return out, model
+
+
+def judge_bands(
+    kinds: Mapping[str, str],
+    document: object,
+    jev_model: str | None,
+    uncalibrated: Band = "advisory",
+) -> Bands:
+    """kinds: KPI name -> judge kind; document: bands.json, parsed (None: no file). Code
+    judges always block. A model judge takes its band from bands.json, or `uncalibrated`
+    when it has none; a jev judge whose labels came from another jev_model drops to flag."""
+    recorded, labelled_with = _recorded(document)
+    of: dict[str, Band] = {}
+    missing, capped = [], []
+    for kpi, kind in sorted(kinds.items()):
+        if kind == "code":
+            of[kpi] = "blocking"
+            continue
+        if kpi not in recorded:
+            of[kpi] = uncalibrated
+            missing.append(kpi)
+            continue
+        of[kpi] = recorded[kpi]
+        if kind == "jev" and labelled_with != jev_model and of[kpi] == "blocking":
+            of[kpi] = "flag"
+            capped.append(kpi)
+    warnings: tuple[str, ...] = ()
+    if capped:
+        names = ", ".join(f"`{k}`" for k in capped)
+        warnings = (
+            f"⚠️ jev_model is {jev_model or 'not pinned'} but the labels came from "
+            f"{labelled_with or 'an unpinned model'}: {names} can't block until "
+            "`lgcov calibrate` runs again.",
+        )
+    return Bands(of, tuple(missing), warnings)
+
+
+def uncalibrated_line(bands: Bands, kinds: Mapping[str, str], uncalibrated: Band) -> str:
+    """The report's header line, when some model judge has no labels; else empty."""
+    if not bands.uncalibrated:
+        return ""
+    n, m = len(bands.uncalibrated), len(kinds)
+    models = sum(1 for kind in kinds.values() if kind != "code")
+    if uncalibrated == "flag":
+        what = "they can stop this PR only as INCONCLUSIVE"
+    else:
+        what = "no model judge can block this PR" if n == models else "they can't block this PR"
+    return f"⚠️ {n} of {m} judges uncalibrated: {what}. Run `lgcov calibrate`."

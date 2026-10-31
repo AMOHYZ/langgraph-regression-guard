@@ -101,6 +101,8 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         ({"graph_entrypoint": "a.py:g", "samples_per_case": "3"}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": True}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "tier": "weekly"}, "tier"),
+        ({"graph_entrypoint": "a.py:g", "gate": {"uncalibrated": "blocking"}}, "uncalibrated"),
+        ({"graph_entrypoint": "a.py:g", "jev_model": ""}, "jev_model"),
         ({"graph_entrypoint": "a.py:g", "gate": {"alpha": 0}}, "alpha"),
         ({"graph_entrypoint": "a.py:g", "gate": {"power": 1}}, "power"),
         ({"graph_entrypoint": "a.py:g", "gate": {"margin": -0.1}}, "margin"),
@@ -187,3 +189,16 @@ def test_tier_policy() -> None:
     assert tier_policy("pr", 5).k == 1
     assert tier_policy("nightly", None) == TierPolicy(False, 3, None, True)
     assert tier_policy("nightly", 5).k == 5
+
+
+def test_gate_uncalibrated_and_the_pinned_jev_model() -> None:
+    # T063: what a judge with no labels may do, and the Jev model labels were made with.
+    cfg = parse_config({"graph_entrypoint": "a.py:g"})
+    assert (cfg.gate.uncalibrated, cfg.jev_model) == ("advisory", None)
+    raw = {
+        "graph_entrypoint": "a.py:g",
+        "jev_model": "jev-2026-10",
+        "gate": {"uncalibrated": "flag"},
+    }
+    cfg = parse_config(raw)
+    assert (cfg.gate.uncalibrated, cfg.jev_model) == ("flag", "jev-2026-10")

@@ -135,6 +135,7 @@ class KpiStats:
     p_adjusted: float | None = None  # Holm (blocking) or Benjamini-Hochberg (advisory)
     decision: Decision | None = None  # None: no paired case to decide on
     roots: tuple[str, ...] = ()  # nodes that drifted first in the runs whose score changed
+    band: str = "blocking"  # T063: blocking, flag (BLOCK capped at INCONCLUSIVE) or advisory
 
     @property
     def flakiness(self) -> float:
@@ -222,10 +223,16 @@ def gate_kpis(
     advisory: Collection[str] = (),
     alpha: float = 0.05,
     min_confidence: float = 0.7,
+    flagged: Collection[str] = (),
 ) -> list[KpiStats]:
     """T091: Holm across the blocking KPIs, Benjamini-Hochberg across the advisory ones,
-    then each KPI's decision against its margin. An advisory KPI never fails the gate."""
-    gated = [replace(s, blocking=s.kpi not in advisory) for s in stats]
+    then each KPI's decision against its margin. An advisory KPI never fails the gate, and
+    (T063) a flagged one, a judge whose band is flag, stops it at most as INCONCLUSIVE."""
+
+    def band(kpi: str) -> str:
+        return "advisory" if kpi in advisory else "flag" if kpi in flagged else "blocking"
+
+    gated = [replace(s, blocking=s.kpi not in advisory, band=band(s.kpi)) for s in stats]
     for blocking, adjust, reject in (
         (True, holm_adjusted, holm),
         (False, benjamini_hochberg_adjusted, benjamini_hochberg),
@@ -237,7 +244,8 @@ def gate_kpis(
         ):
             s = gated[i]
             decision = decide(r.delta, r.ci, s.margin, significant)
-            outcome = gate_outcome(decision, s.confidence, min_confidence, blocking)
+            capped = s.band == "flag"
+            outcome = gate_outcome(decision, s.confidence, min_confidence, blocking, capped)
             gated[i] = replace(s, p_adjusted=p_adj, decision=decision, outcome=outcome)
     return gated
 
@@ -282,7 +290,8 @@ def _verdict(s: KpiStats) -> str:
     if s.decision is None:
         return "⚠️ infra error" if s.outcome == "infra_error" else "⚠️ INCONCLUSIVE (no pairs)"
     if s.blocking and s.decision == "BLOCK" and s.outcome == "needs_human":
-        return "⚠️ INCONCLUSIVE (low judge confidence)"
+        why = "judge band: flag" if s.band == "flag" else "low judge confidence"
+        return f"⚠️ INCONCLUSIVE ({why})"
     return f"{_ICONS[s.outcome]} {s.decision}"
 
 
@@ -300,7 +309,7 @@ def render_gate_table(
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for s in stats:
-        name = s.kpi if s.blocking else f"{s.kpi} (advisory)"
+        name = s.kpi if s.band == "blocking" else f"{s.kpi} ({s.band})"
         roots = ", ".join(f"`{n}`" for n in s.roots) or "—"
         r = s.paired
         if r is None:

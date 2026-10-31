@@ -42,9 +42,12 @@ def _question(kpi: KPI) -> dict[str, Any]:
 class JevJudge:
     """Scores one KPI by sending the node I/O to the Jev API as one typed question."""
 
-    def __init__(self, kpi: KPI, client: _PostClient | None = None) -> None:
+    def __init__(
+        self, kpi: KPI, client: _PostClient | None = None, model: str | None = None
+    ) -> None:
         self.kpi = kpi
         self._client = client
+        self.model = model or "jev-latest"  # T063: jev_model, pinned in lgcov.yaml
 
     def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
         url = os.environ.get("JEV_API_URL")
@@ -55,7 +58,7 @@ class JevJudge:
                 f"(kpi '{self.kpi.name}')"
             )
         payload = {
-            "model": "jev-latest",
+            "model": self.model,
             "state": {"input": node_input, "output": node_output},
             "questions": {self.kpi.name: _question(self.kpi)},
         }

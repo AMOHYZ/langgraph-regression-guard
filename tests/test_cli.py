@@ -794,7 +794,23 @@ def _judge_args(tmp_path: Path) -> list[str]:
         Path(DEMO_BASELINE).read_text(encoding="utf-8"), encoding="utf-8"
     )
     cassettes = str(tmp_path / "cassettes")
-    return ["judge", "--graph", f"{DEMO_GRAPH}:graph", "--cassette-dir", cassettes]
+    bands = str(tmp_path / "bands.json")  # T063: absent unless a test writes it
+    return [
+        "judge",
+        "--graph",
+        f"{DEMO_GRAPH}:graph",
+        "--cassette-dir",
+        cassettes,
+        "--bands",
+        bands,
+    ]
+
+
+def _bands(path: Path, **judges: str) -> None:
+    """T063: a calibration/bands.json giving these KPIs these bands."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"version": 1, "jev_model": None, "judges": {k: {"band": b} for k, b in judges.items()}}
+    path.write_text(json.dumps(doc), encoding="utf-8")
 
 
 def test_cli_judge_samples_three_and_shows_a_flaky_row(
@@ -810,9 +826,10 @@ def test_cli_judge_samples_three_and_shows_a_flaky_row(
     # with no spread in the differences there is no MDE to give.
     assert "| KPI | n | base | PR | Δ (95% CI) | p adj. | δ | MDE | N* | verdict | root |" in out
     assert (
-        "| answer_states_order_status | 2 | 83% | 83% | +0.00 [+0.00, +0.00] | 1.000 | 0.05 "
-        "| — | — | 🟢 SHIP | — |"
-    ) in out
+        "| answer_states_order_status (advisory) | 2 | 83% | 83% | +0.00 [+0.00, +0.00] | 1.000 "
+        "| 0.05 | — | — | 🟢 SHIP | — |"
+    ) in out  # T063: no calibration labels, so advisory
+    assert "⚠️ 1 of 2 judges uncalibrated: no model judge can block this PR." in out
 
 
 # T091: base passes both cases and the PR fails its order case: n=2 can't decide that.
@@ -839,6 +856,7 @@ def test_cli_judge_inconclusive_exits_zero_unless_gate_inconclusive_blocks(
     taxonomy = tmp_path / "taxonomy.yaml"
     taxonomy.write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
     args = [*_judge_args(tmp_path), "--taxonomy", str(taxonomy)]
+    _bands(tmp_path / "bands.json", answer_states_order_status="blocking")  # T063: calibrated
     assert main(args) == 0
     out = capsys.readouterr().out
     assert "| answer_states_order_status | 2 | 100% | 50% |" in out
@@ -913,6 +931,7 @@ def test_cli_ci_gates_kpis_and_fails_on_inconclusive_only_when_asked(
 ) -> None:
     _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
     (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    _bands(tmp_path / "calibration" / "bands.json", answer_states_order_status="blocking")
     code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
     assert (code, outputs["verdict"]) == (0, "pass")
     assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: inconclusive, needs a human")
@@ -1154,6 +1173,7 @@ def test_cli_ci_nightly_llm_kpi_without_a_client_is_infra_error_only_when_blocki
 ) -> None:
     _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
     (tmp_path / "taxonomy.yaml").write_text(LLM_TAXONOMY, encoding="utf-8")
+    _bands(tmp_path / "calibration" / "bands.json", answer_tone="blocking")  # T063: calibrated
     args = ("--taxonomy", "taxonomy.yaml", "--tier", "nightly")
     code, report, _ = _run_ci(tmp_path, *args)
     assert code == 2  # answer_tone blocks: nothing judged it
@@ -1189,12 +1209,12 @@ DEMO_LABELS = Path(__file__).resolve().parents[1] / "examples" / "demo_agent" / 
 
 
 def test_cli_calibrate_prints_a_row_per_judge_in_plain_words(
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["calibrate", str(DEMO_LABELS)]) == 0
+    assert main(["calibrate", str(DEMO_LABELS), "--bands", str(tmp_path / "bands.json")]) == 0
     out = capsys.readouterr().out
-    assert "| judge | n | TPR: catches human-failed cases | TNR: clears human-passed cases |" in out
-    assert "| answer_states_order_status | 40 | 0.90 [0.70, 0.97] | 0.95 [0.76, 0.99] |" in out
+    assert "| TPR: catches human-failed cases | TNR: clears human-passed cases |" in out
+    assert "| 40 | 0.90 [0.70, 0.97] | 0.95 [0.76, 0.99] |" in out
     assert "Threshold, answer_states_order_status: too few labels to tune (40 < 50)." in out
 
 
@@ -1203,10 +1223,46 @@ def test_cli_calibrate_counts_overrides_it_cannot_map(
 ) -> None:
     overrides = tmp_path / "calibration.jsonl"
     overrides.write_text('{"human_label": 1.0, "node": "respond"}\n', encoding="utf-8")
-    assert main(["calibrate", str(DEMO_LABELS), "--overrides", str(overrides)]) == 0
+    bands = str(tmp_path / "bands.json")
+    assert (
+        main(["calibrate", str(DEMO_LABELS), "--overrides", str(overrides), "--bands", bands]) == 0
+    )
     assert "1 override skipped: no kpi or judge_label" in capsys.readouterr().out
 
 
 def test_cli_calibrate_with_a_missing_file_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["calibrate", "no-such-labels.csv"]) == 2
     assert "lgcov calibrate:" in capsys.readouterr().err
+
+
+# T063 PR B: bands from calibration decide which judges can block.
+def test_cli_calibrate_writes_bands_json_with_the_pinned_jev_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "lgcov.yaml"
+    config.write_text("graph_entrypoint: a.py:g\njev_model: jev-2026-10\n", encoding="utf-8")
+    bands = tmp_path / "calibration" / "bands.json"
+    args = ["calibrate", str(DEMO_LABELS), "--config", str(config), "--bands", str(bands)]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "| judge | band | n | TPR: catches human-failed cases |" in out
+    assert "| answer_states_order_status | flag | 40 | 0.90 [0.70, 0.97] |" in out
+    assert "jev_model: jev-2026-10" in out
+    doc = json.loads(bands.read_text(encoding="utf-8"))
+    assert (doc["jev_model"], doc["judges"]["answer_states_order_status"]["band"]) == (
+        "jev-2026-10",
+        "flag",
+    )
+
+
+def test_cli_judge_respects_the_bands(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    taxonomy = tmp_path / "taxonomy.yaml"
+    taxonomy.write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    args = [*_judge_args(tmp_path), "--taxonomy", str(taxonomy), "--fail-on-inconclusive"]
+    assert main(args) == 0  # uncalibrated: advisory, so even INCONCLUSIVE can't fail it
+    assert "⚠️ 1 of 1 judges uncalibrated: no model judge can block this PR." in (
+        capsys.readouterr().out
+    )
+    _bands(tmp_path / "bands.json", answer_states_order_status="flag")
+    assert main(args) == 1  # a flag judge's INCONCLUSIVE counts
+    assert "| answer_states_order_status (flag) |" in capsys.readouterr().out

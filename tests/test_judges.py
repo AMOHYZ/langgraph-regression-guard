@@ -107,6 +107,15 @@ def test_verdicts_pair_up_by_position() -> None:
     assert verdict_gate(good + bad, bad + good) == "needs_human"
 
 
+def test_only_a_blocking_judge_can_fail_the_gate() -> None:
+    # T063: a judge's calibration band caps what its verdicts can do.
+    base = _verdicts(GOOD_BAD, "good", 12, 0.9)
+    new = _verdicts(GOOD_BAD, "bad", 12, 0.9)
+    assert verdict_gate(base, new, band="blocking") == "fail"
+    assert verdict_gate(base, new, band="flag") == "needs_human"
+    assert verdict_gate(base, new, band="advisory") == "needs_human"
+
+
 def test_infra_error_in_candidates_gates_to_infra_error() -> None:
     base = _verdicts(GOOD_BAD, "good", 12, 0.9)
     new: Sequence[Verdict | JudgeInfraError] = [
@@ -274,3 +283,12 @@ def test_jev_keeps_the_response_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     assert verdict.raw["usage"] == usage
     plain = JevJudge(GOOD_BAD, client=_FakeClient([_ok(GOOD_BAD, "good", 0.9)])).judge({}, {})
     assert "usage" not in plain.raw
+
+
+def test_jev_sends_the_jev_model_pinned_in_lgcov_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    # T063: labels are only good for the model that made them.
+    _set_env(monkeypatch)
+    client = _FakeClient([_ok(GOOD_BAD, "good", 0.9), _ok(GOOD_BAD, "good", 0.9)])
+    JevJudge(GOOD_BAD, client=client, model="jev-2026-10").judge({}, {})
+    JevJudge(GOOD_BAD, client=client).judge({}, {})
+    assert [p["model"] for p in client.payloads] == ["jev-2026-10", "jev-latest"]

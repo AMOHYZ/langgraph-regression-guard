@@ -6,8 +6,11 @@ import pytest
 
 from lgcov.calibration import (
     Row,
+    band,
+    bands_document,
     cohen_kappa,
     fit_temperature,
+    judge_bands,
     judge_stats,
     labels_needed,
     read_labels,
@@ -132,3 +135,42 @@ def test_labels_csv_needs_its_columns_and_a_confidence_in_0_1() -> None:
 def test_labels_outside_the_kpi_name_the_judge() -> None:
     with pytest.raises(ValueError, match="grounded.*'maybe'"):
         judge_stats("grounded", _rows([("maybe", "pass")]))
+
+
+# T063 PR B: bands, on the lower bounds of the TPR and TNR intervals.
+def test_twenty_of_twenty_each_way_blocks() -> None:
+    s = judge_stats("grounded", _rows([("fail", "fail")] * 20 + [("pass", "pass")] * 20))
+    assert s.tpr_ci is not None and s.tpr_ci[0] > 0.80  # 0.84
+    assert band(s) == "blocking"
+
+
+def test_sixteen_of_twenty_is_a_flag_the_point_is_080_but_not_the_lower_bound() -> None:
+    rows = _rows([("fail", "fail")] * 16 + [("pass", "fail")] * 4 + [("pass", "pass")] * 20)
+    s = judge_stats("grounded", rows)
+    assert s.tpr == 0.8 and s.tpr_ci is not None and s.tpr_ci[0] < 0.8
+    assert band(s) == "flag"
+
+
+def test_no_labels_or_a_point_rate_under_080_is_advisory() -> None:
+    assert band(None) == "advisory"
+    rows = _rows([("fail", "fail")] * 10 + [("pass", "fail")] * 10 + [("pass", "pass")] * 20)
+    assert band(judge_stats("grounded", rows)) == "advisory"
+
+
+def test_code_judges_block_and_unlabelled_model_judges_take_gate_uncalibrated() -> None:
+    kinds = {"visits": "code", "tone": "fake", "grounded": "jev"}
+    bands = judge_bands(kinds, None, None)
+    assert bands.of == {"visits": "blocking", "tone": "advisory", "grounded": "advisory"}
+    assert bands.uncalibrated == ("grounded", "tone")
+    assert judge_bands(kinds, None, None, uncalibrated="flag").of["tone"] == "flag"
+
+
+def test_a_jev_model_other_than_the_labels_caps_jev_judges_at_flag_with_a_warning() -> None:
+    rows = _rows([("fail", "fail")] * 20 + [("pass", "pass")] * 20)
+    doc = json.loads(bands_document([judge_stats("grounded", rows)], jev_model="jev-2026-10"))
+    assert doc["judges"]["grounded"]["band"] == "blocking"
+    same = judge_bands({"grounded": "jev"}, doc, "jev-2026-10")
+    assert (same.of, same.warnings) == ({"grounded": "blocking"}, ())
+    moved = judge_bands({"grounded": "jev"}, doc, "jev-2026-11")
+    assert moved.of == {"grounded": "flag"}
+    assert "jev-2026-11" in moved.warnings[0] and "jev-2026-10" in moved.warnings[0]

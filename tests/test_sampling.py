@@ -243,3 +243,15 @@ def test_gate_table_row_has_n_rates_delta_ci_p_margin_mde_n_star_verdict_and_roo
         "| grounded | 200 | 100% | 90% | -0.10 [-0.14, -0.06] | <0.001 | 0.05 | 0.05 | 71 "
         "| 🔴 BLOCK | `respond` |",  # run-50 didn't change: its root isn't this KPI's
     ]
+
+
+# T063 PR B: a flag-band judge can stop a PR only as INCONCLUSIVE.
+def test_a_flag_band_caps_a_block_at_inconclusive_and_still_counts_as_blocking() -> None:
+    base, new = _drop(200, 20)
+    [flagged] = gate_kpis([kpi_stats(KPI_, 1, base, new)], flagged={"grounded"})
+    assert (flagged.decision, flagged.outcome, flagged.blocking) == ("BLOCK", "needs_human", True)
+    assert gate_exit_code([flagged]) == 0
+    assert gate_exit_code([flagged], inconclusive_blocks=True) == 1
+    table = "\n".join(render_gate_table([flagged]))
+    assert "| grounded (flag) |" in table
+    assert "⚠️ INCONCLUSIVE (judge band: flag)" in table
