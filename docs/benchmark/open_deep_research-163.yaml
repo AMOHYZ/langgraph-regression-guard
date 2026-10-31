@@ -1,0 +1,151 @@
+# T100a: the first real benchmark row. langchain-ai/open_deep_research PR #163, "Ruff, update
+# prompts, add think tool, update defaults", squash-merged 6 Aug 2025 as 6532a41 (one parent,
+# f95d200): https://github.com/langchain-ai/open_deep_research/pull/163
+#
+# Labels are a draft from the diff, waiting for a human: `lgcov bench` lists the row but
+# never runs or scores it, and leaves it out of the micro and macro rows. It can't run here
+# anyway: the agent makes real LLM and search calls. To run it once confirmed, clone the
+# repo, set `repo:` to the clone (relative to this file) and set the API keys.
+#
+# Node names: a node inside the research_supervisor subgraph is research_supervisor.<node>.
+# supervisor_tools runs researcher_subgraph once per ConductResearch call, so the
+# researchers' nodes are named under it: research_supervisor.supervisor_tools.<node>.
+#
+# Evidence: `at` is the first + line of the quote on head_ref (6532a41); - lines are the
+# base_ref (f95d200) lines they replace. The diff checked is whitespace-blind (`-w`), so
+# Ruff's reformatting doesn't count as a change.
+status: labels_pending_human_review
+graph: src/open_deep_research/deep_researcher.py:deep_researcher
+base_ref: f95d200654b5c4733e87375be15b92822c6c4ff8
+head_ref: 6532a4176a93cc9bb2102b3d825dcefa560c85d9
+cases:
+  - messages:
+      - {role: user, content: "Compare the context window sizes and per-token prices of the current flagship models from OpenAI, Anthropic and Google, with sources."}
+  - messages:
+      - {role: user, content: "What changed in the EU AI Act's obligations for general-purpose AI models between the 2021 proposal and the adopted 2024 text?"}
+changed_nodes:  # no edge changed: base and head wire the same graph
+  - file: src/open_deep_research/prompts.py
+    change: lead_researcher_prompt rewritten (think_tool protocol; hard limits naming {max_researcher_iterations} and {max_concurrent_research_units})
+    nodes: [write_research_brief]
+  - file: src/open_deep_research/prompts.py
+    change: research_system_prompt rewritten (think_tool after each search; hard limits)
+    nodes: [research_supervisor.supervisor_tools.researcher]
+  - file: src/open_deep_research/deep_researcher.py
+    change: the supervisor binds think_tool
+    nodes: [research_supervisor.supervisor]
+  - file: src/open_deep_research/deep_researcher.py
+    change: supervisor_tools answers think_tool calls, stops after > (was >=) max_researcher_iterations rounds, writes raw_notes only when there are some
+    nodes: [research_supervisor.supervisor_tools]
+  - file: src/open_deep_research/deep_researcher.py
+    change: final_report_generation takes the API key for final_report_model (was research_model), re-formats its prompt on each retry, says why in its error messages
+    nodes: [final_report_generation]
+  - file: src/open_deep_research/deep_researcher.py
+    change: refactors that keep the calls the same (renamed locals, prompt built in a variable first)
+    nodes: [clarify_with_user, write_research_brief, research_supervisor.supervisor_tools.researcher, research_supervisor.supervisor_tools.researcher_tools, research_supervisor.supervisor_tools.compress_research]
+  - file: src/open_deep_research/utils.py
+    change: think_tool added and given to the researcher by get_all_tools; tavily_search reads max_content_length
+    nodes: [research_supervisor.supervisor_tools.researcher, research_supervisor.supervisor_tools.researcher_tools]
+  - file: src/open_deep_research/configuration.py
+    change: "defaults: max_researcher_iterations 3 -> 6, max_react_tool_calls 5 -> 10, summarization_model gpt-4.1-nano -> gpt-4.1-mini, compression_model gpt-4.1-mini -> gpt-4.1, max_content_length new (50000, the old hard-coded value)"
+    nodes: [write_research_brief, research_supervisor.supervisor_tools, research_supervisor.supervisor_tools.researcher_tools, research_supervisor.supervisor_tools.compress_research]
+expected:
+  root:
+    - write_research_brief
+    - research_supervisor.supervisor
+    - research_supervisor.supervisor_tools
+    - research_supervisor.supervisor_tools.researcher
+    - research_supervisor.supervisor_tools.researcher_tools
+    - research_supervisor.supervisor_tools.compress_research
+  propagated: [final_report_generation]
+evidence:
+  - node: write_research_brief
+    label: root
+    at: src/open_deep_research/deep_researcher.py:157
+    diff: "+    supervisor_system_prompt = lead_researcher_prompt.format("
+    why: It writes the supervisor's system prompt into supervisor_messages, so the rewritten prompt is its own output.
+  - node: write_research_brief
+    label: root
+    at: src/open_deep_research/prompts.py:107
+    diff: "+- **Limit tool calls** - Always stop after {max_researcher_iterations} tool calls to ConductResearch and think_tool if you cannot find the right sources"
+    why: The prompt now carries max_researcher_iterations, whose default went from 3 to 6.
+  - node: research_supervisor.supervisor
+    label: root
+    at: src/open_deep_research/deep_researcher.py:202
+    diff: |-
+      -    lead_researcher_tools = [ConductResearch, ResearchComplete]
+      +    lead_researcher_tools = [ConductResearch, ResearchComplete, think_tool]
+    why: The supervisor can call think_tool, which it couldn't before.
+  - node: research_supervisor.supervisor_tools
+    label: root
+    at: src/open_deep_research/deep_researcher.py:247
+    diff: |-
+      -    exceeded_allowed_iterations = research_iterations >= configurable.max_researcher_iterations
+      +    exceeded_allowed_iterations = research_iterations > configurable.max_researcher_iterations
+    why: One more supervisor round before it stops.
+  - node: research_supervisor.supervisor_tools
+    label: root
+    at: src/open_deep_research/deep_researcher.py:269
+    diff: "+    think_tool_calls = ["
+    why: It answers the supervisor's think_tool calls with a ToolMessage.
+  - node: research_supervisor.supervisor_tools
+    label: root
+    at: src/open_deep_research/configuration.py:95
+    diff: |-
+      -        default=3,
+      +        default=6,
+    why: max_researcher_iterations, the cap supervisor_tools checks.
+  - node: research_supervisor.supervisor_tools.researcher
+    label: root
+    at: src/open_deep_research/prompts.py:138
+    diff: |-
+      -research_system_prompt = """You are a research assistant conducting deep research on the user's input topic. Use the tools and search methods provided to research the user's input topic. For context, today's date is {date}.
+      +research_system_prompt = """You are a research assistant conducting research on the user's input topic. For context, today's date is {date}.
+    why: The researcher's system prompt was rewritten.
+  - node: research_supervisor.supervisor_tools.researcher
+    label: root
+    at: src/open_deep_research/utils.py:579
+    diff: |-
+      -    tools = [tool(ResearchComplete)]
+      +    tools = [tool(ResearchComplete), think_tool]
+    why: get_all_tools gives the researcher think_tool.
+  - node: research_supervisor.supervisor_tools.researcher_tools
+    label: root
+    at: src/open_deep_research/configuration.py:108
+    diff: |-
+      -        default=5,
+      +        default=10,
+    why: max_react_tool_calls, the cutoff researcher_tools checks (deep_researcher.py:492).
+  - node: research_supervisor.supervisor_tools.researcher_tools
+    label: root
+    at: src/open_deep_research/configuration.py:122
+    diff: |-
+      -        default="openai:gpt-4.1-nano",
+      +        default="openai:gpt-4.1-mini",
+    why: summarization_model writes the search results researcher_tools returns (utils.py:85-88).
+  - node: research_supervisor.supervisor_tools.researcher_tools
+    label: root
+    at: src/open_deep_research/utils.py:220
+    diff: "+def think_tool(reflection: str) -> str:"
+    why: researcher_tools now runs the researcher's think_tool calls.
+  - node: research_supervisor.supervisor_tools.compress_research
+    label: root
+    at: src/open_deep_research/configuration.py:174
+    diff: |-
+      -        default="openai:gpt-4.1-mini",
+      +        default="openai:gpt-4.1",
+    why: compression_model, the model compress_research calls (deep_researcher.py:528).
+  - node: final_report_generation
+    label: propagated
+    at: src/open_deep_research/deep_researcher.py:630
+    diff: |-
+      -        "api_key": get_api_key_for_model(configurable.research_model, config),
+      +        "api_key": get_api_key_for_model(configurable.final_report_model, config),
+    why: Its own diff only matters when the two models need different keys, or on a retry or an error; both models default to openai:gpt-4.1, so on defaults it drifts only through the notes and research brief it is given.
+hard_cases: [subgraph, loop]
+notes: >-
+  Unchanged: clarify_with_user (renamed locals only); state.py changes docstrings only.
+  Not graph code: README.md, CLAUDE.md, pyproject.toml, uv.lock, src/legacy/, tests/.
+  supervisor_tools fans out to researchers with asyncio.gather over
+  researcher_subgraph.ainvoke (deep_researcher.py:296-305), not Send, so send_fanout
+  doesn't apply; the loops are supervisor <-> supervisor_tools and researcher <->
+  researcher_tools.

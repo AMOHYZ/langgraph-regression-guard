@@ -25,6 +25,7 @@ from lgcov.attribution import (
     Result,
     Score,
     parse_benchmark,
+    pending_result,
     render_markdown,
     results_json,
     score,
@@ -1410,9 +1411,9 @@ def _bench_cmd(argv: list[str]) -> int:
         except (OSError, ValueError, yaml.YAMLError) as exc:
             print(f"lgcov bench: {f}: {exc}", file=sys.stderr)
             return EXIT_ERROR
-    results = [_bench_one(b) for b in benchmarks]
+    results = [pending_result(b) if b.status else _bench_one(b) for b in benchmarks]
     command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only)])
-    source = f"the {len(results)} benchmark files in `{folder}`"
+    source = f"the {len(results)} benchmark file{'' if len(results) == 1 else 's'} in `{folder}`"
     md = render_markdown(results, command, datetime.now(UTC).date().isoformat(), source)
     for path, text in ((Path(args.out), md), (Path(args.json), results_json(results))):
         path.parent.mkdir(parents=True, exist_ok=True)

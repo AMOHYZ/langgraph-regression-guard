@@ -1,10 +1,21 @@
-"""T101a: the attribution benchmark's scoring and report (pure)."""
+"""T101a: the attribution benchmark's scoring and report (pure). T100a: real rows, pending
+human review."""
 
 from pathlib import Path
 
 import pytest
+import yaml
 
-from lgcov.attribution import Result, macro, micro, parse_benchmark, render_markdown, score
+from lgcov.attribution import (
+    Result,
+    Score,
+    macro,
+    micro,
+    parse_benchmark,
+    pending_result,
+    render_markdown,
+    score,
+)
 
 
 def _result(name: str, found: set[str], expected: set[str], hard: tuple[str, ...] = ()) -> Result:
@@ -71,3 +82,77 @@ def test_the_table_marks_a_miss_on_a_hard_case_as_a_known_gap() -> None:
 def test_a_benchmark_file_needs_a_graph_base_and_head(raw: dict[str, object], match: str) -> None:
     with pytest.raises(ValueError, match=match):
         parse_benchmark("x", raw, Path("."))
+
+
+# T100a: the first real row, langchain-ai/open_deep_research PR #163, labels pending review.
+ROW_163 = Path(__file__).resolve().parents[1] / "docs" / "benchmark" / "open_deep_research-163.yaml"
+_ROW: dict[str, object] = {
+    "graph": "g.py:graph",
+    "base_ref": "a1",
+    "head_ref": "b2",
+    "cases": [{"q": "hi"}],
+    "expected": {"root": ["x"], "propagated": ["y"]},
+}
+
+
+def test_the_163_row_validates_against_the_benchmark_schema() -> None:
+    b = parse_benchmark(ROW_163.stem, yaml.safe_load(ROW_163.read_text("utf-8")), ROW_163.parent)
+    assert b.status == "labels_pending_human_review"
+    assert (b.base_ref, b.head_ref) == (
+        "f95d200654b5c4733e87375be15b92822c6c4ff8",  # the merge commit's only parent
+        "6532a4176a93cc9bb2102b3d825dcefa560c85d9",
+    )
+    assert b.graph == "src/open_deep_research/deep_researcher.py:deep_researcher"
+    assert "research_supervisor.supervisor" in b.root
+    assert b.propagated == {"final_report_generation"}
+    assert set(b.hard_cases) == {"subgraph", "loop"}
+    assert {(e.node, e.label) for e in b.evidence} == {(n, "root") for n in b.root} | {
+        ("final_report_generation", "propagated")
+    }
+    assert b.changed_nodes and all(c.file.startswith("src/") for c in b.changed_nodes)
+
+
+def test_every_label_needs_evidence_when_a_row_gives_some() -> None:
+    evidence = [{"node": "x", "label": "root", "at": "g.py:3", "diff": "+    return 2"}]
+    with pytest.raises(ValueError, match="no evidence for propagated `y`"):
+        parse_benchmark("b", {**_ROW, "evidence": evidence}, Path("."))
+
+
+@pytest.mark.parametrize(
+    ("entry", "match"),
+    [
+        (
+            {"node": "z", "label": "root", "at": "g.py:3", "diff": "+x"},
+            "`z` isn't an expected root",
+        ),
+        ({"node": "x", "label": "root", "at": "g.py", "diff": "+x"}, "<file>:<line>"),
+        ({"node": "x", "label": "root", "at": "g.py:3", "diff": "x"}, "start with"),
+        ({"node": "x", "label": "maybe", "at": "g.py:3", "diff": "+x"}, "root or propagated"),
+    ],
+)
+def test_an_evidence_entry_names_an_expected_label_a_line_and_diff_lines(
+    entry: dict[str, str], match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        parse_benchmark("b", {**_ROW, "evidence": [entry]}, Path("."))
+
+
+def test_a_status_other_than_pending_review_is_refused() -> None:
+    with pytest.raises(ValueError, match="'status' must be"):
+        parse_benchmark("b", {**_ROW, "status": "done"}, Path("."))
+
+
+def test_a_pending_row_is_listed_but_left_out_of_micro_and_macro() -> None:
+    scored = _result("linear", {"b"}, {"b"})
+    pending = pending_result(
+        parse_benchmark("odr", {**_ROW, "status": "labels_pending_human_review"}, Path("."))
+    )
+    assert (pending.root, pending.seconds, pending.pending) == (Score(0, 0, 0), 0.0, True)
+    assert micro([scored, pending], "root") == micro([scored], "root")
+    assert macro([scored, pending], "propagated") == macro([scored], "propagated")
+    md = render_markdown([scored, pending], "lgcov bench", "2026-10-31")
+    assert "| odr | — | — | — | `x` | — | ⏳ pending review |" in md
+    assert "⏳ 1 pending human review: listed, not run, and left out of micro and macro." in md
+    assert "Known gaps" not in md  # waiting for labels isn't a gap
+    alone = render_markdown([pending], "lgcov bench", "2026-10-31")
+    assert "| **micro** | — | — | | | | |" in alone  # nothing scored, so no aggregate
