@@ -1549,3 +1549,88 @@ def test_cli_ci_shows_the_lint_line_and_never_blocks_on_it(
     assert code == 0  # no drift: the orphan never runs
     assert "\n🧹 Lint: 1 warning\n" in report
     assert "- warn `orphan`: unreachable from START." in report
+
+
+def test_cli_bench_lists_the_163_row_as_pending_review(tmp_path: Path) -> None:
+    # T100a: docs/benchmark/, `lgcov bench`'s default folder; the row is never run.
+    rows = Path(__file__).resolve().parents[1] / "docs" / "benchmark"
+    code, results, md = _bench(tmp_path, str(rows))
+    assert code == 0
+    row = _rows(results)["open_deep_research-163"]
+    assert (row["status"], row["error"], row["seconds"]) == ("labels_pending_human_review", "", 0)
+    assert "| open_deep_research-163 | — | — | — |" in md and "⏳ pending review |" in md
+
+
+# T106: `lgcov taxonomy draft` proposes, `lgcov taxonomy approve` is the human's yes.
+def _draft_args(tmp_path: Path) -> list[str]:
+    from fixtures.drafting import TEAM
+
+    (tmp_path / "team.md").write_text(TEAM, encoding="utf-8")
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    ok = {"nodes": ["classify", "lookup_order", "respond"], "tools": ["lookup_order"]}
+    skipped = {
+        "nodes": ["classify", "respond"],
+        "failure": {"node": "respond", "kind": "skipped_lookup"},
+    }
+    rude = {**ok, "id": "t5", "failure": {"node": "respond", "kind": "rude_tone"}}
+    runs = [{**ok, "id": "t1"}, {**ok, "id": "t2"}, {**skipped, "id": "t3"}]
+    (traces / "a.json").write_text(json.dumps(runs), encoding="utf-8")  # a list of traces
+    (traces / "b.json").write_text(json.dumps({**skipped, "id": "t4"}), encoding="utf-8")  # one
+    (traces / "c.json").write_text(json.dumps(rude), encoding="utf-8")
+    files = [str(traces / f) for f in ("a.json", "b.json", "c.json")]
+    return ["--description", str(tmp_path / "team.md"), "--traces", *files]
+
+
+def test_cli_taxonomy_draft_is_refused_by_check_until_a_human_approves_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from fixtures.drafting import Scripted
+
+    monkeypatch.setattr("lgcov.cli._drafter", Scripted())
+    out = tmp_path / "docs" / "taxonomy.draft.yaml"
+    draft = ["taxonomy", "draft", *_draft_args(tmp_path), "--out", str(out)]
+    assert main([*draft, "--system", "demo_agent"]) == 0
+    assert "2 failure modes drafted, pending human review" in capsys.readouterr().out
+    assert main(["taxonomy", "check", str(out)]) == 1
+    err = capsys.readouterr().err
+    assert "4 entries pending human review; approve with `lgcov taxonomy approve <id>`" in err
+    for entry in ("skips_order_lookup", "rude_reply"):
+        assert main(["taxonomy", "approve", entry, "--reviewer", "ahmed", "--file", str(out)]) == 0
+    assert main(["taxonomy", "check", str(out)]) == 0
+    assert "reviewer: ahmed" in out.read_text(encoding="utf-8")
+    assert main([*draft]) == 0  # nothing new: approved entries stay as they are
+    assert "No new failure signatures" in capsys.readouterr().out
+
+
+CLIENT = """
+from lgcov.draft import Proposal
+
+
+class Client:
+    def propose(self, description, group):
+        kind = group.kind
+        return Proposal(kind, f"{group.node}: {kind}", "seen", f"no_{kind}", "d", "r?")
+"""
+
+
+def test_cli_taxonomy_draft_takes_its_client_from_a_file(tmp_path: Path) -> None:
+    (tmp_path / "client.py").write_text(CLIENT, encoding="utf-8")
+    out = tmp_path / "draft.yaml"
+    args = [
+        *_draft_args(tmp_path),
+        "--out",
+        str(out),
+        "--client",
+        f"{tmp_path / 'client.py'}:Client",
+    ]
+    assert main(["taxonomy", "draft", *args]) == 0
+    assert "id: skipped_lookup" in out.read_text(encoding="utf-8")
+
+
+def test_cli_taxonomy_draft_needs_a_client(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(["taxonomy", "draft", *_draft_args(tmp_path), "--out", str(tmp_path / "d.yaml")])
+    assert code == 2
+    assert "no drafting client" in capsys.readouterr().err

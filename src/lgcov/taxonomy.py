@@ -14,6 +14,19 @@ from lgcov.judges import KPI, Judge
 VERSION = 1
 JUDGE_KINDS = ("jev", "code", "fake", "llm")  # T089: llm, a general LLM judge, nightly only
 BINARY_LABELS = ("pass", "fail")
+REVIEW_STATES = ("pending", "approved")  # T106; an entry with no `review` was human-written
+
+
+class PendingReview(ValueError):
+    """T106: entries a human hasn't approved yet. Nothing pending may gate a PR."""
+
+    def __init__(self, count: int, where: str = "") -> None:
+        entries = "entry" if count == 1 else "entries"
+        super().__init__(
+            f"{where}{': ' if where else ''}{count} {entries} pending human review; "
+            "approve with `lgcov taxonomy approve <id>`"
+        )
+        self.count = count
 
 
 @dataclass(frozen=True)
@@ -144,6 +157,13 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
     return spec
 
 
+def _pending(raw: object, where: str) -> bool:
+    value = raw.get("review", "approved") if isinstance(raw, dict) else "approved"
+    if value not in REVIEW_STATES:
+        raise ValueError(f"{where}: 'review' must be pending or approved, got {value!r}")
+    return value == "pending"
+
+
 def parse_taxonomy(raw: object) -> Taxonomy:
     """Validate a parsed YAML document (pure; load_taxonomy does the file I/O)."""
     doc = _mapping(raw, "top level", "taxonomy")
@@ -162,6 +182,10 @@ def parse_taxonomy(raw: object) -> Taxonomy:
         if any(s.name == spec.name for s in specs):
             raise ValueError(f"KPI '{spec.name}': duplicate KPI name")
         specs.append(spec)
+    pending = sum(_pending(m, f"failure_modes[{i}]") for i, m in enumerate(modes_raw))
+    pending += sum(_pending(k, f"kpis[{i}]") for i, k in enumerate(kpis_raw))
+    if pending:  # T106: valid, but not a human's yet
+        raise PendingReview(pending)
     return Taxonomy(VERSION, _str(doc, "system", "taxonomy"), modes, tuple(specs))
 
 
@@ -173,6 +197,8 @@ def load_taxonomy(path: Path | str) -> Taxonomy:
         raise ValueError(f"{path}: malformed YAML: {exc}") from None
     try:
         return parse_taxonomy(raw)
+    except PendingReview as exc:
+        raise PendingReview(exc.count, str(path)) from None
     except ValueError as exc:
         raise ValueError(f"{path}: {exc}") from None
 

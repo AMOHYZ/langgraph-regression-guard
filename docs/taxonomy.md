@@ -18,7 +18,7 @@ kpis:
   - name: delegates_research    # snake_case, unique
     failure_mode: supervisor_drift
     node: supervisor            # graph node the judge reads, or "final"
-    judge: jev                  # jev | code | fake
+    judge: jev                  # jev | code | fake | llm
     description: one line
     rubric: the question the judge answers
     labels: [pass, fail]            # optional, default binary
@@ -34,11 +34,21 @@ kpis:
   `description`, `rubric` are required.
 - `failure_mode` must reference a declared failure-mode `id`; the error names
   the offending KPI.
-- `judge` must be `jev`, `code`, or `fake`. `code` raises
-  `NotImplementedError("code judges arrive in T072")` until T072.
+- `judge` must be `jev`, `code`, `fake` or `llm`. A `code` judge (T072) decides with
+  the rule in `check`: `node_visited`, `tool_called` or `tool_not_called`. A `jev` judge
+  calls the Jev service (`JEV_API_URL`, `JEV_API_KEY`); `fake` is the offline stand-in;
+  `llm`, a general LLM judge, runs in the nightly tier only (T089).
+- Bands (T063): code judges always block. A model judge's band (blocking, flag or
+  advisory) comes from `lgcov calibrate` against human labels; with no labels it is
+  advisory (`gate.uncalibrated: flag` makes it a flag).
 - Malformed YAML, or a top level that is not a mapping, is a `ValueError`
   naming the file (never a raw `yaml` error).
 - `label_hints` keys must be a subset of `labels`.
+- `review` (T106), on a failure mode or a KPI, must be `pending` or `approved`; no
+  `review` means a human wrote it. A file with a pending entry is refused: "N entries
+  pending human review; approve with `lgcov taxonomy approve <id>`". Drafted entries
+  also carry `evidence` (trace ids), `why`, `signature` (failure modes) and, once
+  approved, `reviewer`.
 - Custom (non-binary) `labels` need an explicit `score_map`; only binary
   pass/fail gets defaults.
 - Omitted `labels`/`score_map` default to binary pass/fail (1.0/0.0); see

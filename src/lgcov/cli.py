@@ -25,6 +25,7 @@ from lgcov.attribution import (
     Result,
     Score,
     parse_benchmark,
+    pending_result,
     render_markdown,
     results_json,
     score,
@@ -74,6 +75,7 @@ from lgcov.coverage import (
     node_floor_miss,
     snapshot_coverage,
 )
+from lgcov.draft import Drafter, approve, as_doc, draft, parse_traces, to_yaml
 from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
@@ -91,7 +93,7 @@ from lgcov.sampling import (
 )
 from lgcov.slices import Group, failing_groups, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
-from lgcov.taxonomy import KPISpec, load_taxonomy
+from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
 
 # 0 = no change / accepted, 1 = graph/replay changed or named node not drifted,
 # 2 = bad input (missing/unreadable/invalid).
@@ -123,6 +125,9 @@ def _taxonomy_check(argv: list[str]) -> int:
     args = ap.parse_args(argv)
     try:
         tax = load_taxonomy(args.path)
+    except PendingReview as exc:  # T106: valid, but a human hasn't approved all of it yet
+        print(f"lgcov taxonomy: {exc}", file=sys.stderr)
+        return 1
     except (OSError, ValueError) as exc:
         print(f"lgcov taxonomy: invalid taxonomy: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -131,6 +136,97 @@ def _taxonomy_check(argv: list[str]) -> int:
     print("|---|---|---|---|")
     for spec in tax.kpi_specs:
         print(f"| {spec.name} | {spec.node} | {spec.judge} | {', '.join(spec.labels)} |")
+    return 0
+
+
+# T106: the client that drafts taxonomies. None is built in: `--client <file.py>:<attr>` (a
+# class or function that makes one) or code that sets this provides it.
+_drafter: Drafter | None = None
+
+
+def _load_drafter(target: str) -> Drafter:
+    path, sep, attr = target.rpartition(":")
+    if not sep or not path or not attr:
+        raise ValueError(f"client must be <file.py>:<attr>, got {target!r}")
+    name = Path(path).stem
+    spec = importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot import {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    make = getattr(module, attr, None)
+    client = make() if callable(make) else None
+    if not isinstance(client, Drafter):
+        raise ValueError(f"{target} makes no drafting client (one with a propose method)")
+    return client
+
+
+def _taxonomy_draft(argv: list[str]) -> int:
+    """T106: `lgcov taxonomy draft`: failure modes and KPIs proposed from traces, each one
+    pending human review. It never approves; re-run, it adds only new failure signatures."""
+    ap = argparse.ArgumentParser(prog="lgcov taxonomy draft")
+    ap.add_argument("--description", required=True, help="what the system does (Markdown)")
+    ap.add_argument("--traces", nargs="+", required=True, help="trace files (JSON)")
+    ap.add_argument("--out", default="docs/taxonomy.draft.yaml", help="kept and added to")
+    ap.add_argument("--system", default="agent", help="the system's name, for a new draft")
+    ap.add_argument("--client", help="<file.py>:<attr>, a class or function that makes one")
+    args = ap.parse_args(argv)
+    out = Path(args.out)
+    try:
+        # Exception: the client is user code (an LLM call) and can raise anything.
+        client = _load_drafter(args.client) if args.client else _drafter
+        if client is None:
+            print(
+                "lgcov taxonomy draft: no drafting client (lgcov ships none): pass "
+                "--client <file.py>:<attr>, a class or function that makes one",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+        description = Path(args.description).read_text(encoding="utf-8")
+        traces = [
+            t for f in args.traces for t in parse_traces(json.loads(Path(f).read_text("utf-8")), f)
+        ]
+        existing = (
+            as_doc(yaml.safe_load(out.read_text("utf-8")), str(out)) if out.is_file() else None
+        )
+        doc = draft(existing, args.system, description, traces, client)
+    except Exception as exc:
+        print(f"lgcov taxonomy draft: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    added = [
+        str(m["id"])
+        for m in doc["failure_modes"][len(existing["failure_modes"]) if existing else 0 :]
+    ]
+    if not added:
+        print(f"No new failure signatures in the traces: {out} unchanged.")
+        return 0
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(to_yaml(doc), encoding="utf-8")
+    modes = f"{len(added)} failure mode{'' if len(added) == 1 else 's'}"
+    print(
+        f"{modes} drafted, pending human review, in {out}: {', '.join(added)}. "
+        "Approve each with `lgcov taxonomy approve <id> --reviewer <name>`."
+    )
+    return 0
+
+
+def _taxonomy_approve(argv: list[str]) -> int:
+    """T106: a human's yes to one drafted entry: a failure mode id (with its KPIs) or a KPI."""
+    ap = argparse.ArgumentParser(prog="lgcov taxonomy approve")
+    ap.add_argument("entry", help="a failure mode id, or a KPI name")
+    ap.add_argument("--reviewer", required=True, help="who approves it")
+    ap.add_argument("--file", default="docs/taxonomy.draft.yaml", help="the draft")
+    args = ap.parse_args(argv)
+    path = Path(args.file)
+    try:
+        doc = as_doc(yaml.safe_load(path.read_text(encoding="utf-8")), str(path))
+        doc = approve(doc, args.entry, args.reviewer)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"lgcov taxonomy approve: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    path.write_text(to_yaml(doc), encoding="utf-8")
+    left = sum(e.get("review") == "pending" for e in [*doc["failure_modes"], *doc["kpis"]])
+    print(f"Approved `{args.entry}` as {args.reviewer}; {left} entries still pending review.")
     return 0
 
 
@@ -1410,9 +1506,9 @@ def _bench_cmd(argv: list[str]) -> int:
         except (OSError, ValueError, yaml.YAMLError) as exc:
             print(f"lgcov bench: {f}: {exc}", file=sys.stderr)
             return EXIT_ERROR
-    results = [_bench_one(b) for b in benchmarks]
+    results = [pending_result(b) if b.status else _bench_one(b) for b in benchmarks]
     command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only)])
-    source = f"the {len(results)} benchmark files in `{folder}`"
+    source = f"the {len(results)} benchmark file{'' if len(results) == 1 else 's'} in `{folder}`"
     md = render_markdown(results, command, datetime.now(UTC).date().isoformat(), source)
     for path, text in ((Path(args.out), md), (Path(args.json), results_json(results))):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1557,6 +1653,10 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] == ["--version"]:
         print(f"lgcov {version('langgraph-regression-guard')}")
         return 0
+    if argv[:2] == ["taxonomy", "draft"]:
+        return _taxonomy_draft(argv[2:])
+    if argv[:2] == ["taxonomy", "approve"]:
+        return _taxonomy_approve(argv[2:])
     if argv[:1] == ["taxonomy"]:
         return _taxonomy_check(argv[1:])
     if argv[:1] == ["replay"]:
