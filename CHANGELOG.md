@@ -17,14 +17,18 @@ feature, with its PR.
   trouble isn't (#24); `lgcov selfcheck` proves the classification on fixtures (#25).
 - Divergence policy, a time budget and a timing line; `pr` and `nightly` tiers (#28).
 - `thresholds.min_node_coverage` gates `lgcov ci` (#30).
-- A router, or a node inside a subgraph, that raises is named like a node (#35).
+- A router, or a node inside a subgraph, that raises is named like a node (#35), and so
+  is a router that returns a key its mapping doesn't have (#39).
 - `lgcov lint`: unreachable nodes, routers and edges naming missing nodes, nodes no
   cassette reached, nodes no KPI names; warnings only (#36).
 
 ### L2 — Judge gate
 
 - Deterministic code judges: node visited, tool called, tool not called (#2).
-- A failure-mode taxonomy for open_deep_research's PR #163, one binary KPI per mode (#14).
+- A failure-mode taxonomy for open_deep_research's PR #163, one binary KPI per mode (#14),
+  its names checked against the PR's merge commit (#38).
+- `lgcov taxonomy draft` proposes failure modes and KPIs from traces; `lgcov taxonomy
+  approve` is a human's yes, and a pending entry can't gate (#38).
 - pass@k, pass^k, flakiness and cost per KPI (#22); `lgcov judge`, with a call guard (#23).
 - Paired significance statistics (#26) and the gate: SHIP, BLOCK or INCONCLUSIVE per KPI,
   in `lgcov judge` and the Action (#27).
@@ -53,16 +57,12 @@ feature, with its PR.
   #29, #34).
 - Speed benchmark: served vs `--live` on the demo PR (#31).
 - `lgcov bench`: the attribution benchmark, on synthetic fixtures (#34).
+- The first real benchmark row, open_deep_research PR #163, labels pending human review
+  (#38).
 - The README roadmap lists only what isn't built (#37).
 
-### Not merged yet when this was written
+### Packaging and release
 
-- A router returning a key its mapping doesn't have is AGENT_FAIL, naming the router
-  (`fix/t109b-unmapped-route`).
-- The PR #163 taxonomy's names checked against its merge commit (`docs/hygiene-taxonomy`).
-- The first real benchmark row, PR #163, pending human review (`feat/t100a-odr163-row`).
-- `lgcov taxonomy draft` and `approve`: drafted failure modes can't gate until a human
-  approves them (`feat/t106-taxonomy-draft`).
-- This changelog, the install section and a release dry run (`feat/t084-release-prep`).
-- The distribution is named `lgcov`, like its command; the repo keeps its name
-  (`chore/rename-dist-lgcov`).
+- This changelog, an Install section, and `release.yml` by hand as a dry run that builds
+  the wheel and checks it runs (#40).
+- The package is named `lgcov`, like its command; the repo keeps its name (#41).
