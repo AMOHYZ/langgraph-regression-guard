@@ -65,7 +65,7 @@ with Benjamini–Hochberg across the advisory ones. Per-slice scores are planned
 recording is served from the cassette, so only changed nodes, and nodes whose input
 changed because of them, run live.
 *Status: built ([PR #18](https://github.com/AMOHYZ/langgraph-regression-guard/pull/18));
-speed benchmark coming (T105).* Not novel: Reenact, graphtrace,
+measured on the demo in [benchmark-speed.md](benchmark-speed.md).* Not novel: Reenact, graphtrace,
 [docker-agent](https://github.com/docker/docker-agent) and LangSmith's pytest cache
 replay recorded calls too. lgcov's unit is the graph node.
 
