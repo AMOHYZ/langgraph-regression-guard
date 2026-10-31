@@ -6,6 +6,8 @@ from typing import TypedDict, cast
 from unittest.mock import Mock
 from uuid import uuid4
 
+import httpx
+import pytest
 from fixtures.graphs import S, _noop, fan_out_send, linear
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -226,3 +228,53 @@ def test_replay_steps_returns_the_fresh_run_in_order() -> None:
     drifts, steps = replay_steps(linear(), cassette, serve=True)
     assert drifts == []
     assert [s.node for s in steps] == ["a", "b"]
+
+
+# T074: an exception from a node's own code names the node; network errors are flagged.
+def _crashing(exc: Exception) -> CompiledStateGraph[S]:
+    def boom(state: S) -> S:
+        raise exc
+
+    g = StateGraph(S)
+    g.add_node("a", _noop)
+    g.add_node("b", boom)
+    g.add_edge(START, "a")
+    g.add_edge("a", "b")
+    g.add_edge("b", END)
+    return g.compile()
+
+
+def test_a_node_that_raises_is_a_node_error_naming_the_node() -> None:
+    from lgcov.cassette import NodeError
+
+    cassette = record(linear(), {"x": 1})
+    with pytest.raises(NodeError) as info:
+        replay(_crashing(ValueError("bad state")), cassette)
+    assert (info.value.node, info.value.transport) == ("b", False)
+    assert isinstance(info.value.original, ValueError)
+
+
+@pytest.mark.parametrize(
+    "exc", [TimeoutError("slow"), ConnectionError("reset"), httpx.ConnectError("refused")]
+)
+def test_network_errors_in_a_node_are_flagged_as_transport(exc: Exception) -> None:
+    from lgcov.cassette import NodeError
+
+    cassette = record(linear(), {"x": 1})
+    with pytest.raises(NodeError) as info:
+        replay(_crashing(exc), cassette)
+    assert (info.value.node, info.value.transport) == ("b", True)
+
+
+def test_langgraph_control_flow_is_not_turned_into_a_node_error() -> None:
+    from langgraph.errors import GraphBubbleUp
+
+    from lgcov.cassette import NodeError
+
+    cassette = record(linear(), {"x": 1})
+    try:
+        replay(_crashing(GraphBubbleUp()), cassette)
+    except NodeError:
+        pytest.fail("GraphBubbleUp (interrupt, Command) must pass through unwrapped")
+    except GraphBubbleUp:
+        pass

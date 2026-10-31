@@ -13,7 +13,16 @@ from pathlib import Path
 from types import CodeType
 from typing import Any
 
-from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay, replay_steps
+from lgcov.cassette import (
+    Cassette,
+    Drift,
+    NodeError,
+    Step,
+    accept_nodes,
+    record,
+    replay,
+    replay_steps,
+)
 from lgcov.ci_report import CiResult, render_ci_report
 from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
@@ -24,7 +33,7 @@ from lgcov.coverage import (
     format_coverage_line,
     snapshot_coverage,
 )
-from lgcov.drift_gate import FailOn, drift_exit_code, parse_fail_on, verdict
+from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import FakeJudge, Judge, NodeState
@@ -152,6 +161,19 @@ def _harness_error(prog: str, what: str, exc: BaseException) -> int:
     return EXIT_ERROR
 
 
+def _node_failure(prog: str, exc: NodeError) -> int:
+    """T074: a node's own code raised. AGENT_FAIL whatever fail-on says (it governs drift
+    only); network trouble inside the node is INFRA_ERROR instead, and still names the node.
+    """
+    if exc.transport:
+        original = f"{type(exc.original).__name__}: {exc.original}"
+        where = f"harness error (transport) in node `{exc.node}`, not a regression"
+        print(f"{prog}: {where}: {original}", file=sys.stderr)
+        return Outcome.INFRA_ERROR
+    print(f"{prog}: agent failure: {exc}")
+    return Outcome.AGENT_FAIL
+
+
 _LIVE_HELP = "re-run every node; by default a node whose code and input match is served"
 
 
@@ -190,8 +212,10 @@ def _replay(argv: list[str]) -> int:
         return _harness_error("lgcov replay", "cannot read baseline", exc)
     try:
         drifts = [replay(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
-    except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
-        return _harness_error("lgcov replay", "the graph crashed during replay", exc)
+    except NodeError as exc:
+        return _node_failure("lgcov replay", exc)
+    except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
+        return _harness_error("lgcov replay", "replay failed outside node code", exc)
     print("\n".join(_replay_markdown(runs, drifts)))
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
@@ -479,8 +503,18 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
     try:
         replays = [replay_steps(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
-    except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
-        msg = _harness_message("the graph crashed during replay", exc)
+    except NodeError as exc:
+        original = f"{type(exc.original).__name__}: {exc.original}"
+        if exc.transport:
+            return replace(partial, harness_error=original, harness_node=exc.node)
+        return replace(
+            partial,
+            exit_code=Outcome.AGENT_FAIL,  # whatever fail-on says: fail-on governs drift only
+            crash=f"Node `{exc.node}` raised {original}",
+            root_drift=(exc.node,),
+        )
+    except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
+        msg = _harness_message("replay failed outside node code", exc)
         return replace(partial, harness_error=msg)
     drifts = [d for d, _ in replays]
     counts, roots = _drift_kinds(runs, drifts)
@@ -632,8 +666,10 @@ def _judge_cmd(argv: list[str]) -> int:
         return _harness_error("lgcov judge", "cannot read baseline", exc)
     try:
         fresh = [replay_steps(graph, r, cfg.ignore_paths, serve=not args.live)[1] for r in runs]
-    except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
-        return _harness_error("lgcov judge", "the graph crashed during replay", exc)
+    except NodeError as exc:
+        return _node_failure("lgcov judge", exc)
+    except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
+        return _harness_error("lgcov judge", "replay failed outside node code", exc)
     base_runs = [r.steps for r in runs]
     plan = [(spec, _l2_cases(spec, base_runs), _l2_cases(spec, fresh)) for spec in specs]
     total = sum((len(b) + len(n)) * k for _, b, n in plan)
