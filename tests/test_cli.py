@@ -1491,3 +1491,61 @@ def test_cli_bench_reads_base_and_head_from_git_refs(tmp_path: Path) -> None:
         "recall": 1.0,
         "f1": 1.0,
     }
+
+
+# T104: `lgcov lint`, the graph's shape before any replay: warnings only, unless --strict.
+DEMO_AGENT = Path(__file__).resolve().parents[1] / "examples" / "demo_agent"
+ORPHAN = """
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+
+class S(TypedDict, total=False):
+    x: int
+
+
+def noop(state: S) -> S:
+    return {}
+
+
+g = StateGraph(S)
+g.add_node("a", noop)
+g.add_node("orphan", noop)
+g.add_edge(START, "a")
+g.add_edge("a", END)
+g.add_edge("orphan", END)
+graph = g.compile()
+"""
+
+
+def test_cli_lint_the_demo_agent_is_clean(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["lint", str(DEMO_AGENT), "--strict"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[-1] == "🧹 Lint: 0 warnings · 2 info"  # its KPIs all read respond
+    assert "info `classify`: no KPI in the taxonomy names it." in out
+
+
+def test_cli_lint_warns_and_exits_1_only_with_strict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)  # no lgcov.yaml and no cassettes: no never-hit check
+    (tmp_path / "graph.py").write_text(ORPHAN, encoding="utf-8")
+    assert main(["lint", "graph.py:graph"]) == 0
+    out = capsys.readouterr().out
+    assert "warn `orphan`: unreachable from START." in out
+    assert "never-hit check skipped" in out
+    assert out.splitlines()[-1] == "🧹 Lint: 1 warning"
+    assert main(["lint", "graph.py:graph", "--strict"]) == 1
+
+
+def test_cli_ci_shows_the_lint_line_and_never_blocks_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    orphan = 'b.add_node("orphan", respond)\nb.add_edge("orphan", END)\ngraph = b.compile()'
+    _ci_project(tmp_path, monkeypatch, demo.replace("graph = b.compile()", orphan))
+    code, report, _ = _run_ci(tmp_path)
+    assert code == 0  # no drift: the orphan never runs
+    assert "\n🧹 Lint: 1 warning\n" in report
+    assert "- warn `orphan`: unreachable from START." in report

@@ -1,6 +1,6 @@
-"""T089: the timing line in the Action's PR comment (pure)."""
+"""The Action's PR comment (pure): T089's timing line, T104's lint line."""
 
-from lgcov.ci_report import Timing, format_timing
+from lgcov.ci_report import CiResult, Timing, format_timing, render_ci_report
 
 
 def test_timing_line_shows_each_phase_the_counts_and_the_budget() -> None:
@@ -22,3 +22,15 @@ def test_timing_line_names_the_node_where_the_budget_ran_out() -> None:
 def test_timing_line_without_judges_or_a_budget() -> None:
     t = Timing(0.42, 0.0123, live=0, served=5)
     assert format_timing(t) == "⏱ 0.42 s · agent 0.012 s (0 live / 5 served) · no budget"
+
+
+def test_the_lint_line_and_its_findings_render_in_the_pr_comment() -> None:
+    found = ("warn `c`: unreachable from START. Fix: add an edge into it.",)
+    report = render_ci_report(CiResult("root-drift", 0, lint_summary="🧹 Lint: 1 warning"))
+    assert "\n🧹 Lint: 1 warning\n" in report and "<details>" not in report
+    report = render_ci_report(
+        CiResult("root-drift", 0, lint_summary="🧹 Lint: 1 warning", lint_lines=found)
+    )
+    assert "\n🧹 Lint: 1 warning\n" in report
+    assert "<summary>Lint findings</summary>" in report
+    assert "- warn `c`: unreachable from START. Fix: add an edge into it." in report
