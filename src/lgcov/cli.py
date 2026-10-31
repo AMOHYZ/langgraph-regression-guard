@@ -127,6 +127,11 @@ def _replay(argv: list[str]) -> int:
         "baseline", nargs="?", help="cassette JSON; default <cassette_dir>/baseline.json"
     )
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    ap.add_argument(
+        "--live",
+        action="store_true",
+        help="re-run every node; by default a node whose code and input match is served",
+    )
     args = ap.parse_args(argv)
     try:
         cfg = load_config(args.config, {"graph_entrypoint": args.target})
@@ -144,7 +149,7 @@ def _replay(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"lgcov replay: cannot read baseline: {exc!r}", file=sys.stderr)
         return EXIT_ERROR
-    drifts = [replay(graph, run, cfg.ignore_paths) for run in runs]
+    drifts = [replay(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
     print("\n".join(_replay_markdown(runs, drifts)))
     return 1 if any(drifts) else 0
 

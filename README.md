@@ -18,9 +18,10 @@ graph still compiles, the edges still fire, the output just gets worse.
 
 Three layers, one per level of confidence:
 
-- **L1 — Cassettes.** Record each node's output once, then re-run the graph on
-  every PR and compare every node with the recording. The diff tells you
-  whether a change breaks a node at its root or only propagates from upstream.
+- **L1 — Cassettes.** Record each node's input and output once. On every PR,
+  nodes the change left alone are served from the recording and the rest re-run
+  and are compared with it. The diff tells you whether a change breaks a node at
+  its root or only propagates from upstream.
 - **L2 — Judge gate.** Typed LLM judges and deterministic code checks score
   KPIs, each verdict with a confidence: low-confidence verdicts defer to a
   human instead of guessing.
@@ -78,6 +79,24 @@ ignore_paths: [/meta/nonce]        # JSON pointers into node I/O
 
 Precedence: CLI flag > file > default.
 
+### Which nodes replay re-runs
+
+`lgcov replay` treats a node as unchanged, and serves its recorded output
+without running it, when two things match the recording:
+
+- **Its input**, with volatile fields and `ignore_paths` masked as in the
+  comparison. A node downstream of a change gets a new input, so it re-runs.
+- **Its code fingerprint**: the node function's source, defaults and closure
+  values, plus the values of the module-level names it uses, following the
+  functions, classes and modules of your project the same way. Library code
+  counts by name, and other objects (a chat model client, say) by their repr.
+
+Everything else runs live: changed nodes, nodes that are not plain functions
+(subgraphs, `ToolNode`) and every node of an older cassette with no recorded
+inputs. What a node reads at run time (files, environment variables, network) and
+dependency upgrades are not part of the fingerprint: run `lgcov replay --live` to
+re-run every node.
+
 ## Development
 
 ```bash
@@ -89,8 +108,6 @@ uv run graph-diff old.json new.json   # node/edge diff of two graph snapshots
 
 ## Roadmap
 
-- Serve unchanged nodes from cassettes, so a PR only calls the model for the
-  nodes it changed.
 - Judges you can trust: Cohen's kappa with a confidence interval, and TPR/TNR
   against human labels, per KPI.
 - A paired significance test per KPI, with p-value and effect size.

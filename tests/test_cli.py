@@ -265,8 +265,13 @@ def test_cli_accept_b_leaves_a_byte_identical(
     out = capsys.readouterr().out
     assert "| `b` |" in out
     assert str(baseline) in out
-    # Only b's output text changed; every other byte, a's entries included, is untouched.
-    assert baseline.read_text(encoding="utf-8") == before.replace('"B1"', '"B2"')
+    after = baseline.read_text(encoding="utf-8")
+    runs = json.loads(before)["runs"]
+    for run, new in zip(runs, json.loads(after)["runs"], strict=True):
+        assert new["steps"][1]["output"] == {"b": "B2"}
+        run["steps"][1] = new["steps"][1]  # b's steps are re-recorded whole (output, input, code)
+    # ...and every other byte, a's entries included, is untouched.
+    assert after == json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n"
     summary = baseline.parent / "accept.md"
     assert summary.is_file()
     assert "| `b` |" in summary.read_text(encoding="utf-8")
@@ -304,8 +309,11 @@ def test_cli_accept_all_drifted(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert main(["cassette", "accept", "--all-drifted", "--config", str(cfg)]) == 0
     out = capsys.readouterr().out
     assert "| `a` |" in out and "| `b` |" in out
-    after = baseline.read_text(encoding="utf-8")
-    assert after == before.replace('"A1"', '"A2"').replace('"B1"', '"B2"')
+    after = json.loads(baseline.read_text(encoding="utf-8"))
+    want = json.loads(before.replace('"A1"', '"A2"').replace('"B1"', '"B2"'))
+    for step in (s for r in (*after["runs"], *want["runs"]) for s in r["steps"]):
+        del step["code"]  # fingerprints of the edited code, so they change too
+    assert after == want
     assert main(["replay", "--config", str(cfg)]) == 0
 
 
@@ -369,6 +377,66 @@ def test_cli_replay_applies_ignore_paths_from_config(tmp_path: Path) -> None:
     cfg.write_text(base, encoding="utf-8")
     (tmp_path / "inputs.json").write_text("[{}]", encoding="utf-8")
     assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
-    assert main(["replay", "--config", str(cfg)]) == 1  # the random nonce drifts
+    # --live: unchanged b would be served from the cassette, never rolling a new nonce.
+    assert main(["replay", "--live", "--config", str(cfg)]) == 1  # the random nonce drifts
     cfg.write_text(base + "ignore_paths: [/nonce]\n", encoding="utf-8")
+    assert main(["replay", "--live", "--config", str(cfg)]) == 0
+
+
+# Replay serves a node from the cassette when its code fingerprint and input match.
+def test_cli_replay_serves_unchanged_nodes_unless_live(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    (tmp_path / "graph.py").write_text(AB_GRAPH, encoding="utf-8")  # the recorded code again
+    # A hand-edited output is served as recorded, which shows `a` did not run...
+    edited = baseline.read_text(encoding="utf-8").replace('"A1"', '"AX"')
+    baseline.write_text(edited, encoding="utf-8")
     assert main(["replay", "--config", str(cfg)]) == 0
+    # ...and --live re-runs every node, which catches the edit.
+    capsys.readouterr()
+    assert main(["replay", "--live", "--config", str(cfg)]) == 1
+    assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
+
+
+def test_cli_replay_still_reports_root_and_downstream_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # b's code is unchanged but it reads a's output, so it re-runs once a changes.
+    src = AB_GRAPH.replace('return {"b": "B1"}', 'return {"b": state["a"] + "!"}')
+    graph = tmp_path / "graph.py"
+    graph.write_text(src, encoding="utf-8")
+    cfg = tmp_path / "lgcov.yaml"
+    cfg.write_text(
+        f"graph_entrypoint: {graph}:graph\ncassette_dir: {tmp_path / 'cassettes'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "inputs.json").write_text("[{}]", encoding="utf-8")
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    graph.write_text(src.replace("A1", "A2"), encoding="utf-8")
+    capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert "| `a` | root | 1/1 |" in lines
+    assert "| `b` | downstream | 1/1 |" in lines
+
+
+def test_cli_replay_reads_a_baseline_recorded_before_node_inputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Older baselines have no node inputs or code fingerprints: every node runs live.
+    runs = json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))["runs"]
+    legacy = [
+        {
+            "inputs": r["inputs"],
+            "steps": [{"node": s["node"], "output": s["output"]} for s in r["steps"]],
+        }
+        for r in runs
+    ]
+    (tmp_path / "baseline.json").write_text(json.dumps({"runs": legacy}), encoding="utf-8")
+    src = DEMO_GRAPH.read_text(encoding="utf-8")
+    (tmp_path / "graph.py").write_text(
+        src.replace("a concise support", "a friendly, detailed support"), encoding="utf-8"
+    )
+    assert main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")]) == 1
+    assert "| `respond` | root | 2/2 |" in capsys.readouterr().out.splitlines()
