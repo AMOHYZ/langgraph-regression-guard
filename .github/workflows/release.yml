@@ -1,10 +1,10 @@
-# T084: tag v* -> build wheel/sdist, GitHub Release, publish to TestPyPI (OIDC).
+# T084: tag vX.Y.Z -> build wheel/sdist, GitHub Release, publish to TestPyPI (OIDC).
 name: release
 
 on:
   push:
     tags:
-      - "v*"
+      - "v*.*.*"  # release versions only; the moving v0 Action tag must not publish
 
 permissions:
   contents: read

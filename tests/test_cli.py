@@ -464,3 +464,95 @@ def test_cli_replay_fail_on_typo_lists_allowed_values(capsys: pytest.CaptureFixt
         main(["replay", "--fail-on", "root-drif"])
     assert exc.value.code == 2
     assert "root-drift, any-drift, never; got 'root-drif'" in capsys.readouterr().err
+
+
+# T078 PR B: `lgcov ci` builds the Action's report, step outputs and exit code.
+def _ci_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graph_src: str) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "graph.py").write_text(graph_src, encoding="utf-8")
+    (tmp_path / "cassettes").mkdir()
+    (tmp_path / "cassettes" / "baseline.json").write_text(
+        Path(DEMO_BASELINE).read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+
+def _run_ci(tmp_path: Path, *extra: str) -> tuple[int, str, dict[str, str]]:
+    report, outputs = tmp_path / "out" / "report.md", tmp_path / "out" / "outputs.txt"
+    report.parent.mkdir(exist_ok=True)
+    args = ["ci", "--report", str(report), "--github-output", str(outputs)]
+    code = main([*args, "--graph", "graph.py:graph", "--cassette-dir", "cassettes", *extra])
+    lines = outputs.read_text(encoding="utf-8").splitlines()
+    return (
+        code,
+        report.read_text(encoding="utf-8"),
+        {k: v for k, v in (x.split("=", 1) for x in lines)},
+    )
+
+
+def test_cli_ci_reports_root_drift_and_sets_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace("a concise", "a friendly"))
+    (tmp_path / "base").mkdir()
+    (tmp_path / "base" / "graph.py").write_text(demo, encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--base-dir", "base")
+    assert code == 1
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 ")
+    assert "No graph changes." in report
+    assert "| `respond` | root | 2/2 |" in report
+    assert "fail-on: `root-drift`" in report
+    assert outputs == {
+        "exit-code": "1",
+        "propagated-drift-count": "0",
+        "report-path": str(tmp_path / "out" / "report.md"),
+        "root-drift-count": "1",
+        "verdict": "fail",
+    }
+
+
+def test_cli_ci_missing_base_graph_lists_every_node_as_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "base").mkdir()
+    code, report, outputs = _run_ci(tmp_path, "--base-dir", "base")
+    assert (code, outputs["verdict"]) == (0, "pass")
+    assert report.startswith("<!-- lgcov-report -->\n## 🟢 ")
+    assert "every node is new" in report
+    assert "| + | node | respond |" in report
+
+
+def test_cli_ci_unloadable_graph_is_a_harness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, 'raise RuntimeError("boom at import")\n')
+    code, report, outputs = _run_ci(tmp_path)
+    assert code == 2
+    assert "⚠️ Harness error, not a regression" in report
+    assert "boom at import" in report
+    assert (outputs["verdict"], outputs["exit-code"], outputs["root-drift-count"]) == (
+        "error",
+        "2",
+        "0",
+    )
+
+
+def test_cli_ci_reports_an_earlier_install_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    code, report, outputs = _run_ci(tmp_path, "--harness-error", "uv sync --locked failed")
+    assert (code, outputs["verdict"]) == (2, "error")
+    assert "⚠️ Harness error, not a regression" in report
+    assert "uv sync --locked failed" in report
+
+
+def test_cli_ci_fail_on_never_passes_but_still_shows_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace("a concise", "a friendly"))
+    code, report, outputs = _run_ci(tmp_path, "--fail-on", "never")
+    assert (code, outputs["verdict"], outputs["root-drift-count"]) == (0, "pass", "1")
+    assert "| `respond` | root | 2/2 |" in report

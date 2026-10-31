@@ -36,3 +36,11 @@ jobs:
 
       - name: Pytest
         run: uv run pytest -q
+
+      # T078: action.yml and the workflows must match GitHub's published schemas.
+      - name: Validate action.yml and workflows
+        run: |
+          uvx --from check-jsonschema==0.39.0 check-jsonschema \
+            --builtin-schema vendor.github-actions action.yml
+          uvx --from check-jsonschema==0.39.0 check-jsonschema \
+            --builtin-schema vendor.github-workflows .github/workflows/*.yml
