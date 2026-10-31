@@ -1072,6 +1072,38 @@ def test_cli_selfcheck_passes_on_its_fixtures(capsys: pytest.CaptureFixture[str]
     assert "| broken_node | AGENT_FAIL @ classify | AGENT_FAIL | classify | ✓ |" in out
     assert "| broken_prompt | AGENT_FAIL @ respond | AGENT_FAIL | respond | ✓ |" in out
     assert "| good_change | PASS | PASS | — | ✓ |" in out
+    # T109: routers and subgraph nodes are named too
+    assert "| broken_router | AGENT_FAIL @ route | AGENT_FAIL | route | ✓ |" in out
+    assert "| broken_subgraph | AGENT_FAIL @ sub.inner | AGENT_FAIL | sub.inner | ✓ |" in out
+
+
+def test_cli_ci_a_router_that_raises_is_an_agent_failure_naming_the_router(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    broken = demo.replace(
+        'return "lookup_order" if state["needs_tool"] else "respond"',
+        'raise KeyError("needs_tool")',
+    )
+    assert broken != demo
+    _ci_project(tmp_path, monkeypatch, broken)
+    code, report, outputs = _run_ci(tmp_path, "--fail-on", "never")
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert "Node `route` raised KeyError" in report
+
+
+def test_cli_ci_a_router_timeout_is_a_harness_error_naming_the_router(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    slow = demo.replace(
+        'return "lookup_order" if state["needs_tool"] else "respond"',
+        'raise TimeoutError("router timed out")',
+    )
+    _ci_project(tmp_path, monkeypatch, slow)
+    code, report, _ = _run_ci(tmp_path)
+    assert code == 2
+    assert "⚠️ Harness error (transport) in node `route`, not a regression" in report
 
 
 def test_cli_selfcheck_exits_one_on_a_mismatch(
@@ -1415,7 +1447,7 @@ def test_cli_bench_reports_the_subgraph_miss_as_a_known_gap(tmp_path: Path) -> N
         ["worker_b"],
         ["reducer"],
     )
-    # lgcov sees a subgraph as one node today: it blames `sub`, not `sub.inner` (T109's area).
+    # Drift inside a subgraph is still blamed on `sub`, not `sub.inner`: T109 names crashes only.
     assert (rows["subgraph"]["found_root"], rows["subgraph"]["expected_root"]) == (
         ["sub"],
         ["sub.inner"],
