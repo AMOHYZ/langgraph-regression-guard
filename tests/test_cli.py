@@ -639,3 +639,57 @@ def test_cli_ci_serves_unchanged_nodes_unless_live(
     code, report, _ = _run_ci(tmp_path, "--live")
     assert code == 1
     assert "| `lookup_order` | root | 1/2 |" in report
+
+
+# T083: `lgcov coverage` from the recorded runs (nothing re-runs), with trend vs main.
+def _coverage_args(tmp_path: Path, runs: list[int] | None = None) -> list[str]:
+    data = json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))
+    if runs is not None:
+        data["runs"] = [data["runs"][i] for i in runs]
+    (tmp_path / "cassettes").mkdir(exist_ok=True)
+    (tmp_path / "cassettes" / "baseline.json").write_text(json.dumps(data), encoding="utf-8")
+    cassettes = str(tmp_path / "cassettes")
+    return ["coverage", "--graph", f"{DEMO_GRAPH}:graph", "--cassette-dir", cassettes]
+
+
+def test_cli_coverage_out_writes_the_snapshot_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from lgcov.coverage import CoverageSnapshot
+
+    out = tmp_path / "coverage.json"
+    args = [*_coverage_args(tmp_path), "--commit", "abc123", "--out", str(out)]
+    assert main(args) == 0
+    cov = CoverageSnapshot.from_json(out.read_text(encoding="utf-8"))
+    assert (cov.nodes_total, cov.nodes_hit, cov.commit_sha) == (5, 5, "abc123")
+    assert "Nodes 100% · Edges 100% (no baseline yet)" in capsys.readouterr().out
+
+
+def test_cli_coverage_baseline_prints_the_trend_and_newly_uncovered(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main_cov = tmp_path / "coverage.main.json"
+    assert main([*_coverage_args(tmp_path), "--out", str(main_cov)]) == 0
+    capsys.readouterr()
+    # Only the hours run: lookup_order is never visited.
+    assert main([*_coverage_args(tmp_path, runs=[1]), "--baseline", str(main_cov)]) == 0
+    out = capsys.readouterr().out
+    assert "Nodes 80% (−20% vs main) · Edges 60% (−40% vs main)" in out
+    assert "Newly uncovered: `lookup_order`" in out
+
+
+def test_cli_coverage_missing_baseline_is_no_baseline_yet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = [*_coverage_args(tmp_path), "--baseline", str(tmp_path / "missing.json")]
+    assert main(args) == 0
+    assert "(no baseline yet)" in capsys.readouterr().out
+
+
+def test_cli_coverage_malformed_baseline_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = tmp_path / "coverage.main.json"
+    bad.write_text("{}", encoding="utf-8")
+    assert main([*_coverage_args(tmp_path), "--baseline", str(bad)]) == 2
+    assert "lgcov coverage:" in capsys.readouterr().err

@@ -17,7 +17,7 @@ GOLDEN = Path(__file__).parent / "fixtures" / "pr_report.golden.md"
 def _fixture_diff_and_coverage() -> tuple[GraphDiff, CoverageReport]:
     old = snapshot_from_compiled(build_linear())  # 4 nodes, 3 edges
     new = GraphSnapshot(nodes=old.nodes | {"c"}, edges=old.edges - {Edge("b", "__end__")})
-    return diff_graphs(old, new), coverage(old, [["a", "b"]])
+    return diff_graphs(old, new), coverage(old, [["a"]])  # b never visited
 
 
 def test_report_matches_golden() -> None:
@@ -79,20 +79,20 @@ def test_report_mentions_normalised_field_count() -> None:
 
 
 def test_coverage_section_shows_trend_vs_main() -> None:
-    diff, cov = _fixture_diff_and_coverage()  # nodes 50%, edges 33.3%
+    diff, cov = _fixture_diff_and_coverage()  # nodes 75%, edges 33.3%
     baseline = CoverageReport(
-        node_pct=75.0,
+        node_pct=100.0,
         edge_pct=23.3,
         unhit_nodes=[],
         unhit_edges=[],
     )
     out = render_pr_report(diff, cov, [], baseline_coverage=baseline)
-    assert "| nodes | 50.0% (-25.0% vs main) |" in out
-    assert "| edges | 33.3% (+10.0% vs main) |" in out
+    assert "| nodes | 75% (−25% vs main) |" in out
+    assert "| edges | 33.3% (+10% vs main) |" in out
 
 
 def test_coverage_section_no_baseline_snapshot() -> None:
     diff, cov = _fixture_diff_and_coverage()
     out = render_pr_report(diff, cov, [])
-    assert "| nodes | 50.0% (no baseline) |" in out
-    assert "| edges | 33.3% (no baseline) |" in out
+    assert "| nodes | 75% (no baseline yet) |" in out
+    assert "| edges | 33.3% (no baseline yet) |" in out
