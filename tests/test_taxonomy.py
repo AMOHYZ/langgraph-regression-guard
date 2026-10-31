@@ -265,4 +265,6 @@ def test_docs_pr163_taxonomy_has_one_kpi_per_failure_mode() -> None:
     by_node = {spec.node: judges[spec.name] for spec in tax.kpi_specs}
     assert by_node["supervisor"] == ToolCalled(by_node["supervisor"].kpi, "ConductResearch")
     assert by_node["researcher"] == ToolCalled(by_node["researcher"].kpi, "think_tool")
-    assert isinstance(by_node["final"], FakeJudge)  # judge: jev, faked offline
+    # The node that writes the report, not `final`: the end state clears the notes the
+    # judge checks the report against (open_deep_research at 6532a41).
+    assert isinstance(by_node["final_report_generation"], FakeJudge)  # judge: jev, faked
