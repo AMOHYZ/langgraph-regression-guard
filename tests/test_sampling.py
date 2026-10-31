@@ -22,6 +22,10 @@ class Scripted:
         step = next(self._script)
         if step == "infra":
             raise JudgeInfraError("jev: 503")
+        if step == "timeout":
+            raise TimeoutError("judge timed out")
+        if step == "conn":
+            raise ConnectionError("judge connection reset")
         raw: dict[str, object] = {} if self._usage is None else {"usage": dict(self._usage)}
         return Verdict(self.kpi, step, self.kpi.score_map[step], 0.9, raw)
 
@@ -135,3 +139,24 @@ def test_table_shows_rates_flaky_rows_cost_and_top_flaky_cases() -> None:
     ]
     assert "Top flaky cases, grounded: `run-0/respond`" in lines
     assert "Infra errors, not counted toward k: grounded 1" in lines
+
+
+# T074: judge transport errors are infra samples; mostly-infra KPIs are flagged.
+def test_judge_timeouts_and_connection_errors_are_infra_samples() -> None:
+    c = case_stats("run-0", judge_samples(Scripted(["timeout", "conn", "pass"]), {}, {}, 3))
+    assert (c.k, c.infra, c.pass_hat_k) == (1, 2, True)
+    stats = kpi_stats(KPI_, 3, base=_cases(["timeout"] * 3), new=_cases(["timeout"] * 3))
+    assert stats.outcome == "infra_error"
+
+
+def test_a_kpi_with_mostly_infra_samples_shows_judge_unreliable() -> None:
+    from lgcov.sampling import render_kpi_table
+
+    cases = _cases(["pass", "timeout", "conn"])  # 2 of 3 judgments didn't run
+    stats = kpi_stats(KPI_, 3, base=cases, new=cases)
+    assert stats.outcome == "pass" and stats.judge_unreliable
+    assert "| ⚠️ judge unreliable: grounded (4 of 6 judgments didn't run) | | | | | | |" in (
+        render_kpi_table([stats])
+    )
+    steady = kpi_stats(KPI_, 3, base=_cases(["pass"] * 3), new=_cases(["pass"] * 3))
+    assert not steady.judge_unreliable

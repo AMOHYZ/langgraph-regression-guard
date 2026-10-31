@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from types import FunctionType
 from typing import Any, TypedDict
 
+import httpx
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import START
 
 from lgcov.fingerprint import fingerprint
@@ -63,6 +65,20 @@ def _key(value: Any, ignore_paths: Sequence[str]) -> str | None:
         return None
 
 
+# Network trouble is not the agent's fault, even when it surfaces inside a node (T074).
+TRANSPORT_ERRORS = (TimeoutError, ConnectionError, httpx.TransportError)
+
+
+class NodeError(Exception):
+    """A node's own code raised during replay: the agent broke, unless `transport`."""
+
+    def __init__(self, node: str, original: Exception) -> None:
+        super().__init__(f"node `{node}` raised {type(original).__name__}: {original}")
+        self.node = node
+        self.original = original
+        self.transport = isinstance(original, TRANSPORT_ERRORS)
+
+
 def _run(
     graph: Any, inputs: dict[str, Any], served: Sequence[Step], ignore_paths: Sequence[str]
 ) -> list[Step]:
@@ -87,7 +103,15 @@ def _run(
                         (i for i, (s, k) in enumerate(unused) if (s.node, s.code, k) == want), None
                     )
                     hit = None if i is None else unused.pop(i)[0]
-            out = deepcopy(hit.output) if hit is not None else fn(state, *args, **kwargs)
+            if hit is not None:
+                out = deepcopy(hit.output)
+            else:
+                try:
+                    out = fn(state, *args, **kwargs)
+                except GraphBubbleUp:
+                    raise  # LangGraph's own control flow (interrupt, Command), not a crash
+                except Exception as exc:
+                    raise NodeError(name, exc) from exc
             if key is not None:
                 with lock:
                     calls.append((name, snapshot, out, code))

@@ -26,18 +26,26 @@ class CiResult:
     propagated_drift: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     harness_error: str = ""
+    harness_node: str = ""  # T074: the network trouble surfaced inside this node
+    crash: str = ""  # T074: e.g. "Node `classify` raised ValueError: ..."; an agent failure
     coverage_line: str = ""  # T083, e.g. "Nodes 75% (−25% vs main) · Edges 60% (±0)"
     newly_uncovered: tuple[str, ...] = ()
 
 
 def render_ci_report(r: CiResult) -> str:
     v = verdict(r.exit_code)
-    lines = [MARKER, f"## {_TITLES[v]}", ""]
+    title = "🔴 lgcov: agent failure" if r.crash else _TITLES[v]
+    lines = [MARKER, f"## {title}", ""]
+    if r.crash:
+        lines += [f"🔴 {r.crash}", ""]
     if r.harness_error:
         # Keep a stray ``` in the error from closing the fence early.
         error = r.harness_error.replace("```", "'''")
+        banner = HARNESS_BANNER
+        if r.harness_node:
+            banner = f"⚠️ Harness error (transport) in node `{r.harness_node}`, not a regression"
         lines += [
-            f"{HARNESS_BANNER}: lgcov could not finish, so this PR was not checked.",
+            f"{banner}: lgcov could not finish, so this PR was not checked.",
             "",
             "```",
             error,

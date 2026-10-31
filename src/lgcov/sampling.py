@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from statistics import fmean
 
+from lgcov.cassette import TRANSPORT_ERRORS
 from lgcov.judge_gate import GateOutcome, bootstrap_drop_ci, verdict_gate
 from lgcov.judges import KPI, Judge, JudgeInfraError, NodeState, Verdict
 
@@ -55,7 +56,7 @@ def judge_samples(
         start = clock()
         try:
             v = judge.judge(node_input, node_output)
-        except JudgeInfraError:
+        except (JudgeInfraError, *TRANSPORT_ERRORS):  # T074: a judge's network trouble too
             samples.append(Sample(None, 0.0, (clock() - start) * 1000))
             continue
         ms = (clock() - start) * 1000
@@ -111,10 +112,16 @@ class KpiStats:
     tokens_total: int | None  # None: no judgment reported usage
     tokens_mean: float | None
     flaky_cases: tuple[str, ...]  # most mixed first
+    samples: int = 0  # judgments asked, both sides, infra included
 
     @property
     def flakiness(self) -> float:
         return self.pass_at_k - self.pass_hat_k
+
+    @property
+    def judge_unreliable(self) -> bool:
+        """T074: more than half the judgments didn't run, even if the rest passed."""
+        return self.samples > 0 and self.infra * 2 > self.samples
 
 
 def _gate_verdicts(kpi: KPI, cases: Sequence[CaseStats]) -> list[Verdict]:
@@ -174,6 +181,7 @@ def kpi_stats(
         tokens_total=tokens_total,
         tokens_mean=tokens_mean,
         flaky_cases=tuple(c.case_id for c in flaky),
+        samples=len(samples),
     )
 
 
@@ -218,6 +226,9 @@ def render_kpi_table(stats: Sequence[KpiStats]) -> list[str]:
             f"| {_ICONS[s.outcome]} {s.kpi} (n={s.n}, k={s.k}) | {_pct(s.pass_at_k)} "
             f"| {_pct(s.pass_hat_k)} | {flaky} | {ci} | {ms} | {_tokens(s)} |"
         )
+        if s.judge_unreliable:
+            why = f"{s.infra} of {s.samples} judgments didn't run"
+            lines.append(f"| ⚠️ judge unreliable: {s.kpi} ({why}) | | | | | | |")
     lines.append("")
     for s in stats:
         if s.flaky_cases:

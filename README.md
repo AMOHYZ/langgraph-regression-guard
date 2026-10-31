@@ -133,13 +133,23 @@ jobs:
   `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
   baseline yet". A missing or unreadable baseline is a warning, never a failure.
 - Unchanged nodes are served from the cassette; `live: true` runs every node live.
-- Exit codes: 0 pass, 1 drift that `fail-on` cares about, 2 harness error (install,
-  graph load or replay crashed), which is never reported as a regression.
+- Outcomes and exit codes are in the table below.
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
   `cassette-dir`, `taxonomy` (validated only; L2 judges don't run in the Action yet),
   `fail-on`, `python-version`, `github-token`, `live`. Outputs: `report-path`,
   `root-drift-count`, `propagated-drift-count`, `verdict`.
 - Runs on Linux and macOS runners.
+
+### Outcomes
+
+| Outcome | Exit | When |
+|---|---|---|
+| PASS | 0 | No drift that `fail-on` cares about. |
+| AGENT_FAIL | 1 | Drift that `fail-on` cares about, or a node in the PR's graph raised; the report names the node. A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
+| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, or network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
+
+Known limit: an exception in a router (a conditional-edge function) or inside a
+subgraph isn't attributed to a node yet, so it counts as INFRA_ERROR (T109).
 
 ## Judge KPIs locally (L2)
 

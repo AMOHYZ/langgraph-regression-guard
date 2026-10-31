@@ -482,17 +482,38 @@ def test_cli_unloadable_entrypoint_is_a_harness_error(
     assert "Traceback" not in err
 
 
-def test_cli_replay_crash_inside_the_graph_exits_two(
+def test_cli_replay_node_crash_is_an_agent_failure_even_with_fail_on_never(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cfg, _ = _ab_project(tmp_path)
     crashing = AB_GRAPH.replace('return {"b": "B1"}', 'raise RuntimeError("node b crashed")')
     (tmp_path / "graph.py").write_text(crashing, encoding="utf-8")
     capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 1
+    assert "agent failure: node `b` raised RuntimeError: node b crashed" in capsys.readouterr().out
+    # fail-on governs drift only: a graph that throws is never swallowed.
+    assert main(["replay", "--config", str(cfg), "--fail-on", "never"]) == 1
+
+
+def test_cli_replay_network_error_in_a_node_is_a_harness_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, _ = _ab_project(tmp_path)
+    slow = AB_GRAPH.replace('return {"b": "B1"}', 'raise TimeoutError("provider timed out")')
+    (tmp_path / "graph.py").write_text(slow, encoding="utf-8")
+    capsys.readouterr()
     assert main(["replay", "--config", str(cfg)]) == 2
-    err = capsys.readouterr().err
-    assert "harness error, not a regression" in err
-    assert "node b crashed" in err
+    assert "harness error (transport) in node `b`, not a regression" in capsys.readouterr().err
+
+
+def test_cli_replay_missing_cassette_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    baseline.unlink()
+    capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 2
+    assert "harness error, not a regression" in capsys.readouterr().err
 
 
 def test_cli_replay_summary_json_counts_root_and_propagated(tmp_path: Path) -> None:
@@ -776,3 +797,61 @@ def test_cli_judge_refuses_more_model_calls_than_max_calls(
 def test_cli_judge_needs_a_taxonomy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main([*_judge_args(tmp_path), "--config", str(tmp_path / "none.yaml")]) == 2
     assert "taxonomy" in capsys.readouterr().err
+
+
+# T074: in the Action, a node crash is an agent failure that names the node.
+def test_cli_ci_node_crash_is_an_agent_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    crashing = demo.replace(
+        'return {"needs_tool": "order" in state["question"].lower()}',
+        'raise ValueError("cannot classify")',
+    )
+    assert crashing != demo
+    _ci_project(tmp_path, monkeypatch, crashing)
+    code, report, outputs = _run_ci(tmp_path, "--fail-on", "never")
+    assert code == 1
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: agent failure")
+    assert "Node `classify` raised ValueError: cannot classify" in report
+    assert (outputs["verdict"], outputs["root-drift-count"]) == ("fail", "1")
+
+
+def test_cli_ci_network_error_in_a_node_names_the_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    slow = demo.replace(
+        'return {"needs_tool": "order" in state["question"].lower()}',
+        'raise TimeoutError("provider timed out")',
+    )
+    _ci_project(tmp_path, monkeypatch, slow)
+    code, report, outputs = _run_ci(tmp_path)
+    assert (code, outputs["verdict"]) == (2, "error")
+    assert "⚠️ Harness error (transport) in node `classify`, not a regression" in report
+
+
+def test_cli_ci_missing_cassette_is_a_harness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "cassettes" / "baseline.json").unlink()
+    code, report, _ = _run_ci(tmp_path)
+    assert code == 2
+    assert "⚠️ Harness error, not a regression" in report
+
+
+def test_cli_judge_node_crash_is_an_agent_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = tmp_path / "crashing.py"
+    graph.write_text(
+        DEMO_GRAPH.read_text(encoding="utf-8").replace(
+            'return {"needs_tool": "order" in state["question"].lower()}',
+            'raise ValueError("cannot classify")',
+        ),
+        encoding="utf-8",
+    )
+    args = [*_judge_args(tmp_path), "--taxonomy", DEMO_TAXONOMY, "--graph", f"{graph}:graph"]
+    assert main(args) == 1
+    assert "agent failure: node `classify` raised ValueError" in capsys.readouterr().out

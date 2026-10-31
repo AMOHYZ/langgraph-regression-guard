@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+from enum import IntEnum
 from typing import Literal
 
 FailOn = Literal["root-drift", "any-drift", "never"]
 FAIL_ON_VALUES: tuple[FailOn, ...] = ("root-drift", "any-drift", "never")
 ActionVerdict = Literal["pass", "fail", "error"]
 
-EXIT_PASS = 0
-EXIT_DRIFT = 1
-EXIT_HARNESS_ERROR = 2  # install, load or replay crashed: never reported as a regression
+
+class Outcome(IntEnum):
+    """T074: what a run found; the value is the exit code."""
+
+    PASS = 0
+    AGENT_FAIL = 1  # drift fail-on cares about, or a node in the PR's graph raised
+    INFRA_ERROR = 2  # install, load, cassette, judge or network trouble; never a regression
+
+
+EXIT_PASS = Outcome.PASS
+EXIT_DRIFT = Outcome.AGENT_FAIL
+EXIT_HARNESS_ERROR = Outcome.INFRA_ERROR
 
 
 def parse_fail_on(value: str) -> FailOn:
