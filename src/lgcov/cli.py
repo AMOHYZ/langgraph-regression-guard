@@ -758,6 +758,7 @@ def _ci(argv: list[str]) -> int:
     )
     ap.add_argument("--tier", choices=TIERS, help="pr (default) or nightly; overrides tier")
     ap.add_argument("--nightly-url", help="main's latest nightly run, linked in the report")
+    ap.add_argument("--timing-out", help="write this run's timing here as JSON (T105 benchmark)")
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()
@@ -765,6 +766,10 @@ def _ci(argv: list[str]) -> int:
     body = render_ci_report(result)
     report.write_text(body, encoding="utf-8")
     print(body, end="")
+    if args.timing_out and result.timing:
+        timing = Path(args.timing_out)
+        timing.parent.mkdir(parents=True, exist_ok=True)
+        timing.write_text(json.dumps(asdict(result.timing)) + "\n", encoding="utf-8")
     if args.github_output:
         outputs = {
             "exit-code": result.exit_code,

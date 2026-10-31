@@ -100,6 +100,8 @@ inputs. What a node reads at run time (files, environment variables, network) an
 dependency upgrades are not part of the fingerprint: pass `--live` to either
 command to re-run every node.
 
+Served vs `--live` on the demo, measured: [docs/benchmark-speed.md](docs/benchmark-speed.md) (`make bench-speed`).
+
 ## Use in your repo
 
 Record a baseline first (see Quickstart), commit `lgcov.yaml` and your cassettes,

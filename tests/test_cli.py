@@ -1164,6 +1164,17 @@ def test_cli_ci_nightly_llm_kpi_without_a_client_is_infra_error_only_when_blocki
     assert "⚠️ Skipped, no llm client: `answer_tone` (advisory)." in report
 
 
+def test_cli_ci_writes_its_timing_as_json_for_the_benchmark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # T105: the speed benchmark reads each run's phases here, unrounded.
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    _run_ci(tmp_path, "--timing-out", "out/timing.json")
+    timing = json.loads((tmp_path / "out" / "timing.json").read_text(encoding="utf-8"))
+    assert (timing["live"], timing["served"], timing["budget"]) == (0, 5, 90.0)
+    assert timing["total"] >= timing["agent"] >= 0
+
+
 def test_cli_ci_links_main_s_latest_nightly_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
