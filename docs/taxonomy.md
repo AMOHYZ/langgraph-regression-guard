@@ -44,6 +44,11 @@ kpis:
 - Malformed YAML, or a top level that is not a mapping, is a `ValueError`
   naming the file (never a raw `yaml` error).
 - `label_hints` keys must be a subset of `labels`.
+- `review` (T106), on a failure mode or a KPI, must be `pending` or `approved`; no
+  `review` means a human wrote it. A file with a pending entry is refused: "N entries
+  pending human review; approve with `lgcov taxonomy approve <id>`". Drafted entries
+  also carry `evidence` (trace ids), `why`, `signature` (failure modes) and, once
+  approved, `reviewer`.
 - Custom (non-binary) `labels` need an explicit `score_map`; only binary
   pass/fail gets defaults.
 - Omitted `labels`/`score_map` default to binary pass/fail (1.0/0.0); see

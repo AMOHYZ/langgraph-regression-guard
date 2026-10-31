@@ -236,6 +236,31 @@ lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
 - `samples_per_case` in `lgcov.yaml` sets k; `--samples` overrides it. The demo's
   `fake` judge has a seeded flaky mode, so its table shows a real ⚠️ row.
 
+### Draft a taxonomy from traces
+
+Draft, don't trust: every proposed failure mode needs a human approval before it can gate.
+
+```bash
+lgcov taxonomy draft --description team.md --traces traces/*.json \
+  --out docs/taxonomy.draft.yaml --client my_llm.py:Drafter
+lgcov taxonomy approve skips_order_lookup --reviewer ahmed  # one entry at a time
+lgcov taxonomy check docs/taxonomy.draft.yaml               # exit 1 while one is pending
+```
+
+- A trace is `{"id", "nodes", "tools", "failure": {"node", "kind", "note"}}`; one with no
+  `failure` passed. Failing traces are grouped by exact signature (`failure.node` and
+  `failure.kind`), one failure mode per group.
+- The client writes each mode's and KPI's text. lgcov ships none: `--client` names a
+  class or function, in your file, that makes one with a `propose` method.
+- lgcov picks the judge: `code` when a tool or node check tells the group from the
+  passing traces (a tool every passing trace calls and none of the group does, say),
+  `jev` otherwise.
+- Every entry is `review: pending`, with `evidence` (the trace ids) and a one-line `why`.
+  Approving a failure mode approves its KPIs too, and records the reviewer.
+- Run again, it adds only new signatures and keeps every entry already in the file.
+- A pending entry makes `lgcov taxonomy check`, `lgcov judge` and `lgcov ci` refuse the
+  file.
+
 ### The gate: SHIP, BLOCK or INCONCLUSIVE
 
 Each case is judged on base and on the PR, so its two scores pair up: d = PR − base, with

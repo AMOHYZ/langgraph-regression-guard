@@ -4,10 +4,11 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
+import yaml
 
 from lgcov.code_judges import ToolNotCalled
 from lgcov.judges import KPI, FakeJudge, Judge
-from lgcov.taxonomy import judges_from_taxonomy, load_taxonomy
+from lgcov.taxonomy import judges_from_taxonomy, load_taxonomy, parse_taxonomy
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "open_deep_research" / "taxonomy.yaml"
 
@@ -268,3 +269,25 @@ def test_docs_pr163_taxonomy_has_one_kpi_per_failure_mode() -> None:
     # The node that writes the report, not `final`: the end state clears the notes the
     # judge checks the report against (open_deep_research at 6532a41).
     assert isinstance(by_node["final_report_generation"], FakeJudge)  # judge: jev, faked
+
+
+# T106: a drafted taxonomy can't gate until a human approves every entry.
+def test_a_taxonomy_with_entries_pending_review_is_refused() -> None:
+    from fixtures.drafting import TEAM, TRACES, Scripted
+
+    from lgcov.draft import draft
+    from lgcov.taxonomy import PendingReview
+
+    doc = draft(None, "demo_agent", TEAM, TRACES, Scripted())
+    with pytest.raises(
+        PendingReview,
+        match=r"4 entries pending human review; approve with `lgcov taxonomy approve <id>`",
+    ):
+        parse_taxonomy(doc)
+
+
+def test_a_review_state_other_than_pending_or_approved_is_refused() -> None:
+    raw = yaml.safe_load(DOCS_TAXONOMY.read_text(encoding="utf-8"))
+    raw["failure_modes"][0]["review"] = "maybe"
+    with pytest.raises(ValueError, match="'review' must be pending or approved"):
+        parse_taxonomy(raw)
