@@ -278,3 +278,118 @@ def test_langgraph_control_flow_is_not_turned_into_a_node_error() -> None:
         pytest.fail("GraphBubbleUp (interrupt, Command) must pass through unwrapped")
     except GraphBubbleUp:
         pass
+
+
+# T089: how each call ran, the divergence policy, and the time budget.
+class _Clock:
+    """Test wall-clock: it moves only when a node does its work."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+CLOCK = _Clock()
+
+
+def _work() -> None:
+    CLOCK.now += 50.0  # each call that runs takes 50 s
+
+
+def _chain(a_out: int) -> CompiledStateGraph[S]:
+    """a -> b -> c. A new a_out changes a's code (its closure) and so b's input; b resets
+    x, so c's input matches the recording again."""
+
+    def a(state: S) -> S:
+        _work()
+        return {"x": a_out}
+
+    def b(state: S) -> S:
+        _work()
+        return {"x": 0, "route": "b"}
+
+    def c(state: S) -> S:
+        _work()
+        return {"route": "c"}
+
+    g = StateGraph(S)
+    g.add_node("a", a)
+    g.add_node("b", b)
+    g.add_node("c", c)
+    g.add_edge(START, "a")
+    g.add_edge("a", "b")
+    g.add_edge("b", "c")
+    g.add_edge("c", END)
+    return g.compile()
+
+
+def test_replay_run_tells_served_live_and_diverged_calls_apart() -> None:
+    from lgcov.cassette import replay_run
+
+    cassette = record(_chain(1), {"x": 0})
+    r = replay_run(_chain(2), cassette, serve=True)  # on_divergence="flag" by default
+    # a changed; b's code didn't, but its input did: diverged, so it ran live.
+    assert [(c.node, c.how) for c in r.calls] == [
+        ("a", "live"),
+        ("b", "diverged"),
+        ("c", "served"),
+    ]
+    assert (r.halt, r.not_checked) == (None, ())
+    assert [d.node for d in r.drifts] == ["a"]
+
+
+def test_on_divergence_fail_stops_the_run_and_leaves_the_rest_not_checked() -> None:
+    from lgcov.cassette import replay_run
+
+    cassette = record(_chain(1), {"x": 0})
+    r = replay_run(_chain(2), cassette, serve=True, on_divergence="fail")
+    assert r.halt is not None and (r.halt.node, r.halt.why) == ("b", "diverged")
+    assert r.not_checked == ("b", "c")
+    assert [(c.node, c.how) for c in r.calls] == [("a", "live")]
+    assert [d.node for d in r.drifts] == ["a"]  # b and c weren't checked: not drift
+
+
+def test_on_divergence_live_runs_the_rest_of_the_run_live() -> None:
+    from lgcov.cassette import replay_run
+
+    cassette = record(_chain(1), {"x": 0})
+    r = replay_run(_chain(2), cassette, serve=True, on_divergence="live")
+    assert [(c.node, c.how) for c in r.calls] == [
+        ("a", "live"),
+        ("b", "diverged"),
+        ("c", "after_divergence"),  # its input matched, but the run went live at b
+    ]
+
+
+def test_the_budget_stops_new_live_calls_once_the_projection_runs_over() -> None:
+    from lgcov.cassette import Budget, replay_run
+
+    cassette = record(_chain(1), {"x": 0})
+    budget = Budget(90, CLOCK, expected_live=3)
+    r = replay_run(_chain(2), cassette, serve=True, budget=budget)
+    # a ran: nothing was measured before it. Then 50 s + 50 s x 2 to come > 90 s, so b
+    # never started; a call that has started always finishes.
+    assert r.halt is not None and (r.halt.node, r.halt.why) == ("b", "budget")
+    assert budget.hit == ("b", 50.0)
+    assert [c.node for c in r.calls] == ["a"]
+    assert r.not_checked == ("b", "c")
+
+
+def test_served_calls_still_run_after_the_budget_is_hit() -> None:
+    from lgcov.cassette import Budget, replay_run
+
+    cassette = record(_chain(1), {"x": 0})
+    budget = Budget(0, CLOCK)
+    budget.hit = ("a", 0.0)
+    r = replay_run(_chain(1), cassette, serve=True, budget=budget)
+    assert r.halt is None and [c.how for c in r.calls] == ["served"] * 3
+
+
+def test_unservable_counts_recorded_steps_whose_code_changed() -> None:
+    from lgcov.cassette import unservable
+
+    cassette = record(_chain(1), {"x": 0})
+    assert unservable(_chain(1), [cassette]) == 0
+    assert unservable(_chain(2), [cassette, cassette]) == 2  # a, in each run

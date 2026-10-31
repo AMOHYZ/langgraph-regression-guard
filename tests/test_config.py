@@ -4,7 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from lgcov.config import Config, GateConfig, Thresholds, load_config, parse_config
+from lgcov.config import (
+    Config,
+    GateConfig,
+    Thresholds,
+    TierPolicy,
+    load_config,
+    parse_config,
+    tier_policy,
+)
 
 REPO_CONFIG = Path(__file__).resolve().parents[1] / "lgcov.yaml"
 
@@ -92,6 +100,7 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         ({"graph_entrypoint": "a.py:g", "samples_per_case": 0}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": "3"}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": True}, "samples_per_case"),
+        ({"graph_entrypoint": "a.py:g", "tier": "weekly"}, "tier"),
         ({"graph_entrypoint": "a.py:g", "gate": {"alpha": 0}}, "alpha"),
         ({"graph_entrypoint": "a.py:g", "gate": {"power": 1}}, "power"),
         ({"graph_entrypoint": "a.py:g", "gate": {"margin": -0.1}}, "margin"),
@@ -160,7 +169,21 @@ def test_gate_advisory_kpis() -> None:
         GateConfig(advisory_kpis=("typo",)).advisory(kpis)
 
 
-def test_samples_per_case_defaults_to_one_and_reads_from_the_file() -> None:
-    # T073: k binary verdicts per judged case.
-    assert parse_config({"graph_entrypoint": "a.py:g"}).samples_per_case == 1
+def test_samples_per_case_is_unset_by_default_and_reads_from_the_file() -> None:
+    # T073: k binary verdicts per judged case. T089: unset, the tier picks k (1 pr, 3 nightly).
+    assert parse_config({"graph_entrypoint": "a.py:g"}).samples_per_case is None
     assert parse_config({"graph_entrypoint": "a.py:g", "samples_per_case": 3}).samples_per_case == 3
+
+
+def test_tier_defaults_to_pr_and_reads_from_the_file() -> None:
+    assert parse_config({"graph_entrypoint": "a.py:g"}).tier == "pr"
+    assert parse_config({"graph_entrypoint": "a.py:g", "tier": "nightly"}).tier == "nightly"
+
+
+def test_tier_policy() -> None:
+    # T089: pr serves unchanged nodes, judges once, skips general LLM judges, within 90 s;
+    # nightly runs every node live with every judge, k from samples_per_case (3 if unset).
+    assert tier_policy("pr", None) == TierPolicy(serve=True, k=1, budget=90.0, llm_judges=False)
+    assert tier_policy("pr", 5).k == 1
+    assert tier_policy("nightly", None) == TierPolicy(False, 3, None, True)
+    assert tier_policy("nightly", 5).k == 5

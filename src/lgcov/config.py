@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import yaml
 
@@ -40,6 +41,27 @@ class GateConfig:
         return frozenset(k for k in kpis if k not in self.blocking_kpis)
 
 
+# T089: pr runs on every push, cheap and within a budget; nightly runs everything, live.
+Tier = Literal["pr", "nightly"]
+TIERS: tuple[Tier, ...] = ("pr", "nightly")
+
+
+@dataclass(frozen=True)
+class TierPolicy:
+    serve: bool  # serve unchanged nodes from the cassette
+    k: int  # judge samples per case
+    budget: float | None  # seconds for live node calls; None: no budget
+    llm_judges: bool  # run `judge: llm` KPIs
+
+
+def tier_policy(tier: Tier, samples_per_case: int | None) -> TierPolicy:
+    """pr: unchanged nodes served, k = 1, 90 s, no general LLM judges. nightly: every node
+    live, every judge, k from samples_per_case (3 if unset), no budget."""
+    if tier == "pr":
+        return TierPolicy(serve=True, k=1, budget=90.0, llm_judges=False)
+    return TierPolicy(serve=False, k=samples_per_case or 3, budget=None, llm_judges=True)
+
+
 @dataclass(frozen=True)
 class Config:
     graph_entrypoint: str  # "<module or file.py>:<attr>"
@@ -47,8 +69,9 @@ class Config:
     taxonomy_path: str | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
     ignore_paths: tuple[str, ...] = ()  # JSON pointers into node I/O, e.g. /meta/nonce
-    samples_per_case: int = 1  # T073: k judge verdicts per case (pass@k / pass^k)
+    samples_per_case: int | None = None  # T073: k verdicts per case; None: the tier's (T089)
     gate: GateConfig = field(default_factory=GateConfig)
+    tier: Tier = "pr"
 
 
 _KEYS = (
@@ -60,6 +83,7 @@ _KEYS = (
     "taxonomy",  # alias for taxonomy_path
     "taxonomy_path",
     "thresholds",
+    "tier",
 )
 _THRESHOLD_KEYS = ("min_node_coverage",)
 # T080 keys no command ever read; a file that still sets one is told what does that job.
@@ -148,6 +172,13 @@ def _gate(raw: object) -> GateConfig:
     )
 
 
+def _tier(value: object) -> Tier:
+    for tier in TIERS:
+        if value == tier:
+            return tier
+    raise ValueError(f"lgcov.yaml: 'tier' must be one of {list(TIERS)}, got {value!r}")
+
+
 def _taxonomy_path(d: Mapping[str, object]) -> str | None:
     path = d.get("taxonomy_path")
     alias = d.get("taxonomy")
@@ -185,8 +216,13 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         taxonomy_path=_taxonomy_path(d),
         thresholds=_thresholds(d.get("thresholds", {})),
         ignore_paths=ignore,
-        samples_per_case=_positive_int(d.get("samples_per_case", 1), "samples_per_case"),
+        samples_per_case=(
+            None
+            if "samples_per_case" not in d
+            else _positive_int(d["samples_per_case"], "samples_per_case")
+        ),
         gate=_gate(d.get("gate", {})),
+        tier=_tier(d.get("tier", "pr")),
     )
 
 

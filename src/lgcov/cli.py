@@ -7,28 +7,36 @@ import importlib.util
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
+from time import perf_counter
 from types import CodeType
 from typing import Any
 
 import yaml
 
 from lgcov.cassette import (
+    ON_DIVERGENCE,
+    Budget,
     Cassette,
     Drift,
     NodeError,
+    OnDivergence,
+    Replay,
     Step,
     accept_nodes,
     record,
     replay,
+    replay_run,
     replay_steps,
+    unservable,
 )
-from lgcov.ci_report import CiResult, render_ci_report
+from lgcov.ci_report import CiResult, Timing, render_ci_report
 from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
-from lgcov.config import Config, GateConfig, load_config
+from lgcov.config import TIERS, Config, GateConfig, Tier, load_config, tier_policy
 from lgcov.coverage import (
     CoverageSnapshot,
     coverage_delta,
@@ -39,7 +47,7 @@ from lgcov.coverage import (
 from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
-from lgcov.judges import FakeJudge, Judge, NodeState
+from lgcov.judges import KPI, FakeJudge, Judge, NodeState
 from lgcov.sampling import (
     KpiStats,
     gate_exit_code,
@@ -150,7 +158,9 @@ def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
     return ordered[0] if ordered else None
 
 
-def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[str]:
+def _replay_markdown(
+    runs: list[Cassette], drifts: list[list[Drift]], not_checked: tuple[str, ...] = ()
+) -> list[str]:
     """Per-node drift table: root or downstream, and in how many runs."""
     counts, roots = _drift_kinds(runs, drifts)
     lines = ["### Cassette replay", ""]
@@ -160,9 +170,32 @@ def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[st
     for node in sorted(counts):
         kind = "root" if node in roots else "downstream"
         lines.append(f"| `{node}` | {kind} | {counts[node]}/{len(runs)} |")
-    unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys())
+    unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys() - set(not_checked))
     if unchanged:
         lines += ["", "Unchanged: " + ", ".join(f"`{n}`" for n in unchanged)]
+    return lines
+
+
+def _divergence_lines(replays: list[Replay], on_divergence: OnDivergence) -> list[str]:
+    """T089: the runs that diverged from the recording, and what that did to them."""
+    runs = list(enumerate(replays, 1))
+    calls = [(f"`{c.node}` in run {i}", c.how) for i, r in runs for c in r.calls]
+    first = [where for where, how in calls if how == "diverged"]
+    after = [where for where, how in calls if how == "after_divergence"]
+    lines = []
+    if first and on_divergence == "flag":
+        lines.append(f"Diverged, so run live (on-divergence: flag): {', '.join(first)}.")
+        lines += [f"Re-executed after divergence: {', '.join(after)}."] if after else []
+    if first and on_divergence == "live":
+        what = "Diverged, so the rest of the run ran live (on-divergence: live)"
+        lines.append(f"{what}: {', '.join(first)}.")
+    for why, label in (("diverged", "on-divergence: fail"), ("budget", "budget hit")):
+        stopped = [
+            f"run {i} from `{r.halt.node}` ({', '.join(f'`{n}`' for n in r.not_checked)})"
+            for i, r in runs
+            if r.halt is not None and r.halt.why == why
+        ]
+        lines += [f"Not checked ({label}): {', '.join(stopped)}."] if stopped else []
     return lines
 
 
@@ -192,6 +225,16 @@ def _node_failure(prog: str, exc: NodeError) -> int:
 
 _LIVE_HELP = "re-run every node; by default a node whose code and input match is served"
 _INCONCLUSIVE_HELP = "exit 1 on an INCONCLUSIVE blocking KPI; overrides gate.inconclusive_blocks"
+
+
+def _budget_arg(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = -1.0
+    if not seconds >= 0:  # also catches nan
+        raise argparse.ArgumentTypeError(f"must be a number of seconds >= 0, got {value!r}")
+    return seconds
 
 
 def _fail_on_arg(value: str) -> FailOn:
@@ -486,6 +529,8 @@ def _base_diff(base_dir: str | None, target: str, head: GraphSnapshot) -> tuple[
 
 
 def _ci_result(args: argparse.Namespace) -> CiResult:
+    start = perf_counter()
+    budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
     fail_on: FailOn = args.fail_on
     if args.harness_error:
         return CiResult(fail_on, EXIT_ERROR, harness_error=args.harness_error)
@@ -494,17 +539,25 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         cfg = load_config(args.config, overrides)
     except (OSError, ValueError) as exc:
         return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
-    l2 = None
+    tier: Tier = args.tier or cfg.tier
+    policy = tier_policy(tier, cfg.samples_per_case)
+    budget.seconds = policy.budget if args.budget_seconds is None else args.budget_seconds
+    l2, advisory, llm_code = None, frozenset[str](), 0
+    llm_notes: list[str] = []
     if args.taxonomy:
         try:
             specs = list(load_taxonomy(args.taxonomy).kpi_specs)
+            llm = [s.name for s in specs if s.judge == "llm"]
+            if not policy.llm_judges or _llm_judge is None:
+                specs = [s for s in specs if s.judge != "llm"]
             l2 = (specs, [_l2_judge(spec) for spec in specs])
         except (OSError, ValueError) as exc:
             return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid taxonomy: {exc}")
         try:
-            cfg.gate.advisory([spec.name for spec in specs])
+            advisory = cfg.gate.advisory([*(spec.name for spec in specs), *llm])
         except ValueError as exc:
             return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
+        llm_notes, llm_code = _llm_notes(llm, advisory, policy.llm_judges)
     try:
         # Exception: importing user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
@@ -519,8 +572,14 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
+    serve = policy.serve and not args.live
+    budget.expected_live = unservable(graph, runs) if serve else sum(len(r.steps) for r in runs)
+    agent_start = perf_counter()
     try:
-        replays = [replay_steps(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
+        replays = [
+            replay_run(graph, run, cfg.ignore_paths, serve, args.on_divergence, budget)
+            for run in runs
+        ]
     except NodeError as exc:
         original = f"{type(exc.original).__name__}: {exc.original}"
         if exc.transport:
@@ -534,49 +593,111 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
         msg = _harness_message("replay failed outside node code", exc)
         return replace(partial, harness_error=msg)
-    drifts = [d for d, _ in replays]
+    agent = perf_counter() - agent_start
+    pairs = [(list(r.drifts), list(r.steps)) for r in replays]
+    drifts = [d for d, _ in pairs]
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
     # T083: coverage of the runs replay just did; nothing executes again for it.
-    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in replays], args.commit)
+    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in pairs], args.commit)
     if args.coverage_out:
         Path(args.coverage_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.coverage_out).write_text(cov.to_json(), encoding="utf-8")
     base, note = _coverage_baseline(args.coverage_baseline)
+    # T089: nodes a run stopped before (divergence or budget) are INCONCLUSIVE, never a fail.
+    not_checked = tuple(dict.fromkeys(n for r in replays for n in r.not_checked))
+    blocks = args.fail_on_inconclusive or cfg.gate.inconclusive_blocks
     drift_code = drift_exit_code(fail_on, len(root), len(downstream))
     under_floor = node_floor_miss(cov, cfg.thresholds.min_node_coverage)
-    l1_code = Outcome.AGENT_FAIL if under_floor else drift_code  # a floor miss is 1, never 2
+    floor_code = Outcome.AGENT_FAIL if under_floor else 0  # a floor miss is 1, never 2
+    l1_code = max(drift_code, int(blocks and bool(not_checked)), floor_code)
+    diverged = _divergence_lines(replays, args.on_divergence)
+    calls = [c for r in replays for c in r.calls]
+    timing = Timing(
+        0.0,
+        agent,
+        live=sum(1 for c in calls if c.how != "served"),
+        served=sum(1 for c in calls if c.how == "served"),
+        budget=budget.seconds,
+        budget_hit=budget.hit,
+    )
     result = replace(
         partial,
         exit_code=l1_code,
-        replay_lines=tuple(_replay_markdown(runs, drifts)),
+        replay_lines=(
+            *_replay_markdown(runs, drifts, not_checked),
+            *([""] if diverged else []),
+            *diverged,
+        ),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
         under_floor=under_floor,
-        notes=(note,) if note else (),
+        notes=(
+            *llm_notes,
+            *([note] if note else []),
+            *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
+        ),
+        tier=tier,
+        not_checked=not_checked,
+        timing=replace(timing, total=perf_counter() - start),
     )
     if l2 is None:
         return result
+    judge_start = perf_counter()
     try:
-        stats, gate = _ci_gate(args, cfg, *l2, runs, replays)
+        stats, gate = _ci_gate(args, cfg, policy.k, advisory, *l2, runs, pairs)
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
         return replace(result, exit_code=l1_code or EXIT_ERROR, harness_error=msg)
+    tokens = [s.tokens_total for s in stats if s.tokens_total]  # code judges report 0
+    judged = replace(
+        timing,
+        judges=perf_counter() - judge_start,
+        judge_calls=sum(s.samples for s in stats),
+        tokens=sum(tokens) if tokens else None,
+    )
     gate_code = gate_exit_code(stats, gate.inconclusive_blocks)
     return replace(
         result,
-        exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code),
-        l2_lines=(*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)),
+        exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code, llm_code),
+        l2_lines=(
+            (*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats))
+            if stats
+            else ()
+        ),
         blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
         inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
+        timing=replace(judged, total=perf_counter() - start),
     )
+
+
+def _llm_notes(
+    llm: list[str], advisory: frozenset[str], tier_runs_them: bool
+) -> tuple[list[str], int]:
+    """T089: the `judge: llm` KPIs this run won't judge, and the exit code that leaves: on
+    nightly, INFRA_ERROR when one with no client blocks; an advisory one is only shown."""
+    if not llm or (tier_runs_them and _llm_judge is not None):
+        return [], 0
+    if not tier_runs_them:
+        return [f"Nightly only (`judge: llm`): {_quoted(llm)}."], 0
+    blocking = [n for n in llm if n not in advisory]
+    notes = [f"⚠️ No llm client for {_quoted(blocking)}: INFRA_ERROR."] if blocking else []
+    quiet = [n for n in llm if n in advisory]
+    notes += [f"⚠️ Skipped, no llm client: {_quoted(quiet)} (advisory)."] if quiet else []
+    return notes, EXIT_ERROR if blocking else 0
+
+
+def _quoted(names: list[str]) -> str:
+    return ", ".join(f"`{n}`" for n in names)
 
 
 def _ci_gate(
     args: argparse.Namespace,
     cfg: Config,
+    k: int,
+    advisory: frozenset[str],
     specs: list[KPISpec],
     judges: list[Judge],
     runs: list[Cassette],
@@ -584,14 +705,14 @@ def _ci_gate(
 ) -> tuple[list[KpiStats], GateConfig]:
     """T091: the L2 gate on recorded vs replayed outputs, as `lgcov judge` runs it."""
     plan = _l2_plan(specs, runs, replays)
-    _, model = _l2_calls(plan, cfg.samples_per_case)
+    _, model = _l2_calls(plan, k)
     if model > args.max_calls:
         raise ValueError(
             f"refusing to make {model} model judge calls (more than --max-calls "
             f"{args.max_calls}); lower samples_per_case or raise --max-calls"
         )
     gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
-    return _l2_gate(plan, judges, cfg.samples_per_case, gate, runs, replays), gate
+    return _l2_gate(plan, judges, k, gate, runs, replays, advisory), gate
 
 
 def _coverage_baseline(path: str | None) -> tuple[CoverageSnapshot | None, str]:
@@ -622,6 +743,21 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""), help="commit SHA")
     ap.add_argument("--max-calls", type=int, default=200, help="refuse more model judge calls")
     ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
+    ap.add_argument(
+        "--on-divergence",
+        choices=ON_DIVERGENCE,
+        default="flag",
+        help="a served node's input no longer matches: flag (run it live), live (run the "
+        "rest of the run live) or fail (leave the rest of the run not checked)",
+    )
+    ap.add_argument(
+        "--budget-seconds",
+        type=_budget_arg,
+        help="stop starting live node calls once the run is projected to take longer; "
+        "default: the tier's (90 on pr, none on nightly)",
+    )
+    ap.add_argument("--tier", choices=TIERS, help="pr (default) or nightly; overrides tier")
+    ap.add_argument("--nightly-url", help="main's latest nightly run, linked in the report")
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()
@@ -635,6 +771,7 @@ def _ci(argv: list[str]) -> int:
             "propagated-drift-count": len(result.propagated_drift),
             "report-path": report,
             "root-drift-count": len(result.root_drift),
+            "tier": result.tier,
             "verdict": verdict(result.exit_code),
         }
         with open(args.github_output, "a", encoding="utf-8") as f:
@@ -643,12 +780,19 @@ def _ci(argv: list[str]) -> int:
 
 
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
+# T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
+# never runs one, and a nightly run reports the KPIs it couldn't judge.
+_llm_judge: Callable[[KPI], Judge] | None = None
 
 
 def _l2_judge(spec: KPISpec) -> Judge:
     kpi = spec.to_kpi()
     if spec.judge == "code":
         return code_judge(kpi, spec.check or {})
+    if spec.judge == "llm":
+        if _llm_judge is None:
+            raise ValueError(f"KPI '{spec.name}': judge llm needs a general LLM judge client")
+        return _llm_judge(kpi)
     if spec.judge == "fake":
         check = spec.check or {}
         unknown = sorted(set(check) - set(_FAKE_CHECK_KEYS))
@@ -706,6 +850,7 @@ def _l2_gate(
     gate: GateConfig,
     runs: list[Cassette],
     replays: list[tuple[list[Drift], list[Step]]],
+    advisory: frozenset[str],
 ) -> list[KpiStats]:
     """T091: k samples per case on both sides, each case paired, then gated across KPIs."""
     run_roots = [_run_root(r, d) for r, (d, _) in zip(runs, replays, strict=True)]
@@ -727,7 +872,7 @@ def _l2_gate(
                 case_roots=roots,
             )
         )
-    return gate_kpis(stats, gate.advisory([spec.name for spec, _, _ in plan]), gate.alpha)
+    return gate_kpis(stats, advisory, gate.alpha)
 
 
 def _judge_cmd(argv: list[str]) -> int:
@@ -749,7 +894,7 @@ def _judge_cmd(argv: list[str]) -> int:
         print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
         return EXIT_ERROR
     gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
-    k = cfg.samples_per_case if args.samples is None else args.samples
+    k = (cfg.samples_per_case or 1) if args.samples is None else args.samples
     taxonomy_path = args.taxonomy or cfg.taxonomy_path
     if k < 1 or not taxonomy_path:
         print(
@@ -759,12 +904,16 @@ def _judge_cmd(argv: list[str]) -> int:
         return EXIT_ERROR
     try:
         specs = list(load_taxonomy(taxonomy_path).kpi_specs)
+        skipped = [s.name for s in specs if s.judge == "llm" and _llm_judge is None]
+        specs = [s for s in specs if s.name not in skipped]
         judges = [_l2_judge(spec) for spec in specs]
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid taxonomy: {exc}", file=sys.stderr)
         return EXIT_ERROR
+    if skipped:
+        print("Skipped, no llm client: " + ", ".join(f"`{n}`" for n in skipped) + ".")
     try:
-        gate.advisory([spec.name for spec in specs])
+        advisory = gate.advisory([*(spec.name for spec in specs), *skipped])
     except ValueError as exc:
         print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -793,7 +942,7 @@ def _judge_cmd(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return EXIT_ERROR
-    stats = _l2_gate(plan, judges, k, gate, runs, replays)
+    stats = _l2_gate(plan, judges, k, gate, runs, replays, advisory)
     print(
         "\n".join([*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)])
     )
@@ -858,6 +1007,10 @@ def _selfcheck_cmd(argv: list[str]) -> int:
                 commit="",
                 max_calls=200,
                 fail_on_inconclusive=False,
+                on_divergence="flag",
+                budget_seconds=None,
+                tier=None,
+                nightly_url=None,
             )
         )
         actual = Outcome(result.exit_code)
