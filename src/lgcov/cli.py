@@ -17,6 +17,17 @@ from typing import Any
 
 import yaml
 
+from lgcov.calibration import (
+    Band,
+    Bands,
+    bands_document,
+    calibrate,
+    judge_bands,
+    read_labels,
+    render_calibration,
+    rows_from_overrides,
+    uncalibrated_line,
+)
 from lgcov.cassette import (
     ON_DIVERGENCE,
     Budget,
@@ -542,21 +553,23 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     tier: Tier = args.tier or cfg.tier
     policy = tier_policy(tier, cfg.samples_per_case)
     budget.seconds = policy.budget if args.budget_seconds is None else args.budget_seconds
-    l2, advisory, llm_code = None, frozenset[str](), 0
+    l2, advisory, flagged, llm_code = None, frozenset[str](), frozenset[str](), 0
     llm_notes: list[str] = []
+    calibration: list[str] = []
     if args.taxonomy:
         try:
-            specs = list(load_taxonomy(args.taxonomy).kpi_specs)
-            llm = [s.name for s in specs if s.judge == "llm"]
-            if not policy.llm_judges or _llm_judge is None:
-                specs = [s for s in specs if s.judge != "llm"]
-            l2 = (specs, [_l2_judge(spec) for spec in specs])
+            every = list(load_taxonomy(args.taxonomy).kpi_specs)
+            llm = [s.name for s in every if s.judge == "llm"]
+            runs_llm = policy.llm_judges and _llm_judge is not None
+            specs = every if runs_llm else [s for s in every if s.judge != "llm"]
+            l2 = (specs, [_l2_judge(spec, cfg.jev_model) for spec in specs])
         except (OSError, ValueError) as exc:
             return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid taxonomy: {exc}")
         try:
-            advisory = cfg.gate.advisory([*(spec.name for spec in specs), *llm])
-        except ValueError as exc:
-            return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
+            advisory, flagged, calibration = _gate_bands(args.bands, every, cfg)
+        except (OSError, ValueError) as exc:
+            msg = f"invalid lgcov.yaml or bands.json: {exc}"
+            return CiResult(fail_on, EXIT_ERROR, harness_error=msg)
         llm_notes, llm_code = _llm_notes(llm, advisory, policy.llm_judges)
     try:
         # Exception: importing user graph code can raise anything.
@@ -647,7 +660,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         return result
     judge_start = perf_counter()
     try:
-        stats, gate = _ci_gate(args, cfg, policy.k, advisory, *l2, runs, pairs)
+        stats, gate = _ci_gate(args, cfg, policy.k, advisory, flagged, *l2, runs, pairs)
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
         return replace(result, exit_code=l1_code or EXIT_ERROR, harness_error=msg)
@@ -663,9 +676,13 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         result,
         exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code, llm_code),
         l2_lines=(
-            (*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats))
-            if stats
-            else ()
+            *calibration,
+            *([""] if calibration and stats else []),
+            *(
+                (*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats))
+                if stats
+                else ()
+            ),
         ),
         blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
         inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
@@ -698,6 +715,7 @@ def _ci_gate(
     cfg: Config,
     k: int,
     advisory: frozenset[str],
+    flagged: frozenset[str],
     specs: list[KPISpec],
     judges: list[Judge],
     runs: list[Cassette],
@@ -712,7 +730,7 @@ def _ci_gate(
             f"{args.max_calls}); lower samples_per_case or raise --max-calls"
         )
     gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
-    return _l2_gate(plan, judges, k, gate, runs, replays, advisory), gate
+    return _l2_gate(plan, judges, k, gate, runs, replays, advisory, flagged), gate
 
 
 def _coverage_baseline(path: str | None) -> tuple[CoverageSnapshot | None, str]:
@@ -759,6 +777,7 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--tier", choices=TIERS, help="pr (default) or nightly; overrides tier")
     ap.add_argument("--nightly-url", help="main's latest nightly run, linked in the report")
     ap.add_argument("--timing-out", help="write this run's timing here as JSON (T105 benchmark)")
+    ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()
@@ -790,7 +809,25 @@ _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
 _llm_judge: Callable[[KPI], Judge] | None = None
 
 
-def _l2_judge(spec: KPISpec) -> Judge:
+def _gate_bands(
+    path: str, specs: list[KPISpec], cfg: Config
+) -> tuple[frozenset[str], frozenset[str], list[str]]:
+    """T063: the advisory KPIs (lgcov.yaml's, plus judges whose band is advisory), the
+    flagged ones, and the report's lines about calibration."""
+    file = Path(path)
+    raw: object = json.loads(file.read_text(encoding="utf-8")) if file.is_file() else None
+    kinds = {s.name: s.judge for s in specs}
+    bands = judge_bands(kinds, raw, cfg.jev_model, cfg.gate.uncalibrated)
+    advisory = cfg.gate.advisory(list(kinds)) | _in_band(bands, "advisory")
+    lines = [uncalibrated_line(bands, kinds, cfg.gate.uncalibrated), *bands.warnings]
+    return advisory, _in_band(bands, "flag") - advisory, [line for line in lines if line]
+
+
+def _in_band(bands: Bands, band: Band) -> frozenset[str]:
+    return frozenset(kpi for kpi, b in bands.of.items() if b == band)
+
+
+def _l2_judge(spec: KPISpec, jev_model: str | None = None) -> Judge:
     kpi = spec.to_kpi()
     if spec.judge == "code":
         return code_judge(kpi, spec.check or {})
@@ -810,7 +847,7 @@ def _l2_judge(spec: KPISpec) -> Judge:
             raise ValueError(f"KPI '{spec.name}': fail_every must be a whole number")
         when = check.get("when_input_contains", "")
         return FakeJudge(kpi, "pass", fail_every=int(every), when_input_contains=when)
-    return JevJudge(kpi)
+    return JevJudge(kpi, model=jev_model)
 
 
 _Cases = dict[str, tuple[NodeState, NodeState]]
@@ -856,6 +893,7 @@ def _l2_gate(
     runs: list[Cassette],
     replays: list[tuple[list[Drift], list[Step]]],
     advisory: frozenset[str],
+    flagged: frozenset[str] = frozenset(),
 ) -> list[KpiStats]:
     """T091: k samples per case on both sides, each case paired, then gated across KPIs."""
     run_roots = [_run_root(r, d) for r, (d, _) in zip(runs, replays, strict=True)]
@@ -877,7 +915,7 @@ def _l2_gate(
                 case_roots=roots,
             )
         )
-    return gate_kpis(stats, advisory, gate.alpha)
+    return gate_kpis(stats, advisory, gate.alpha, flagged=flagged)
 
 
 def _judge_cmd(argv: list[str]) -> int:
@@ -891,6 +929,7 @@ def _judge_cmd(argv: list[str]) -> int:
     ap.add_argument("--max-calls", type=int, default=200, help="refuse more model judge calls")
     ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
     ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
+    ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
     args = ap.parse_args(argv)
     overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
     try:
@@ -908,19 +947,19 @@ def _judge_cmd(argv: list[str]) -> int:
         )
         return EXIT_ERROR
     try:
-        specs = list(load_taxonomy(taxonomy_path).kpi_specs)
-        skipped = [s.name for s in specs if s.judge == "llm" and _llm_judge is None]
-        specs = [s for s in specs if s.name not in skipped]
-        judges = [_l2_judge(spec) for spec in specs]
+        every = list(load_taxonomy(taxonomy_path).kpi_specs)
+        skipped = [s.name for s in every if s.judge == "llm" and _llm_judge is None]
+        specs = [s for s in every if s.name not in skipped]
+        judges = [_l2_judge(spec, cfg.jev_model) for spec in specs]
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid taxonomy: {exc}", file=sys.stderr)
         return EXIT_ERROR
     if skipped:
         print("Skipped, no llm client: " + ", ".join(f"`{n}`" for n in skipped) + ".")
     try:
-        advisory = gate.advisory([*(spec.name for spec in specs), *skipped])
-    except ValueError as exc:
-        print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
+        advisory, flagged, calibration = _gate_bands(args.bands, every, replace(cfg, gate=gate))
+    except (OSError, ValueError) as exc:
+        print(f"lgcov judge: invalid config or bands.json: {exc}", file=sys.stderr)
         return EXIT_ERROR
     try:
         # Exception: importing user graph code can raise anything.
@@ -947,11 +986,62 @@ def _judge_cmd(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return EXIT_ERROR
-    stats = _l2_gate(plan, judges, k, gate, runs, replays, advisory)
+    stats = _l2_gate(plan, judges, k, gate, runs, replays, advisory, flagged)
+    print("\n".join([*calibration, *([""] if calibration else [])]), end="")
     print(
         "\n".join([*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)])
     )
     return gate_exit_code(stats, gate.inconclusive_blocks)
+
+
+_BANDS = "calibration/bands.json"  # T063: in the repo, so a band moves in a reviewed diff
+
+
+def _pinned_jev_model(path: str) -> str | None:
+    # calibrate reads only jev_model; it needs no graph, so a stand-in entrypoint validates
+    if not Path(path).is_file():
+        return None
+    return load_config(path, {"graph_entrypoint": "calibrate.py:unused"}).jev_model
+
+
+def _calibrate_cmd(argv: list[str]) -> int:
+    """T063: each judge's agreement with human labels, from a CSV and saved overrides."""
+    ap = argparse.ArgumentParser(prog="lgcov calibrate")
+    ap.add_argument(
+        "labels",
+        help="CSV: case_id, judge_id, judge_label, human_label[, judge_confidence, question_form]",
+    )
+    ap.add_argument("--overrides", help="the overrides review decisions saved (JSON lines)")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml with each KPI's labels (default pass/fail)")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml, for jev_model")
+    ap.add_argument("--bands", default=_BANDS, help="write each judge's band here (T063)")
+    args = ap.parse_args(argv)
+    skipped = 0
+    try:
+        jev_model = _pinned_jev_model(args.config)
+        rows = read_labels(Path(args.labels).read_text(encoding="utf-8"))
+        specs = load_taxonomy(args.taxonomy).kpi_specs if args.taxonomy else ()
+        score_maps = {spec.name: spec.score_map for spec in specs}
+        if args.overrides:
+            lines = Path(args.overrides).read_text(encoding="utf-8").splitlines()
+            extra, skipped = rows_from_overrides(lines, score_maps)
+            rows += extra
+        stats = calibrate(rows, score_maps)
+    except (OSError, ValueError) as exc:  # ValueError covers malformed JSON lines too
+        print(f"lgcov calibrate: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    kinds = {spec.name: spec.judge for spec in specs}
+    print("\n".join(render_calibration(stats, kinds, jev_model)))
+    bands = Path(args.bands)
+    bands.parent.mkdir(parents=True, exist_ok=True)
+    bands.write_text(bands_document(stats, jev_model), encoding="utf-8")
+    print(f"Wrote {bands}: one band per judge, for `lgcov judge` and `lgcov ci`.")
+    if skipped:
+        print(
+            f"{skipped} override{'' if skipped == 1 else 's'} skipped: no kpi or judge_label "
+            "(saved before T063), or a human score that isn't one of the KPI's labels."
+        )
+    return 0
 
 
 @dataclass(frozen=True)
@@ -1016,6 +1106,7 @@ def _selfcheck_cmd(argv: list[str]) -> int:
                 budget_seconds=None,
                 tier=None,
                 nightly_url=None,
+                bands="calibration/bands.json",
             )
         )
         actual = Outcome(result.exit_code)
@@ -1047,6 +1138,8 @@ def main(argv: list[str] | None = None) -> int:
         return _selfcheck_cmd(argv[1:])
     if argv[:1] == ["judge"]:
         return _judge_cmd(argv[1:])
+    if argv[:1] == ["calibrate"]:
+        return _calibrate_cmd(argv[1:])
     if argv[:1] == ["coverage"]:
         return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:

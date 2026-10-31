@@ -27,6 +27,7 @@ class GateConfig:
     blocking_kpis: tuple[str, ...] | None = None  # None: every KPI not in advisory_kpis
     advisory_kpis: tuple[str, ...] = ()
     inconclusive_blocks: bool = False  # True: an INCONCLUSIVE blocking KPI exits 1, not 0
+    uncalibrated: Literal["advisory", "flag"] = "advisory"  # T063: a model judge with no labels
 
     def advisory(self, kpis: Collection[str]) -> frozenset[str]:
         """The advisory KPIs among a taxonomy's. A name the taxonomy doesn't have is an error."""
@@ -72,6 +73,7 @@ class Config:
     samples_per_case: int | None = None  # T073: k verdicts per case; None: the tier's (T089)
     gate: GateConfig = field(default_factory=GateConfig)
     tier: Tier = "pr"
+    jev_model: str | None = None  # T063: the Jev model judges use; labels are only good for it
 
 
 _KEYS = (
@@ -79,6 +81,7 @@ _KEYS = (
     "gate",
     "graph_entrypoint",
     "ignore_paths",
+    "jev_model",
     "samples_per_case",
     "taxonomy",  # alias for taxonomy_path
     "taxonomy_path",
@@ -98,6 +101,7 @@ _GATE_KEYS = (
     "inconclusive_blocks",
     "margin",
     "power",
+    "uncalibrated",
 )
 
 
@@ -162,6 +166,9 @@ def _gate(raw: object) -> GateConfig:
     inconclusive_blocks = raw.get("inconclusive_blocks", False)
     if not isinstance(inconclusive_blocks, bool):
         raise ValueError("lgcov.yaml: 'gate.inconclusive_blocks' must be true or false")
+    uncalibrated = raw.get("uncalibrated", "advisory")
+    if uncalibrated not in ("advisory", "flag"):
+        raise ValueError("lgcov.yaml: 'gate.uncalibrated' must be advisory or flag")
     return GateConfig(
         alpha=_probability(raw.get("alpha", 0.05), "alpha"),
         power=_probability(raw.get("power", 0.8), "power"),
@@ -169,6 +176,7 @@ def _gate(raw: object) -> GateConfig:
         blocking_kpis=blocking_kpis,
         advisory_kpis=advisory_kpis,
         inconclusive_blocks=inconclusive_blocks,
+        uncalibrated="flag" if uncalibrated == "flag" else "advisory",
     )
 
 
@@ -223,6 +231,7 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         ),
         gate=_gate(d.get("gate", {})),
         tier=_tier(d.get("tier", "pr")),
+        jev_model=None if "jev_model" not in d else _str(d["jev_model"], "jev_model"),
     )
 
 
