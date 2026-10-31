@@ -1,4 +1,4 @@
-"""T052: node/edge coverage of a snapshot from execution traces."""
+"""T052/T083: node/edge coverage from execution traces, and its trend vs main."""
 
 import json
 from pathlib import Path
@@ -8,23 +8,31 @@ from fixtures.build_examples import build_conditional, build_linear
 from fixtures.graphs import linear
 
 from lgcov.coverage import (
-    CoverageReport,
+    CoverageSnapshot,
     coverage,
+    coverage_delta,
     format_coverage_delta,
-    load_coverage,
-    write_coverage,
+    format_coverage_line,
+    format_delta,
+    snapshot_coverage,
 )
-from lgcov.snapshot import Edge, snapshot_from_compiled
+from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.trace import record_trace
 
 
-def test_two_of_four_nodes_is_fifty_percent() -> None:
+def test_completed_runs_enter_at_start_and_leave_at_end() -> None:
     snap = snapshot_from_compiled(build_linear())
-    runs = [["a", "b"], ["a", "b"]]
-    rep = coverage(snap, runs)
-    assert rep.node_pct == 50.0
-    assert rep.unhit_nodes == ["__end__", "__start__"]
-    assert rep.unhit_edges == [Edge("__start__", "a"), Edge("b", "__end__")]
+    rep = coverage(snap, [["a", "b"], ["a", "b"]])  # traces omit __start__ / __end__
+    assert (rep.node_pct, rep.edge_pct) == (100.0, 100.0)
+    assert (rep.unhit_nodes, rep.unhit_edges) == ([], [])
+
+
+def test_partial_run_leaves_the_rest_unhit() -> None:
+    snap = snapshot_from_compiled(build_linear())
+    rep = coverage(snap, [["a"]])
+    assert rep.node_pct == 75.0
+    assert rep.unhit_nodes == ["b"]
+    assert rep.unhit_edges == [Edge("a", "b"), Edge("b", "__end__")]
 
 
 def test_full_run_covers_everything() -> None:
@@ -47,54 +55,96 @@ def test_no_runs_means_zero_coverage() -> None:
 # Stretch goal: edge_pct on the conditional fixture — each branch counts.
 def test_conditional_edge_pct_counts_each_branch() -> None:
     snap = snapshot_from_compiled(build_conditional())
-    rep = coverage(snap, [["router", "tool"], ["router", "answer"]])
-    assert rep.node_pct == 60.0  # 3 of 5 visited; __start__/__end__ never traced
-    assert rep.edge_pct == 40.0  # 2 of 5: both conditional branches hit
-    assert rep.unhit_edges == [
-        Edge("__start__", "router"),
-        Edge("answer", "__end__"),
-        Edge("tool", "__end__"),
-    ]
+    rep = coverage(snap, [["router", "tool"]])  # only the tool branch runs
+    assert rep.node_pct == 80.0  # 4 of 5: answer never visited
+    assert rep.edge_pct == 60.0  # 3 of 5: the answer branch's two edges are unhit
+    assert rep.unhit_edges == [Edge("answer", "__end__"), Edge("router", "answer", True)]
 
 
 def test_t055_trace_feeds_coverage() -> None:
     snap = snapshot_from_compiled(linear())
     runs = [record_trace(linear(), {"x": 1})]  # ["a", "b"]
-    rep = coverage(snap, runs)
-    # Traces record node names only, so __start__/__end__ stay unhit in v0.
-    assert rep.node_pct == 50.0
+    assert coverage(snap, runs).node_pct == 100.0
 
 
-# T083: coverage.json artifact + delta vs a main baseline.
+# T083: CoverageSnapshot (coverage.json), delta vs main, and the report line.
+GOLDEN = Path(__file__).parent / "fixtures" / "coverage.golden.json"
+DEMO_BASELINE = Path(__file__).parent / "fixtures" / "demo_baseline.json"
+
+
+@pytest.mark.parametrize(
+    ("pp", "want"),
+    [(0.0, "±0"), (-25.0, "−25%"), (12.5, "+12.5%"), (100 / 3, "+33.3%"), (-0.04, "±0")],
+)
+def test_format_delta(pp: float, want: str) -> None:
+    assert format_delta(pp) == want
 
 
 @pytest.mark.parametrize(
     ("current", "baseline", "want"),
     [
-        (75.0, 100.0, "75.0% (-25.0% vs main)"),
-        (60.0, 50.0, "60.0% (+10.0% vs main)"),
-        (80.0, 80.0, "80.0% (+0.0% vs main)"),
-        (75.0, None, "75.0% (no baseline)"),
+        (75.0, 100.0, "75% (−25% vs main)"),
+        (60.0, 60.0, "60% (±0)"),
+        (100 / 3, 23.3, "33.3% (+10% vs main)"),
+        (75.0, None, "75% (no baseline yet)"),
     ],
 )
 def test_format_coverage_delta(current: float, baseline: float | None, want: str) -> None:
     assert format_coverage_delta(current, baseline) == want
 
 
-def test_coverage_json_round_trip_stable_key_order(tmp_path: Path) -> None:
-    rep = CoverageReport(
-        node_pct=50.0,
-        edge_pct=33.3,
-        unhit_nodes=["__end__", "__start__"],
-        unhit_edges=[Edge("__start__", "a"), Edge("b", "__end__")],
+def _linear(runs: list[list[str]], sha: str = "") -> CoverageSnapshot:
+    return snapshot_coverage(snapshot_from_compiled(build_linear()), runs, commit_sha=sha)
+
+
+def test_coverage_line_without_a_baseline_says_no_baseline_yet() -> None:
+    assert format_coverage_line(_linear([["a"]]), None) == (
+        "Nodes 75% · Edges 33.3% (no baseline yet)"
     )
-    path = tmp_path / "coverage.json"
-    write_coverage(path, rep)
-    body = path.read_text(encoding="utf-8")
-    assert list(json.loads(body)) == [
-        "edge_pct",
-        "node_pct",
-        "unhit_edges",
-        "unhit_nodes",
-    ]
-    assert load_coverage(path) == rep
+
+
+def test_coverage_line_with_a_baseline_shows_the_trend() -> None:
+    line = format_coverage_line(_linear([["a"]]), _linear([["a", "b"]]))
+    assert line == "Nodes 75% (−25% vs main) · Edges 33.3% (−66.7% vs main)"
+
+
+def test_node_hit_on_main_and_missed_on_the_pr_is_newly_uncovered() -> None:
+    delta = coverage_delta(_linear([["a", "b"]]), _linear([["a"]]))
+    assert delta.newly_uncovered == ("b",)
+    assert delta.newly_covered == ()
+    assert delta.nodes_pp == -25.0
+
+
+def test_a_new_node_the_pr_never_reaches_is_not_newly_uncovered() -> None:
+    base = _linear([["a", "b"]])
+    snap = snapshot_from_compiled(build_linear())
+    head_graph = GraphSnapshot(nodes=snap.nodes | {"c"}, edges=snap.edges)
+    head = snapshot_coverage(head_graph, [["a", "b"]])
+    assert head.never_hit_nodes == ("c",)
+    assert coverage_delta(base, head).newly_uncovered == ()
+
+
+def test_coverage_json_matches_the_golden_file_byte_for_byte() -> None:
+    cov = _linear([["a"]], sha="abc123")
+    golden = GOLDEN.read_text(encoding="utf-8")
+    assert cov.to_json() == golden
+    assert CoverageSnapshot.from_json(golden) == cov
+    assert CoverageSnapshot.from_json(golden).to_json() == golden
+
+
+def test_coverage_json_rejects_an_unknown_version() -> None:
+    golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    with pytest.raises(ValueError, match="version"):
+        CoverageSnapshot.from_json(json.dumps({**golden, "version": 2}))
+
+
+def test_demo_fixture_coverage_is_hand_checked() -> None:
+    from fixtures.demo_graph import graph
+
+    # 5 nodes (__start__, classify, lookup_order, respond, __end__) and 5 edges; the two
+    # recorded runs take both branches of classify, so every node and edge is hit.
+    runs = json.loads(DEMO_BASELINE.read_text(encoding="utf-8"))["runs"]
+    traces = [[step["node"] for step in run["steps"]] for run in runs]
+    cov = snapshot_coverage(snapshot_from_compiled(graph), traces)
+    assert (cov.nodes_total, cov.nodes_hit, cov.edges_total, cov.edges_hit) == (5, 5, 5, 5)
+    assert (cov.node_pct, cov.edge_pct) == (100.0, 100.0)

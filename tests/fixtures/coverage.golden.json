@@ -1,0 +1,28 @@
+{
+  "commit_sha": "abc123",
+  "edges_hit": 1,
+  "edges_total": 3,
+  "hit_nodes": [
+    "__end__",
+    "__start__",
+    "a"
+  ],
+  "never_hit_edges": [
+    {
+      "conditional": false,
+      "source": "a",
+      "target": "b"
+    },
+    {
+      "conditional": false,
+      "source": "b",
+      "target": "__end__"
+    }
+  ],
+  "never_hit_nodes": [
+    "b"
+  ],
+  "nodes_hit": 3,
+  "nodes_total": 4,
+  "version": 1
+}
