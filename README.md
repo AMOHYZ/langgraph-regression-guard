@@ -185,20 +185,18 @@ jobs:
 | Outcome | Exit | When |
 |---|---|---|
 | PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI is SHIP. |
-| AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, node coverage under `thresholds.min_node_coverage`, or a node in the PR's graph raised; the report names the node. A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
+| AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, node coverage under `thresholds.min_node_coverage`, or a node in the PR's graph raised; the report names the node (a router by its function name, a node inside subgraph `sub` as `sub.inner`). A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
 | INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK (shown as ⚠️ `needs_human`, with the cases it still needs), or replay left nodes not checked: a divergence with `on-divergence: fail`, or a budget hit. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1, never 2. |
 | INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, or a blocking KPI left with no valid judgment on a side. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
 
 A regression found in the same run wins over a judge's infra error: exit 1.
 
-Known limit: an exception in a router (a conditional-edge function) or inside a
-subgraph isn't attributed to a node yet, so it counts as INFRA_ERROR (T109).
-
 `lgcov selfcheck` checks this classification. It runs the harness on fixtures whose
-outcome is known (`tests/fixtures/selfcheck/`: a real refactor that must PASS, a prompt
-change and a crashing node that must be AGENT_FAIL with the right root, and a missing
-cassette that must be INFRA_ERROR), prints expected vs actual, and exits 1 on any
-mismatch. CI runs it as its own job on every push.
+outcome is known (`tests/fixtures/selfcheck/`: a real refactor that must PASS; a prompt
+change, a crashing node, a crashing router and a crashing node inside a subgraph that
+must be AGENT_FAIL with the right root; and a missing cassette that must be
+INFRA_ERROR), prints expected vs actual, and exits 1 on any mismatch. CI runs it as its
+own job on every push.
 
 ## Judge KPIs locally (L2)
 

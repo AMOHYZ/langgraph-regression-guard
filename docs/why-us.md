@@ -105,8 +105,9 @@ replay recorded calls too. lgcov's unit is the graph node.
 - Agents not built on LangGraph.
 - A hosted dashboard: the report lives in the PR comment, the job summary and files.
 - A taxonomy without human review: KPIs come from failure modes a person has checked.
-- Attribute a crash in a router or a subgraph to a node: it counts as a harness error
-  for now (T109). Subgraphs and `ToolNode`s always run live instead of being served.
+- Serve a subgraph or a `ToolNode` from the cassette: they always run live. Drift
+  inside a subgraph is blamed on the subgraph node (`sub`), not its inner node; a crash
+  there does name the inner node (`sub.inner`).
 
 ## How this was checked
 

@@ -2,16 +2,17 @@ import json
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field
 from statistics import fmean
-from types import FunctionType
+from types import CodeType, FunctionType
 from typing import Any, Literal, TypedDict
 
 import httpx
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import START
+from langgraph.pregel import Pregel
 
 from lgcov.fingerprint import fingerprint
 from lgcov.normalize import normalize
@@ -156,6 +157,59 @@ def _codes(graph: Any) -> dict[str, str | None]:
     return codes
 
 
+def _routers(graph: Any, prefix: str = "") -> dict[CodeType, str]:
+    """T109: each conditional edge's router function, by its code, named as its branch is
+    (`<subgraph node>.<branch>` inside a subgraph)."""
+    named: dict[CodeType, str] = {}
+    branches = getattr(getattr(graph, "builder", None), "branches", None) or {}
+    for per_source in branches.values():
+        for name, branch in per_source.items():
+            code = getattr(getattr(getattr(branch, "path", None), "func", None), "__code__", None)
+            if isinstance(code, CodeType):
+                named[code] = f"{prefix}{name}"
+    for name, spec in getattr(graph, "nodes", {}).items():
+        if isinstance(getattr(spec, "bound", None), Pregel):
+            named.update(_routers(spec.bound, f"{prefix}{name}."))
+    return named
+
+
+def _raised_in(exc: BaseException, routers: Mapping[CodeType, str]) -> str | None:
+    # The router whose frame is deepest in the traceback: the one that raised, if any.
+    found, tb = None, exc.__traceback__
+    while tb is not None:
+        found = routers.get(tb.tb_frame.f_code, found)
+        tb = tb.tb_next
+    return found
+
+
+def _naming(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    def call(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except (GraphBubbleUp, NodeError):
+            raise  # LangGraph's own control flow, or a node further in, already named
+        except Exception as exc:
+            raise NodeError(name, exc) from exc
+
+    return call
+
+
+def _attributed(graph: Any, prefix: str) -> Any:
+    """T109: a copy of a subgraph whose nodes' errors name them `<prefix><node>`. It runs
+    as it is otherwise: a subgraph's nodes are never served."""
+    original = getattr(graph, "nodes", {})
+    nodes = dict(original)
+    for name, spec in original.items():
+        fn = getattr(spec.bound, "func", None)
+        if name != START and isinstance(fn, FunctionType):
+            bound = copy(spec.bound)
+            bound.func = _naming(f"{prefix}{name}", fn)
+            nodes[name] = spec.copy({"bound": bound})
+        elif isinstance(spec.bound, Pregel):
+            nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{prefix}{name}.")})
+    return graph.copy({"nodes": nodes}) if original else graph
+
+
 def unservable(graph: Any, cassettes: Sequence[Cassette]) -> int:
     """T089: recorded steps replay can't serve, since their node's code changed or they
     have no input or fingerprint: the live calls a budget projects from."""
@@ -243,6 +297,10 @@ def _run(
         bound = copy(spec.bound)  # LangGraph's node runnable calls .func on invoke
         bound.func = wrap(name, spec.bound.func, code)
         nodes[name] = spec.copy({"bound": bound})
+    for name, spec in original.items():  # T109: a subgraph's errors name its own node
+        if isinstance(getattr(spec, "bound", None), Pregel):
+            nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{name}.")})
+    routers = _routers(graph)
     runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
     try:
@@ -259,6 +317,13 @@ def _run(
                 )
     except _Halted as stop:
         return steps, log, stop.halt
+    except (NodeError, GraphBubbleUp):
+        raise
+    except Exception as exc:  # T109: a router raised: name it, as a node's error names the node
+        router = _raised_in(exc, routers)
+        if router is None:
+            raise
+        raise NodeError(router, exc) from exc
     return steps, log, None
 
 

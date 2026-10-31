@@ -1,0 +1,3 @@
+# What `lgcov selfcheck` must report for this fixture.
+outcome: AGENT_FAIL
+root: route

@@ -393,3 +393,58 @@ def test_unservable_counts_recorded_steps_whose_code_changed() -> None:
     cassette = record(_chain(1), {"x": 0})
     assert unservable(_chain(1), [cassette]) == 0
     assert unservable(_chain(2), [cassette, cassette]) == 2  # a, in each run
+
+
+# T109: an error in a router or inside a subgraph names it, like an error in a node.
+def _routed(router: Callable[[S], str]) -> CompiledStateGraph[S]:
+    g = StateGraph(S)
+    g.add_node("a", _noop)
+    g.add_node("b", _noop)
+    g.add_edge(START, "a")
+    g.add_conditional_edges("a", router, ["b"])
+    g.add_edge("b", END)
+    return g.compile()
+
+
+def test_a_router_that_raises_is_a_node_error_naming_the_router() -> None:
+    from lgcov.cassette import NodeError
+
+    def pick(state: S) -> str:
+        raise KeyError("route")
+
+    with pytest.raises(NodeError) as info:
+        replay(_routed(pick), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.transport) == ("pick", False)
+    assert isinstance(info.value.original, KeyError)
+
+
+def test_a_router_that_times_out_is_still_a_transport_error() -> None:
+    from lgcov.cassette import NodeError
+
+    def pick(state: S) -> str:
+        raise TimeoutError("provider timed out")
+
+    with pytest.raises(NodeError) as info:
+        replay(_routed(pick), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.transport) == ("pick", True)
+
+
+def test_a_node_inside_a_subgraph_that_raises_is_named_subgraph_dot_node() -> None:
+    from lgcov.cassette import NodeError
+
+    def inner(state: S) -> S:
+        raise ValueError("bad draft")
+
+    sub = StateGraph(S)
+    sub.add_node("inner", inner)
+    sub.add_edge(START, "inner")
+    sub.add_edge("inner", END)
+    g = StateGraph(S)
+    g.add_node("a", _noop)
+    g.add_node("sub", sub.compile())
+    g.add_edge(START, "a")
+    g.add_edge("a", "sub")
+    g.add_edge("sub", END)
+    with pytest.raises(NodeError) as info:
+        replay(g.compile(), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.transport) == ("sub.inner", False)

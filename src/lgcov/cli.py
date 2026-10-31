@@ -306,7 +306,7 @@ def _replay(argv: list[str]) -> int:
         drifts = [replay(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
     except NodeError as exc:
         return _node_failure("lgcov replay", exc)
-    except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
+    except Exception as exc:  # replay itself: no node or router raised it
         return _harness_error("lgcov replay", "replay failed outside node code", exc)
     print("\n".join(_replay_markdown(runs, drifts)))
     counts, roots = _drift_kinds(runs, drifts)
@@ -624,7 +624,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
             crash=f"Node `{exc.node}` raised {original}",
             root_drift=(exc.node,),
         )
-    except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
+    except Exception as exc:  # replay itself: no node or router raised it
         msg = _harness_message("replay failed outside node code", exc)
         return replace(partial, harness_error=msg)
     agent = perf_counter() - agent_start
@@ -1028,7 +1028,7 @@ def _judge_cmd(argv: list[str]) -> int:
         replays = [replay_steps(graph, r, cfg.ignore_paths, serve=not args.live) for r in runs]
     except NodeError as exc:
         return _node_failure("lgcov judge", exc)
-    except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
+    except Exception as exc:  # replay itself: no node or router raised it
         return _harness_error("lgcov judge", "replay failed outside node code", exc)
     plan = _l2_plan(specs, runs, replays)
     saved = _saved_cases(Path(args.bands).parent / "cases", specs)
