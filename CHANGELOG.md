@@ -64,3 +64,5 @@ feature, with its PR.
 - `lgcov taxonomy draft` and `approve`: drafted failure modes can't gate until a human
   approves them (`feat/t106-taxonomy-draft`).
 - This changelog, the install section and a release dry run (`feat/t084-release-prep`).
+- The distribution is named `lgcov`, like its command; the repo keeps its name
+  (`chore/rename-dist-lgcov`).

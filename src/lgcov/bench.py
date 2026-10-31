@@ -202,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         "date": datetime.now(UTC).date().isoformat(),
         "platform": f"{platform.platform(terse=True)} ({platform.machine()})",
         "python": platform.python_version(),
-        "lgcov": version("langgraph-regression-guard"),
+        "lgcov": version("lgcov"),
     }
     doc = render(rows, "make bench-speed", env)
     Path(args.out).write_text(doc, encoding="utf-8")

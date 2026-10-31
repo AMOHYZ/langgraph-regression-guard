@@ -37,25 +37,25 @@ LangSmith, and what is built today: [docs/why-us.md](docs/why-us.md).
 
 ## Install
 
-The package is `langgraph-regression-guard`; it installs the `lgcov` command. It isn't on
-PyPI yet. Until it is, from TestPyPI, with its dependencies from PyPI first (`--no-deps`:
-anyone can upload to TestPyPI, so nothing else should come from there):
+The package is `lgcov`, like its command. It isn't on PyPI yet. Until it is, from TestPyPI,
+with its dependencies from PyPI first (`--no-deps`: anyone can upload to TestPyPI, so
+nothing else should come from there):
 
 ```bash
 pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
-pip install --no-deps -i https://test.pypi.org/simple/ langgraph-regression-guard==0.1.0
+pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.1.0
 ```
 
-Or from GitHub, as the quickstart does. Once on PyPI: `pip install langgraph-regression-guard`.
+Or from GitHub, as the quickstart does. Once on PyPI: `pip install lgcov`.
 
 Maintainers: `release.yml` publishes to TestPyPI with trusted publishing (OIDC, no token).
 Before the first tag, on test.pypi.org:
 
 1. Sign in, then **Your account → Publishing**
    (https://test.pypi.org/manage/account/publishing/).
-2. Under **Add a new pending publisher**, on the GitHub tab: PyPI project name
-   `langgraph-regression-guard`, owner `AMOHYZ`, repository name
-   `langgraph-regression-guard`, workflow name `release.yml`, environment name `testpypi`.
+2. Under **Add a new pending publisher**, on the GitHub tab: PyPI project name `lgcov`,
+   owner `AMOHYZ`, repository name `langgraph-regression-guard`, workflow name
+   `release.yml`, environment name `testpypi`.
 3. Click **Add**.
 
 Then pushing a `vX.Y.Z` tag builds, makes the GitHub Release and publishes. Run by hand
