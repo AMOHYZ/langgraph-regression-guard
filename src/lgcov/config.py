@@ -26,12 +26,14 @@ class Config:
     taxonomy_path: str | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
     ignore_paths: tuple[str, ...] = ()  # JSON pointers into node I/O, e.g. /meta/nonce
+    samples_per_case: int = 1  # T073: k judge verdicts per case (pass@k / pass^k)
 
 
 _KEYS = (
     "cassette_dir",
     "graph_entrypoint",
     "ignore_paths",
+    "samples_per_case",
     "taxonomy",  # alias for taxonomy_path
     "taxonomy_path",
     "thresholds",
@@ -55,6 +57,12 @@ def _str_list(value: object, key: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ValueError(f"lgcov.yaml: '{key}' must be a list of strings")
     return tuple(value)
+
+
+def _positive_int(value: object, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"lgcov.yaml: '{key}' must be a positive integer")
+    return value
 
 
 def _nonneg_int(value: object, key: str) -> int:
@@ -120,6 +128,7 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         taxonomy_path=_taxonomy_path(d),
         thresholds=_thresholds(d.get("thresholds", {})),
         ignore_paths=ignore,
+        samples_per_case=_positive_int(d.get("samples_per_case", 1), "samples_per_case"),
     )
 
 
