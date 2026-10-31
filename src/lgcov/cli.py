@@ -41,6 +41,7 @@ from lgcov.coverage import (
     CoverageSnapshot,
     coverage_delta,
     format_coverage_line,
+    node_floor_miss,
     snapshot_coverage,
 )
 from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
@@ -607,7 +608,9 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     not_checked = tuple(dict.fromkeys(n for r in replays for n in r.not_checked))
     blocks = args.fail_on_inconclusive or cfg.gate.inconclusive_blocks
     drift_code = drift_exit_code(fail_on, len(root), len(downstream))
-    l1_code = max(drift_code, int(blocks and bool(not_checked)))
+    under_floor = node_floor_miss(cov, cfg.thresholds.min_node_coverage)
+    floor_code = Outcome.AGENT_FAIL if under_floor else 0  # a floor miss is 1, never 2
+    l1_code = max(drift_code, int(blocks and bool(not_checked)), floor_code)
     diverged = _divergence_lines(replays, args.on_divergence)
     calls = [c for r in replays for c in r.calls]
     timing = Timing(
@@ -630,6 +633,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         propagated_drift=tuple(downstream),
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
+        under_floor=under_floor,
         notes=(
             *llm_notes,
             *([note] if note else []),

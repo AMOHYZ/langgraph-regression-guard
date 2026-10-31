@@ -74,9 +74,7 @@ graph_entrypoint: graph.py:graph   # required, "<file.py>:<attr>"
 cassette_dir: cassettes
 taxonomy_path: taxonomy.yaml       # optional; `taxonomy:` is an alias
 thresholds:
-  min_node_coverage: 80            # percent, 0..100
-  max_drifted_nodes: 3             # optional; omit for no limit
-  fail_on: [fail]
+  min_node_coverage: 80            # percent; under it `lgcov ci` exits 1 (default 0: off)
 ignore_paths: [/meta/nonce]        # JSON pointers into node I/O
 gate:                              # the L2 KPI gate; see "The gate" below
   margin: 0.05                     # δ; a KPI's own `margin:` in taxonomy.yaml wins
@@ -136,7 +134,9 @@ jobs:
 - The report includes coverage of the replayed runs, e.g. `Coverage: Nodes 75% (−25% vs
   main) · Edges 60% (±0)`, and lists nodes main reached that this PR doesn't. Pushes to
   `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
-  baseline yet". A missing or unreadable baseline is a warning, never a failure.
+  baseline yet". A missing or unreadable baseline is a warning, never a failure. Node
+  coverage under `thresholds.min_node_coverage` fails the run (exit 1), and the report
+  lists the nodes no run reached.
 - Unchanged nodes are served from the cassette; `live: true` runs every node live.
 - A node whose code is unchanged but whose input no longer matches the recording has
   diverged. `on-divergence: flag` (the default) runs it live and marks what ran after
@@ -177,7 +177,7 @@ jobs:
 | Outcome | Exit | When |
 |---|---|---|
 | PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI is SHIP. |
-| AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, or a node in the PR's graph raised; the report names the node. A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
+| AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, node coverage under `thresholds.min_node_coverage`, or a node in the PR's graph raised; the report names the node. A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
 | INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK (shown as ⚠️ `needs_human`, with the cases it still needs), or replay left nodes not checked: a divergence with `on-divergence: fail`, or a budget hit. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1, never 2. |
 | INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, or a blocking KPI left with no valid judgment on a side. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
 

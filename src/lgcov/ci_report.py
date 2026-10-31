@@ -71,6 +71,7 @@ class CiResult:
     crash: str = ""  # T074: e.g. "Node `classify` raised ValueError: ..."; an agent failure
     coverage_line: str = ""  # T083, e.g. "Nodes 75% (−25% vs main) · Edges 60% (±0)"
     newly_uncovered: tuple[str, ...] = ()
+    under_floor: str = ""  # thresholds.min_node_coverage missed: "Node coverage 80% is under ..."
     l2_lines: tuple[str, ...] = ()  # T091: the KPI gate table, then the sampling table
     blocked: tuple[str, ...] = ()  # T091: blocking KPIs whose verdict is BLOCK
     inconclusive: tuple[str, ...] = ()  # T091: blocking KPIs that are INCONCLUSIVE
@@ -83,8 +84,10 @@ def _title(r: CiResult, v: ActionVerdict) -> str:
     if r.crash:
         return "🔴 lgcov: agent failure"
     drifted = drift_exit_code(r.fail_on, len(r.root_drift), len(r.propagated_drift))
-    if v == "fail" and not drifted:  # T091: the KPI gate failed it, not drift
-        return "🔴 lgcov: KPI regression" if r.blocked else "🔴 lgcov: inconclusive"
+    if v == "fail" and not drifted:  # the KPI gate, the coverage floor or nodes not checked
+        if r.blocked:
+            return "🔴 lgcov: KPI regression"
+        return "🔴 lgcov: coverage under the floor" if r.under_floor else "🔴 lgcov: inconclusive"
     if v == "pass" and (r.inconclusive or r.not_checked):
         return "⚠️ lgcov: inconclusive, needs a human"
     return _TITLES[v]
@@ -117,6 +120,8 @@ def render_ci_report(r: CiResult) -> str:
         lines += [*r.replay_lines, ""]
     if r.coverage_line:
         lines += [f"Coverage: {r.coverage_line}", ""]
+    if r.under_floor:
+        lines += [f"🔴 {r.under_floor}", ""]
     if r.newly_uncovered:
         lines += ["Newly uncovered: " + ", ".join(f"`{n}`" for n in r.newly_uncovered), ""]
     if r.l2_lines:

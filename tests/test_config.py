@@ -29,16 +29,14 @@ def test_full_file_loads_typed(tmp_path: Path) -> None:
         "graph_entrypoint: app/graph.py:graph\n"
         "cassette_dir: cassettes\n"
         "taxonomy_path: taxonomy.yaml\n"
-        "thresholds: {min_node_coverage: 80, max_drifted_nodes: 3, fail_on: [fail, infra_error]}\n"
+        "thresholds: {min_node_coverage: 80}\n"
         "ignore_paths: [/meta/nonce]\n",
     )
     assert load_config(path) == Config(
         graph_entrypoint="app/graph.py:graph",
         cassette_dir="cassettes",
         taxonomy_path="taxonomy.yaml",
-        thresholds=Thresholds(
-            min_node_coverage=80.0, max_drifted_nodes=3, fail_on=("fail", "infra_error")
-        ),
+        thresholds=Thresholds(min_node_coverage=80.0),
         ignore_paths=("/meta/nonce",),
     )
 
@@ -79,7 +77,7 @@ def test_unknown_key_lists_valid_keys(tmp_path: Path) -> None:
 
 def test_unknown_threshold_key_lists_valid_keys() -> None:
     raw = {"graph_entrypoint": "a.py:g", "thresholds": {"min_cov": 1}}
-    with pytest.raises(ValueError, match=r"min_cov.*fail_on.*max_drifted_nodes.*min_node_coverage"):
+    with pytest.raises(ValueError, match=r"min_cov.*valid keys: \['min_node_coverage'\]"):
         parse_config(raw)
 
 
@@ -89,18 +87,14 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         load_config(missing)
     cfg = load_config(missing, {"graph_entrypoint": "a.py:graph"})
     assert cfg == Config(graph_entrypoint="a.py:graph")
-    assert cfg.thresholds == Thresholds(
-        min_node_coverage=0.0, max_drifted_nodes=None, fail_on=("fail",)
-    )
+    assert cfg.thresholds == Thresholds(min_node_coverage=0.0)
 
 
 @pytest.mark.parametrize(
     ("raw", "field"),
     [
         ({"graph_entrypoint": "no_colon"}, "graph_entrypoint"),
-        ({"graph_entrypoint": "a.py:g", "thresholds": {"fail_on": ["oops"]}}, "fail_on"),
         ({"graph_entrypoint": "a.py:g", "thresholds": {"min_node_coverage": 101}}, "min_node"),
-        ({"graph_entrypoint": "a.py:g", "thresholds": {"max_drifted_nodes": -1}}, "max_drifted"),
         ({"graph_entrypoint": "a.py:g", "ignore_paths": ["no/leading/slash"]}, "ignore_paths"),
         ({"graph_entrypoint": "a.py:g", "cassette_dir": 3}, "cassette_dir"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": 0}, "samples_per_case"),
@@ -124,6 +118,23 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
 )
 def test_bad_values_name_the_field(raw: dict[str, object], field: str) -> None:
     with pytest.raises(ValueError, match=field):
+        parse_config(raw)
+
+
+# No command ever read T080's fail_on or max_drifted_nodes; a file that still sets one is
+# told what does that job.
+@pytest.mark.parametrize(
+    ("key", "value", "instead"),
+    [
+        ("fail_on", ["fail", "needs_human"], "gate.inconclusive_blocks"),
+        ("max_drifted_nodes", 3, "--fail-on"),
+    ],
+)
+def test_removed_threshold_keys_say_what_does_their_job(
+    key: str, value: object, instead: str
+) -> None:
+    raw = {"graph_entrypoint": "a.py:g", "thresholds": {"min_node_coverage": 80, key: value}}
+    with pytest.raises(ValueError, match=f"thresholds.{key}.*{instead}"):
         parse_config(raw)
 
 
