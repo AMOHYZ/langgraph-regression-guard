@@ -418,6 +418,37 @@ def test_a_router_that_raises_is_a_node_error_naming_the_router() -> None:
     assert isinstance(info.value.original, KeyError)
 
 
+def test_a_router_returning_an_unmapped_key_is_a_node_error_naming_the_router() -> None:
+    from lgcov.cassette import NodeError
+
+    def pick(state: S) -> str:
+        return "c"  # not in its mapping ["b"]: LangGraph raises KeyError after pick returns
+
+    with pytest.raises(NodeError) as info:
+        replay(_routed(pick), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.transport) == ("pick", False)
+    assert isinstance(info.value.original, KeyError)
+
+
+def test_naming_a_router_never_reads_the_agents_own_objects() -> None:
+    from lgcov.cassette import NodeError
+
+    class Client:
+        @property
+        def path(self) -> str:
+            raise RuntimeError("no base URL set")  # reading it would be a second crash
+
+        def ask(self) -> str:
+            raise ValueError("bad reply")
+
+    def pick(state: S) -> str:
+        return Client().ask()
+
+    with pytest.raises(NodeError) as info:
+        replay(_routed(pick), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.original.args) == ("pick", ("bad reply",))
+
+
 def test_a_router_that_times_out_is_still_a_transport_error() -> None:
     from lgcov.cassette import NodeError
 

@@ -174,10 +174,18 @@ def _routers(graph: Any, prefix: str = "") -> dict[CodeType, str]:
 
 
 def _raised_in(exc: BaseException, routers: Mapping[CodeType, str]) -> str | None:
-    # The router whose frame is deepest in the traceback: the one that raised, if any.
+    # The router whose frame is deepest in the traceback: the one that raised, if any. A key
+    # its mapping lacks raises after it returns, in a LangGraph frame whose `self` is the
+    # branch. Only LangGraph's frames are read that way: the agent's objects run no code here.
     found, tb = None, exc.__traceback__
     while tb is not None:
-        found = routers.get(tb.tb_frame.f_code, found)
+        frame = tb.tb_frame
+        if frame.f_globals.get("__name__", "").startswith("langgraph."):
+            path = getattr(frame.f_locals.get("self"), "path", None)
+            code = getattr(getattr(path, "func", None), "__code__", None)
+            if isinstance(code, CodeType):
+                found = routers.get(code, found)
+        found = routers.get(frame.f_code, found)
         tb = tb.tb_next
     return found
 
