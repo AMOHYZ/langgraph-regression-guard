@@ -95,6 +95,9 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         ({"graph_entrypoint": "a.py:g", "thresholds": {"max_drifted_nodes": -1}}, "max_drifted"),
         ({"graph_entrypoint": "a.py:g", "ignore_paths": ["no/leading/slash"]}, "ignore_paths"),
         ({"graph_entrypoint": "a.py:g", "cassette_dir": 3}, "cassette_dir"),
+        ({"graph_entrypoint": "a.py:g", "samples_per_case": 0}, "samples_per_case"),
+        ({"graph_entrypoint": "a.py:g", "samples_per_case": "3"}, "samples_per_case"),
+        ({"graph_entrypoint": "a.py:g", "samples_per_case": True}, "samples_per_case"),
     ],
 )
 def test_bad_values_name_the_field(raw: dict[str, object], field: str) -> None:
@@ -106,3 +109,9 @@ def test_repo_lgcov_yaml_is_valid() -> None:
     cfg = load_config(REPO_CONFIG)
     assert cfg.graph_entrypoint == "examples/demo_agent/graph.py:graph"
     assert (REPO_CONFIG.parent / cfg.cassette_dir / "baseline.json").is_file()
+
+
+def test_samples_per_case_defaults_to_one_and_reads_from_the_file() -> None:
+    # T073: k binary verdicts per judged case.
+    assert parse_config({"graph_entrypoint": "a.py:g"}).samples_per_case == 1
+    assert parse_config({"graph_entrypoint": "a.py:g", "samples_per_case": 3}).samples_per_case == 3
