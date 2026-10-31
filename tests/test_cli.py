@@ -760,6 +760,28 @@ def test_cli_ci_unreadable_coverage_baseline_is_no_baseline_yet(
     assert "could not read main's coverage.json" in report.lower()
 
 
+# thresholds.min_node_coverage: under the floor, `lgcov ci` fails the run and names the gap.
+def test_cli_ci_fails_when_node_coverage_is_under_the_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    data = json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))
+    data["runs"] = data["runs"][1:]  # only the hours run: lookup_order is never visited
+    (tmp_path / "cassettes" / "baseline.json").write_text(json.dumps(data), encoding="utf-8")
+    config = tmp_path / "lgcov.yaml"
+    config.write_text("thresholds: {min_node_coverage: 80}\n", encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path)
+    assert (code, outputs["verdict"]) == (0, "pass")  # 80% meets an 80% floor
+    config.write_text("thresholds: {min_node_coverage: 90}\n", encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path)
+    assert (code, outputs["verdict"], outputs["root-drift-count"]) == (1, "fail", "0")
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: coverage under the floor")
+    assert (
+        "🔴 Node coverage 80% is under the 90% floor (`thresholds.min_node_coverage`); "
+        "never run: `lookup_order`"
+    ) in report
+
+
 # T073: `lgcov judge` runs the taxonomy's judges k times per case, base and fresh outputs.
 DEMO_TAXONOMY = str(FIXTURES / "demo_taxonomy.yaml")
 

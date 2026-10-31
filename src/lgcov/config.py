@@ -9,14 +9,11 @@ from pathlib import Path
 import yaml
 
 DEFAULT_PATH = "lgcov.yaml"
-FAIL_ON_VALUES = ("fail", "infra_error", "needs_human")  # judge_gate.GateOutcome minus "pass"
 
 
 @dataclass(frozen=True)
 class Thresholds:
-    min_node_coverage: float = 0.0  # percent, 0..100
-    max_drifted_nodes: int | None = None  # None = no limit
-    fail_on: tuple[str, ...] = ("fail",)
+    min_node_coverage: float = 0.0  # percent, 0..100; under it `lgcov ci` exits 1 (0 = off)
 
 
 @dataclass(frozen=True)
@@ -64,7 +61,12 @@ _KEYS = (
     "taxonomy_path",
     "thresholds",
 )
-_THRESHOLD_KEYS = ("fail_on", "max_drifted_nodes", "min_node_coverage")
+_THRESHOLD_KEYS = ("min_node_coverage",)
+# T080 keys no command ever read; a file that still sets one is told what does that job.
+_REMOVED_THRESHOLD_KEYS = {
+    "fail_on": "a blocking KPI's BLOCK always fails; gate.inconclusive_blocks fails INCONCLUSIVE",
+    "max_drifted_nodes": "--fail-on (root-drift, any-drift or never) picks the drift that fails",
+}
 _GATE_KEYS = (
     "advisory_kpis",
     "alpha",
@@ -99,30 +101,19 @@ def _positive_int(value: object, key: str) -> int:
     return value
 
 
-def _nonneg_int(value: object, key: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"lgcov.yaml: '{key}' must be a non-negative integer")
-    return value
-
-
 def _thresholds(raw: object) -> Thresholds:
     if not isinstance(raw, dict):
         raise ValueError("lgcov.yaml: 'thresholds' must be a mapping")
+    for key, instead in _REMOVED_THRESHOLD_KEYS.items():
+        if key in raw:
+            raise ValueError(
+                f"lgcov.yaml: 'thresholds.{key}' was removed, as no command read it: {instead}"
+            )
     _check_keys(raw, _THRESHOLD_KEYS, "lgcov.yaml: thresholds")
     cov = raw.get("min_node_coverage", 0.0)
     if isinstance(cov, bool) or not isinstance(cov, int | float) or not 0 <= cov <= 100:
         raise ValueError("lgcov.yaml: 'min_node_coverage' must be a number in 0..100")
-    fail_on = _str_list(raw.get("fail_on", ["fail"]), "fail_on")
-    bad = sorted(set(fail_on) - set(FAIL_ON_VALUES))
-    if bad:
-        raise ValueError(f"lgcov.yaml: 'fail_on' values {bad} not in {list(FAIL_ON_VALUES)}")
-    max_drifted = raw.get("max_drifted_nodes")
-    capped = None if max_drifted is None else _nonneg_int(max_drifted, "max_drifted_nodes")
-    return Thresholds(
-        min_node_coverage=float(cov),
-        max_drifted_nodes=capped,
-        fail_on=fail_on,
-    )
+    return Thresholds(min_node_coverage=float(cov))
 
 
 def _probability(value: object, key: str) -> float:

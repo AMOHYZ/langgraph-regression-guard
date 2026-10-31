@@ -33,6 +33,7 @@ from lgcov.coverage import (
     CoverageSnapshot,
     coverage_delta,
     format_coverage_line,
+    node_floor_miss,
     snapshot_coverage,
 )
 from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
@@ -543,14 +544,17 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         Path(args.coverage_out).write_text(cov.to_json(), encoding="utf-8")
     base, note = _coverage_baseline(args.coverage_baseline)
     drift_code = drift_exit_code(fail_on, len(root), len(downstream))
+    under_floor = node_floor_miss(cov, cfg.thresholds.min_node_coverage)
+    l1_code = Outcome.AGENT_FAIL if under_floor else drift_code  # a floor miss is 1, never 2
     result = replace(
         partial,
-        exit_code=drift_code,
+        exit_code=l1_code,
         replay_lines=tuple(_replay_markdown(runs, drifts)),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
+        under_floor=under_floor,
         notes=(note,) if note else (),
     )
     if l2 is None:
@@ -559,11 +563,11 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         stats, gate = _ci_gate(args, cfg, *l2, runs, replays)
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
-        return replace(result, exit_code=drift_code or EXIT_ERROR, harness_error=msg)
+        return replace(result, exit_code=l1_code or EXIT_ERROR, harness_error=msg)
     gate_code = gate_exit_code(stats, gate.inconclusive_blocks)
     return replace(
         result,
-        exit_code=1 if 1 in (drift_code, gate_code) else max(drift_code, gate_code),
+        exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code),
         l2_lines=(*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)),
         blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
         inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
