@@ -855,3 +855,54 @@ def test_cli_judge_node_crash_is_an_agent_failure(
     args = [*_judge_args(tmp_path), "--taxonomy", DEMO_TAXONOMY, "--graph", f"{graph}:graph"]
     assert main(args) == 1
     assert "agent failure: node `classify` raised ValueError" in capsys.readouterr().out
+
+
+# T074 PR B: `lgcov selfcheck` runs the harness on fixtures whose outcome is known.
+SELFCHECK = FIXTURES / "selfcheck"
+
+
+def test_cli_selfcheck_passes_on_its_fixtures(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["selfcheck", "--dir", str(SELFCHECK)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "| broken_harness | INFRA_ERROR | INFRA_ERROR | — | ✓ |" in out
+    assert "| broken_node | AGENT_FAIL @ classify | AGENT_FAIL | classify | ✓ |" in out
+    assert "| broken_prompt | AGENT_FAIL @ respond | AGENT_FAIL | respond | ✓ |" in out
+    assert "| good_change | PASS | PASS | — | ✓ |" in out
+
+
+def test_cli_selfcheck_exits_one_on_a_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import shutil
+
+    shutil.copytree(SELFCHECK, tmp_path / "selfcheck")
+    expected = tmp_path / "selfcheck" / "good_change" / "expected.yaml"
+    expected.write_text("outcome: AGENT_FAIL\n", encoding="utf-8")
+    assert main(["selfcheck", "--dir", str(tmp_path / "selfcheck")]) == 1
+    assert "| good_change | AGENT_FAIL | PASS | — | ✗ |" in capsys.readouterr().out.splitlines()
+
+
+def test_cli_selfcheck_without_fixtures_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["selfcheck", "--dir", str(tmp_path)]) == 2
+    assert "lgcov selfcheck:" in capsys.readouterr().err
+
+
+def test_good_change_is_a_real_refactor_of_respond_only() -> None:
+    # Whitespace wouldn't change the fingerprint, so serving would skip the node and the
+    # fixture would prove nothing; a real refactor makes respond re-run live.
+    import importlib.util
+
+    from lgcov.fingerprint import fingerprint
+
+    spec = importlib.util.spec_from_file_location(
+        "good_change", SELFCHECK / "good_change" / "graph.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    baseline = json.loads((SELFCHECK / "cassettes" / "baseline.json").read_text(encoding="utf-8"))
+    recorded = {s["node"]: s["code"] for s in baseline["runs"][0]["steps"]}
+    assert fingerprint(module.respond) != recorded["respond"]
+    assert fingerprint(module.classify) == recorded["classify"]

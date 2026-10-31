@@ -196,3 +196,12 @@ def test_coverage_download_failure_is_a_warning_under_github_bash_flags(tmp_path
     assert result.returncode == 0, result.stderr
     assert "::warning" in result.stdout
     assert "path=" not in out.read_text(encoding="utf-8")
+
+
+def test_ci_runs_the_harness_selfcheck_on_every_push() -> None:
+    # T074: a separate job, so a harness that misclassifies outcomes fails CI.
+    workflow = _yaml(ROOT / ".github" / "workflows" / "ci.yml")
+    assert "push" in _dict(workflow.get("on", workflow.get(True)))
+    steps = _dict(_dict(workflow["jobs"])["selfcheck"])["steps"]
+    assert isinstance(steps, list)
+    assert any("lgcov selfcheck" in str(_dict(s).get("run", "")) for s in steps)

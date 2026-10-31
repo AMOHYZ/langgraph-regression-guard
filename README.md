@@ -151,6 +151,12 @@ jobs:
 Known limit: an exception in a router (a conditional-edge function) or inside a
 subgraph isn't attributed to a node yet, so it counts as INFRA_ERROR (T109).
 
+`lgcov selfcheck` checks this classification. It runs the harness on fixtures whose
+outcome is known (`tests/fixtures/selfcheck/`: a real refactor that must PASS, a prompt
+change and a crashing node that must be AGENT_FAIL with the right root, and a missing
+cassette that must be INFRA_ERROR), prints expected vs actual, and exits 1 on any
+mismatch. CI runs it as its own job on every push.
+
 ## Judge KPIs locally (L2)
 
 `lgcov judge` runs a taxonomy's judges k times per case, on the recorded outputs and on a

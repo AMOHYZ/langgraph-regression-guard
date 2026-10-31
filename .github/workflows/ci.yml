@@ -44,3 +44,23 @@ jobs:
             --builtin-schema vendor.github-actions action.yml
           uvx --from check-jsonschema==0.39.0 check-jsonschema \
             --builtin-schema vendor.github-workflows .github/workflows/*.yml
+
+  # T074: run the harness on fixtures with known outcomes (PASS / AGENT_FAIL /
+  # INFRA_ERROR); a misclassification fails CI.
+  selfcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python + deps
+        run: |
+          uv python install
+          uv sync --locked --all-extras --dev
+
+      - name: Harness self-check
+        run: uv run lgcov selfcheck
