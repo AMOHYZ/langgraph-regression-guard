@@ -144,6 +144,20 @@ jobs:
   not checked is INCONCLUSIVE: never a fail, never a harness error.
 - The report ends with where the time went, e.g. `⏱ 42 s · agent 31 s (3 live / 1 served)
   · judges 9 s (12 calls, 1.4k tokens) · budget 90 s`.
+- Two tiers. `pr` (the default) serves unchanged nodes, judges each case once, skips
+  `judge: llm` KPIs (shown as "nightly only") and has a 90 s budget. `nightly` runs every
+  node live with every judge, k from `samples_per_case` (3 if unset), no budget, and
+  uploads its report as the `lgcov-nightly` artifact, which PRs link. Run it on a schedule:
+
+  ```yaml
+  on:
+    schedule:
+      - cron: "0 3 * * *"  # the nightly tier, on main
+  # ...the same job as above, with:
+        - uses: AMOHYZ/langgraph-regression-guard@v0
+          with:
+            tier: ${{ github.event_name == 'schedule' && 'nightly' || 'pr' }}
+  ```
 - With `taxonomy:`, the run also gates the taxonomy's KPIs on the replayed outputs (see
   [The gate](#the-gate-ship-block-or-inconclusive)) and adds the table to the report, at
   most 200 model judge calls per run. `judge: jev` KPIs read `JEV_API_URL` and
@@ -151,8 +165,8 @@ jobs:
 - Outcomes and exit codes are in the table below.
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
   `cassette-dir`, `taxonomy` (turns on the KPI gate; `taxonomy_path` isn't read here),
-  `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `python-version`,
-  `github-token`, `live`. Outputs: `report-path`, `root-drift-count`,
+  `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `tier`,
+  `python-version`, `github-token`, `live`. Outputs: `report-path`, `root-drift-count`,
   `propagated-drift-count`, `verdict`.
 - Runs on Linux and macOS runners.
 

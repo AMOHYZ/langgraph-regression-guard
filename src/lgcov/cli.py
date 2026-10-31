@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
@@ -35,7 +36,7 @@ from lgcov.cassette import (
 from lgcov.ci_report import CiResult, Timing, render_ci_report
 from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
-from lgcov.config import Config, GateConfig, load_config
+from lgcov.config import TIERS, Config, GateConfig, Tier, load_config, tier_policy
 from lgcov.coverage import (
     CoverageSnapshot,
     coverage_delta,
@@ -45,7 +46,7 @@ from lgcov.coverage import (
 from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
-from lgcov.judges import FakeJudge, Judge, NodeState
+from lgcov.judges import KPI, FakeJudge, Judge, NodeState
 from lgcov.sampling import (
     KpiStats,
     gate_exit_code,
@@ -528,7 +529,7 @@ def _base_diff(base_dir: str | None, target: str, head: GraphSnapshot) -> tuple[
 
 def _ci_result(args: argparse.Namespace) -> CiResult:
     start = perf_counter()
-    budget = Budget(args.budget_seconds, perf_counter)  # T089: from the start of the run
+    budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
     fail_on: FailOn = args.fail_on
     if args.harness_error:
         return CiResult(fail_on, EXIT_ERROR, harness_error=args.harness_error)
@@ -537,17 +538,25 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         cfg = load_config(args.config, overrides)
     except (OSError, ValueError) as exc:
         return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
-    l2 = None
+    tier: Tier = args.tier or cfg.tier
+    policy = tier_policy(tier, cfg.samples_per_case)
+    budget.seconds = policy.budget if args.budget_seconds is None else args.budget_seconds
+    l2, advisory, llm_code = None, frozenset[str](), 0
+    llm_notes: list[str] = []
     if args.taxonomy:
         try:
             specs = list(load_taxonomy(args.taxonomy).kpi_specs)
+            llm = [s.name for s in specs if s.judge == "llm"]
+            if not policy.llm_judges or _llm_judge is None:
+                specs = [s for s in specs if s.judge != "llm"]
             l2 = (specs, [_l2_judge(spec) for spec in specs])
         except (OSError, ValueError) as exc:
             return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid taxonomy: {exc}")
         try:
-            cfg.gate.advisory([spec.name for spec in specs])
+            advisory = cfg.gate.advisory([*(spec.name for spec in specs), *llm])
         except ValueError as exc:
             return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
+        llm_notes, llm_code = _llm_notes(llm, advisory, policy.llm_judges)
     try:
         # Exception: importing user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
@@ -562,11 +571,12 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
-    budget.expected_live = sum(len(r.steps) for r in runs) if args.live else unservable(graph, runs)
+    serve = policy.serve and not args.live
+    budget.expected_live = unservable(graph, runs) if serve else sum(len(r.steps) for r in runs)
     agent_start = perf_counter()
     try:
         replays = [
-            replay_run(graph, run, cfg.ignore_paths, not args.live, args.on_divergence, budget)
+            replay_run(graph, run, cfg.ignore_paths, serve, args.on_divergence, budget)
             for run in runs
         ]
     except NodeError as exc:
@@ -605,7 +615,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         agent,
         live=sum(1 for c in calls if c.how != "served"),
         served=sum(1 for c in calls if c.how == "served"),
-        budget=args.budget_seconds,
+        budget=budget.seconds,
         budget_hit=budget.hit,
     )
     result = replace(
@@ -620,7 +630,12 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         propagated_drift=tuple(downstream),
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
-        notes=(note,) if note else (),
+        notes=(
+            *llm_notes,
+            *([note] if note else []),
+            *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
+        ),
+        tier=tier,
         not_checked=not_checked,
         timing=replace(timing, total=perf_counter() - start),
     )
@@ -628,7 +643,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         return result
     judge_start = perf_counter()
     try:
-        stats, gate = _ci_gate(args, cfg, *l2, runs, pairs)
+        stats, gate = _ci_gate(args, cfg, policy.k, advisory, *l2, runs, pairs)
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
         return replace(result, exit_code=l1_code or EXIT_ERROR, harness_error=msg)
@@ -642,17 +657,43 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     gate_code = gate_exit_code(stats, gate.inconclusive_blocks)
     return replace(
         result,
-        exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code),
-        l2_lines=(*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)),
+        exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code, llm_code),
+        l2_lines=(
+            (*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats))
+            if stats
+            else ()
+        ),
         blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
         inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
         timing=replace(judged, total=perf_counter() - start),
     )
 
 
+def _llm_notes(
+    llm: list[str], advisory: frozenset[str], tier_runs_them: bool
+) -> tuple[list[str], int]:
+    """T089: the `judge: llm` KPIs this run won't judge, and the exit code that leaves: on
+    nightly, INFRA_ERROR when one with no client blocks; an advisory one is only shown."""
+    if not llm or (tier_runs_them and _llm_judge is not None):
+        return [], 0
+    if not tier_runs_them:
+        return [f"Nightly only (`judge: llm`): {_quoted(llm)}."], 0
+    blocking = [n for n in llm if n not in advisory]
+    notes = [f"⚠️ No llm client for {_quoted(blocking)}: INFRA_ERROR."] if blocking else []
+    quiet = [n for n in llm if n in advisory]
+    notes += [f"⚠️ Skipped, no llm client: {_quoted(quiet)} (advisory)."] if quiet else []
+    return notes, EXIT_ERROR if blocking else 0
+
+
+def _quoted(names: list[str]) -> str:
+    return ", ".join(f"`{n}`" for n in names)
+
+
 def _ci_gate(
     args: argparse.Namespace,
     cfg: Config,
+    k: int,
+    advisory: frozenset[str],
     specs: list[KPISpec],
     judges: list[Judge],
     runs: list[Cassette],
@@ -660,14 +701,14 @@ def _ci_gate(
 ) -> tuple[list[KpiStats], GateConfig]:
     """T091: the L2 gate on recorded vs replayed outputs, as `lgcov judge` runs it."""
     plan = _l2_plan(specs, runs, replays)
-    _, model = _l2_calls(plan, cfg.samples_per_case)
+    _, model = _l2_calls(plan, k)
     if model > args.max_calls:
         raise ValueError(
             f"refusing to make {model} model judge calls (more than --max-calls "
             f"{args.max_calls}); lower samples_per_case or raise --max-calls"
         )
     gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
-    return _l2_gate(plan, judges, cfg.samples_per_case, gate, runs, replays), gate
+    return _l2_gate(plan, judges, k, gate, runs, replays, advisory), gate
 
 
 def _coverage_baseline(path: str | None) -> tuple[CoverageSnapshot | None, str]:
@@ -708,8 +749,11 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument(
         "--budget-seconds",
         type=_budget_arg,
-        help="stop starting live node calls once the run is projected to take longer",
+        help="stop starting live node calls once the run is projected to take longer; "
+        "default: the tier's (90 on pr, none on nightly)",
     )
+    ap.add_argument("--tier", choices=TIERS, help="pr (default) or nightly; overrides tier")
+    ap.add_argument("--nightly-url", help="main's latest nightly run, linked in the report")
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()
@@ -723,6 +767,7 @@ def _ci(argv: list[str]) -> int:
             "propagated-drift-count": len(result.propagated_drift),
             "report-path": report,
             "root-drift-count": len(result.root_drift),
+            "tier": result.tier,
             "verdict": verdict(result.exit_code),
         }
         with open(args.github_output, "a", encoding="utf-8") as f:
@@ -731,12 +776,19 @@ def _ci(argv: list[str]) -> int:
 
 
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
+# T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
+# never runs one, and a nightly run reports the KPIs it couldn't judge.
+_llm_judge: Callable[[KPI], Judge] | None = None
 
 
 def _l2_judge(spec: KPISpec) -> Judge:
     kpi = spec.to_kpi()
     if spec.judge == "code":
         return code_judge(kpi, spec.check or {})
+    if spec.judge == "llm":
+        if _llm_judge is None:
+            raise ValueError(f"KPI '{spec.name}': judge llm needs a general LLM judge client")
+        return _llm_judge(kpi)
     if spec.judge == "fake":
         check = spec.check or {}
         unknown = sorted(set(check) - set(_FAKE_CHECK_KEYS))
@@ -794,6 +846,7 @@ def _l2_gate(
     gate: GateConfig,
     runs: list[Cassette],
     replays: list[tuple[list[Drift], list[Step]]],
+    advisory: frozenset[str],
 ) -> list[KpiStats]:
     """T091: k samples per case on both sides, each case paired, then gated across KPIs."""
     run_roots = [_run_root(r, d) for r, (d, _) in zip(runs, replays, strict=True)]
@@ -815,7 +868,7 @@ def _l2_gate(
                 case_roots=roots,
             )
         )
-    return gate_kpis(stats, gate.advisory([spec.name for spec, _, _ in plan]), gate.alpha)
+    return gate_kpis(stats, advisory, gate.alpha)
 
 
 def _judge_cmd(argv: list[str]) -> int:
@@ -837,7 +890,7 @@ def _judge_cmd(argv: list[str]) -> int:
         print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
         return EXIT_ERROR
     gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
-    k = cfg.samples_per_case if args.samples is None else args.samples
+    k = (cfg.samples_per_case or 1) if args.samples is None else args.samples
     taxonomy_path = args.taxonomy or cfg.taxonomy_path
     if k < 1 or not taxonomy_path:
         print(
@@ -847,12 +900,16 @@ def _judge_cmd(argv: list[str]) -> int:
         return EXIT_ERROR
     try:
         specs = list(load_taxonomy(taxonomy_path).kpi_specs)
+        skipped = [s.name for s in specs if s.judge == "llm" and _llm_judge is None]
+        specs = [s for s in specs if s.name not in skipped]
         judges = [_l2_judge(spec) for spec in specs]
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid taxonomy: {exc}", file=sys.stderr)
         return EXIT_ERROR
+    if skipped:
+        print("Skipped, no llm client: " + ", ".join(f"`{n}`" for n in skipped) + ".")
     try:
-        gate.advisory([spec.name for spec in specs])
+        advisory = gate.advisory([*(spec.name for spec in specs), *skipped])
     except ValueError as exc:
         print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -881,7 +938,7 @@ def _judge_cmd(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return EXIT_ERROR
-    stats = _l2_gate(plan, judges, k, gate, runs, replays)
+    stats = _l2_gate(plan, judges, k, gate, runs, replays, advisory)
     print(
         "\n".join([*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)])
     )
@@ -948,6 +1005,8 @@ def _selfcheck_cmd(argv: list[str]) -> int:
                 fail_on_inconclusive=False,
                 on_divergence="flag",
                 budget_seconds=None,
+                tier=None,
+                nightly_url=None,
             )
         )
         actual = Outcome(result.exit_code)

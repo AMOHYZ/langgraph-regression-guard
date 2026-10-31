@@ -96,6 +96,12 @@ def test_bad_kpi_margin_names_the_kpi(tmp_path: Path, value: str) -> None:
         load_taxonomy(_write(tmp_path, _doc(_ONE_KPI + f"    margin: {value}\n")))
 
 
+def test_llm_is_a_reserved_judge_kind(tmp_path: Path) -> None:
+    # T089: a general LLM judge, run on the nightly tier only.
+    doc = _doc(_ONE_KPI.replace("judge: fake", "judge: llm"))
+    assert load_taxonomy(_write(tmp_path, doc)).kpi_specs[0].judge == "llm"
+
+
 def test_unknown_failure_mode_names_the_kpi(tmp_path: Path) -> None:
     doc = _doc(
         """\

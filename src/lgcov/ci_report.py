@@ -76,6 +76,7 @@ class CiResult:
     inconclusive: tuple[str, ...] = ()  # T091: blocking KPIs that are INCONCLUSIVE
     not_checked: tuple[str, ...] = ()  # T089: nodes replay stopped before checking
     timing: Timing | None = None  # T089
+    tier: str = ""  # T089: pr or nightly
 
 
 def _title(r: CiResult, v: ActionVerdict) -> str:
@@ -123,7 +124,8 @@ def render_ci_report(r: CiResult) -> str:
     lines += [*r.notes, ""] if r.notes else []
     lines += [format_timing(r.timing), ""] if r.timing else []
     lines.append(
-        f"fail-on: `{r.fail_on}` · root drift: {len(r.root_drift)} · "
+        f"fail-on: `{r.fail_on}`{f' · tier: `{r.tier}`' if r.tier else ''} · "
+        f"root drift: {len(r.root_drift)} · "
         f"propagated drift: {len(r.propagated_drift)} · verdict: **{v}**"
     )
     return "\n".join(lines) + "\n"

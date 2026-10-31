@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from lgcov.cli import main
+from lgcov.judges import KPI, NodeState, Verdict
 
 
 def test_cli_prints_added_and_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -596,6 +597,7 @@ def test_cli_ci_reports_root_drift_and_sets_outputs(
         "propagated-drift-count": "0",
         "report-path": str(tmp_path / "out" / "report.md"),
         "root-drift-count": "1",
+        "tier": "pr",  # T089: the effective tier, for the Action's nightly upload
         "verdict": "fail",
     }
 
@@ -1063,3 +1065,87 @@ def test_good_change_is_a_real_refactor_of_respond_only() -> None:
     recorded = {s["node"]: s["code"] for s in baseline["runs"][0]["steps"]}
     assert fingerprint(module.respond) != recorded["respond"]
     assert fingerprint(module.classify) == recorded["classify"]
+
+
+# T089 PR B: tiers. pr serves unchanged nodes, judges each case once and never runs a
+# general LLM judge; nightly runs every node live with every judge, k = 3.
+LLM_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: respond_drift
+    description: The answer loses the order status.
+kpis:
+  - name: respond_runs
+    failure_mode: respond_drift
+    node: respond
+    judge: code
+    description: Every run ends by responding.
+    rubric: Did the run visit respond?
+    check: {type: node_visited, node: respond}
+  - name: answer_tone
+    failure_mode: respond_drift
+    node: respond
+    judge: llm
+    description: A general LLM judge, so nightly only.
+    rubric: Is the answer polite?
+"""
+
+
+class _NoCallsJudge:
+    """A general LLM judge client that fails any test that calls it."""
+
+    def __init__(self, kpi: KPI) -> None:
+        self.kpi = kpi
+
+    def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
+        raise AssertionError("the pr tier called a general LLM judge")
+
+
+def test_cli_ci_pr_tier_never_calls_a_general_llm_judge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("lgcov.cli._llm_judge", _NoCallsJudge)
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(LLM_TAXONOMY, encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")  # tier: pr
+    assert code == 0
+    assert "Nightly only (`judge: llm`): `answer_tone`." in report
+    assert "| respond_runs | 2 | 100% | 100% |" in report
+    assert "(0 live / 5 served)" in report and "· budget 90 s" in report
+    assert "tier: `pr`" in report
+
+
+def test_cli_ci_nightly_tier_runs_every_node_live_with_k_3_and_no_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", DEMO_TAXONOMY, "--tier", "nightly")
+    assert code == 0
+    assert "(5 live / 0 served)" in report and "· no budget" in report
+    assert "| answer_states_order_status (n=2, k=3) | 100% | 50% | ⚠️ 50% |" in report
+    assert "tier: `nightly`" in report
+
+
+def test_cli_ci_nightly_llm_kpi_without_a_client_is_infra_error_only_when_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(LLM_TAXONOMY, encoding="utf-8")
+    args = ("--taxonomy", "taxonomy.yaml", "--tier", "nightly")
+    code, report, _ = _run_ci(tmp_path, *args)
+    assert code == 2  # answer_tone blocks: nothing judged it
+    assert "⚠️ No llm client for `answer_tone`: INFRA_ERROR." in report
+    (tmp_path / "lgcov.yaml").write_text("gate: {advisory_kpis: [answer_tone]}\n", encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, *args)
+    assert code == 0  # a misconfigured advisory judge doesn't fail every night
+    assert "⚠️ Skipped, no llm client: `answer_tone` (advisory)." in report
+
+
+def test_cli_ci_links_main_s_latest_nightly_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    url = "https://github.com/o/r/actions/runs/123"
+    _, report, _ = _run_ci(tmp_path, "--nightly-url", url)
+    assert f"Latest nightly run on main: {url}" in report

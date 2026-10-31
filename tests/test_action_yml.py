@@ -42,6 +42,7 @@ def test_action_is_composite_with_the_documented_inputs_and_outputs() -> None:
         "fail-on-inconclusive": "false",
         "on-divergence": "flag",
         "budget-seconds": "",
+        "tier": "",  # T089: empty is lgcov.yaml's tier, else pr
     }
     assert set(_dict(action["outputs"])) == {
         "report-path",
@@ -167,6 +168,8 @@ def test_run_step_survives_drift_under_github_bash_flags(tmp_path: Path) -> None
         "FAIL_ON_INCONCLUSIVE": "false",
         "ON_DIVERGENCE": "flag",
         "BUDGET_SECONDS": "",
+        "TIER": "pr",
+        "NIGHTLY_URL": "",
         "COVERAGE_BASELINE": "",
     }
     script = _step("Run lgcov")
@@ -222,6 +225,48 @@ def test_coverage_download_failure_is_a_warning_under_github_bash_flags(tmp_path
     assert result.returncode == 0, result.stderr
     assert "::warning" in result.stdout
     assert "path=" not in out.read_text(encoding="utf-8")
+
+
+def test_tier_input_is_checked_first_and_reaches_lgcov_ci() -> None:
+    # T089 PR B: pr on every push; nightly runs everything live, on a schedule.
+    assert "tier must be pr or nightly" in str(_steps()[0].get("run", ""))
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    assert _dict(run["env"])["TIER"] == "${{ inputs.tier }}"
+    assert "--tier" in str(run["run"])
+
+
+def test_the_nightly_report_is_uploaded_and_prs_link_main_s_latest() -> None:
+    steps = {str(s.get("name")): s for s in _steps()}
+    upload = steps["Upload the nightly report"]
+    assert str(upload["uses"]).startswith("actions/upload-artifact@")
+    assert _dict(upload["with"])["name"] == "lgcov-nightly"
+    assert "nightly" in str(upload["if"])
+    assert "pull_request" in str(steps["Find main's latest nightly run"]["if"])
+    run = steps["Run lgcov"]
+    assert _dict(run["env"])["NIGHTLY_URL"] == "${{ steps.nightly.outputs.url }}"
+    assert "--nightly-url" in str(run["run"])
+
+
+def test_no_nightly_run_yet_is_fine_under_github_bash_flags(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    _executable(bin_dir / "gh", "echo 'HTTP 404: Not Found' >&2; exit 1\n")
+    out = tmp_path / "github_output"
+    out.touch()
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "GH_TOKEN": "x",
+        "REPO": "o/r",
+        "DEFAULT_BRANCH": "main",
+    }
+    script = _step("Find main's latest nightly run")
+    result = subprocess.run(
+        [*GITHUB_BASH, script], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert "url=" not in out.read_text(encoding="utf-8")
 
 
 def test_ci_runs_the_harness_selfcheck_on_every_push() -> None:
