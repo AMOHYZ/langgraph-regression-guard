@@ -175,3 +175,55 @@ def kpi_stats(
         tokens_mean=tokens_mean,
         flaky_cases=tuple(c.case_id for c in flaky),
     )
+
+
+# Same outcome icons as the PR report (report.py).
+_ICONS: dict[GateOutcome, str] = {
+    "pass": "🟢",
+    "fail": "🔴",
+    "needs_human": "🟡",
+    "infra_error": "⚠️",
+}
+
+
+def _num(v: float) -> str:
+    if 0 < v < 0.01:
+        return "<0.01"
+    return f"{v:,.0f}" if v >= 100 else f"{v:.3g}"
+
+
+def _pct(rate: float) -> str:
+    return f"{rate * 100:.0f}%"
+
+
+def _tokens(s: KpiStats) -> str:
+    if s.tokens_total is None or s.tokens_mean is None:
+        return "—"
+    if s.tokens_total == 0:
+        return "0"
+    return f"{_num(s.tokens_mean)} ({s.tokens_total:,} total)"
+
+
+def render_kpi_table(stats: Sequence[KpiStats]) -> list[str]:
+    """Markdown: one row per KPI, then each KPI's top 5 flaky cases and infra counts."""
+    lines = [
+        "| KPI | pass@k | pass^k | flaky | CI | ms/judgment | tokens |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for s in stats:
+        flaky = f"⚠️ {_pct(s.flakiness)}" if s.flakiness > 0 else _pct(s.flakiness)
+        ci = "—" if s.drop_ci is None else f"[{s.drop_ci[0]:+.2f}, {s.drop_ci[1]:+.2f}]"
+        ms = f"{_num(s.ms_mean)} ({_num(s.ms_total)} total)"
+        lines.append(
+            f"| {_ICONS[s.outcome]} {s.kpi} (n={s.n}, k={s.k}) | {_pct(s.pass_at_k)} "
+            f"| {_pct(s.pass_hat_k)} | {flaky} | {ci} | {ms} | {_tokens(s)} |"
+        )
+    lines.append("")
+    for s in stats:
+        if s.flaky_cases:
+            cases = ", ".join(f"`{c}`" for c in s.flaky_cases[:5])
+            lines.append(f"Top flaky cases, {s.kpi}: {cases}")
+    infra = [f"{s.kpi} {s.infra}" for s in stats if s.infra]
+    if infra:
+        lines.append("Infra errors, not counted toward k: " + ", ".join(infra))
+    return lines

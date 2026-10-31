@@ -737,3 +737,42 @@ def test_cli_ci_unreadable_coverage_baseline_is_no_baseline_yet(
     assert code == 0  # a bad baseline is a note, never a failure
     assert "(no baseline yet)" in report
     assert "could not read main's coverage.json" in report.lower()
+
+
+# T073: `lgcov judge` runs the taxonomy's judges k times per case, base and fresh outputs.
+DEMO_TAXONOMY = str(FIXTURES / "demo_taxonomy.yaml")
+
+
+def _judge_args(tmp_path: Path) -> list[str]:
+    (tmp_path / "cassettes").mkdir(exist_ok=True)
+    (tmp_path / "cassettes" / "baseline.json").write_text(
+        Path(DEMO_BASELINE).read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    cassettes = str(tmp_path / "cassettes")
+    return ["judge", "--graph", f"{DEMO_GRAPH}:graph", "--cassette-dir", cassettes]
+
+
+def test_cli_judge_samples_three_and_shows_a_flaky_row(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([*_judge_args(tmp_path), "--taxonomy", DEMO_TAXONOMY, "--samples", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "Planned: 24 judge calls, 12 to model judges (--max-calls 200)" in out
+    assert "| 🟢 respond_runs (n=2, k=3) | 100% | 100% | 0% |" in out
+    assert "| 🟢 answer_states_order_status (n=2, k=3) | 100% | 50% | ⚠️ 50% |" in out
+    assert "Top flaky cases, answer_states_order_status: `run-0/respond`" in out
+
+
+def test_cli_judge_refuses_more_model_calls_than_max_calls(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = [*_judge_args(tmp_path), "--taxonomy", DEMO_TAXONOMY, "--samples", "3"]
+    assert main([*args, "--max-calls", "5"]) == 2
+    err = capsys.readouterr().err
+    assert "12 model judge calls" in err
+    assert "--max-calls 5" in err
+
+
+def test_cli_judge_needs_a_taxonomy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main([*_judge_args(tmp_path), "--config", str(tmp_path / "none.yaml")]) == 2
+    assert "taxonomy" in capsys.readouterr().err

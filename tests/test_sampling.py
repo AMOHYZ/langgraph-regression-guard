@@ -104,3 +104,34 @@ def test_a_pass_hat_k_drop_fails_the_gate() -> None:
 def test_no_valid_samples_on_a_side_is_an_infra_error() -> None:
     stats = kpi_stats(KPI_, 3, base=_cases(["pass"] * 3), new=_cases(["infra"] * 3))
     assert (stats.outcome, stats.infra, stats.n) == ("infra_error", 3, 0)
+
+
+def test_table_shows_rates_flaky_rows_cost_and_top_flaky_cases() -> None:
+    from lgcov.sampling import KpiStats, render_kpi_table
+
+    flaky = KpiStats(
+        kpi="grounded",
+        n=2,
+        k=3,
+        pass_at_k=1.0,
+        pass_hat_k=0.5,
+        infra=1,
+        outcome="pass",
+        drop_ci=(-0.5, 0.5),
+        ms_total=600.0,
+        ms_mean=100.0,
+        tokens_total=3234,
+        tokens_mean=539.0,
+        flaky_cases=("run-0/respond",),
+    )
+    steady = KpiStats("responds", 2, 3, 1.0, 1.0, 0, "fail", None, 0.6, 0.05, 0, 0.0, ())
+    lines = render_kpi_table([flaky, steady])
+    assert lines[:4] == [
+        "| KPI | pass@k | pass^k | flaky | CI | ms/judgment | tokens |",
+        "|---|---|---|---|---|---|---|",
+        "| 🟢 grounded (n=2, k=3) | 100% | 50% | ⚠️ 50% | [-0.50, +0.50] | 100 (600 total) "
+        "| 539 (3,234 total) |",
+        "| 🔴 responds (n=2, k=3) | 100% | 100% | 0% | — | 0.05 (0.6 total) | 0 |",
+    ]
+    assert "Top flaky cases, grounded: `run-0/respond`" in lines
+    assert "Infra errors, not counted toward k: grounded 1" in lines

@@ -141,6 +141,26 @@ jobs:
   `root-drift-count`, `propagated-drift-count`, `verdict`.
 - Runs on Linux and macOS runners.
 
+## Judge KPIs locally (L2)
+
+`lgcov judge` runs a taxonomy's judges k times per case, on the recorded outputs and on a
+fresh replay, and gates each KPI on its pass^k rate with the bootstrap CI:
+
+```bash
+lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
+```
+
+- pass@k: at least one of a case's k samples passes; pass^k: all of them do. A case is
+  flaky when it's pass@k but not pass^k. Flakiness is shown as ⚠️ and never fails on
+  its own; an infra error doesn't count toward k and is never a fail.
+- It prints the planned number of judge calls (2·n·k per KPI) first, and refuses to
+  make more than `--max-calls` (default 200) calls to model judges.
+- Cost per KPI: ms and tokens per judgment, and totals. Tokens come from the judge's
+  `usage` (`input_tokens`/`output_tokens` or `prompt_tokens`/`completion_tokens`);
+  code judges cost 0, and "—" means the judge reported none.
+- `samples_per_case` in `lgcov.yaml` sets k; `--samples` overrides it. The demo's
+  `fake` judge has a seeded flaky mode, so its table shows a real ⚠️ row.
+
 ## Development
 
 ```bash
