@@ -830,6 +830,10 @@ def test_cli_judge_samples_three_and_shows_a_flaky_row(
         "| 0.05 | — | — | 🟢 SHIP | — |"
     ) in out  # T063: no calibration labels, so advisory
     assert "⚠️ 1 of 2 judges uncalibrated: no model judge can block this PR." in out
+    # T090: per node and slice; only blocking judges' cases are pooled into the verdict
+    assert "#### Node `respond`" in out
+    assert "| `respond_drift` | `respond_runs`; not pooled: `answer_states_order_status` |" in out
+    assert "Overall: 🟢 SHIP." in out
 
 
 # T091: base passes both cases and the PR fails its order case: n=2 can't decide that.
@@ -1353,3 +1357,105 @@ def test_saved_cases_are_rejudged_and_a_drifting_judge_is_flagged(
         in out
     )
     assert "⚠️ `answer_states_order_status`: judge drifting from human labels" in out
+
+
+# T101a: `lgcov bench` scores lgcov's root / propagated labels against hand-written ones.
+BENCH = FIXTURES / "bench"
+
+
+def _bench(tmp_path: Path, *args: str) -> tuple[int, dict[str, object], str]:
+    md, results = tmp_path / "benchmark.md", tmp_path / "results.json"
+    code = main(["bench", *args, "--out", str(md), "--json", str(results)])
+    raw = json.loads(results.read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)
+    return code, raw, md.read_text(encoding="utf-8")
+
+
+def _rows(results: dict[str, object]) -> dict[str, dict[str, object]]:
+    rows = results["benchmarks"]
+    assert isinstance(rows, list)
+    return {str(r["name"]): r for r in rows}
+
+
+def test_cli_bench_scores_the_linear_fixture_perfectly(tmp_path: Path) -> None:
+    code, results, md = _bench(tmp_path, str(BENCH), "--only", "linear")
+    assert code == 0
+    [row] = _rows(results).values()  # --only: just the one
+    assert (row["root"], row["propagated"]) == (
+        {"tp": 1, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0, "f1": 1.0},
+        {"tp": 1, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0, "f1": 1.0},
+    )
+    assert "| linear | 1.00 / 1.00 / 1.00 | 1.00 / 1.00 / 1.00 | `b` | `b` |" in md
+
+
+def test_cli_bench_a_wrong_expected_file_gives_the_fp_and_fn_you_would_predict(
+    tmp_path: Path,
+) -> None:
+    import shutil
+
+    bench = tmp_path / "bench"
+    shutil.copytree(BENCH / "linear", bench / "linear")
+    yaml_text = (BENCH / "linear.yaml").read_text(encoding="utf-8")
+    wrong = yaml_text.replace("root: [b]", "root: [c]").replace(
+        "propagated: [c]", "propagated: [b]"
+    )
+    (bench / "linear.yaml").write_text(wrong, encoding="utf-8")
+    _, results, _ = _bench(tmp_path, str(bench))
+    row = _rows(results)["linear"]
+    for which in ("root", "propagated"):
+        assert row[which] == {"tp": 0, "fp": 1, "fn": 1, "precision": 0.0, "recall": 0.0, "f1": 0.0}
+
+
+def test_cli_bench_reports_the_subgraph_miss_as_a_known_gap(tmp_path: Path) -> None:
+    code, results, md = _bench(tmp_path, str(BENCH))
+    assert code == 0  # a report, not a gate
+    rows = _rows(results)
+    assert sorted(rows) == ["linear", "send_fanout", "subgraph"]
+    assert (rows["send_fanout"]["found_root"], rows["send_fanout"]["found_propagated"]) == (
+        ["worker_b"],
+        ["reducer"],
+    )
+    # lgcov sees a subgraph as one node today: it blames `sub`, not `sub.inner` (T109's area).
+    assert (rows["subgraph"]["found_root"], rows["subgraph"]["expected_root"]) == (
+        ["sub"],
+        ["sub.inner"],
+    )
+    assert "❌ known gap (subgraph)" in md and "## Known gaps" in md
+
+
+def test_cli_bench_reads_base_and_head_from_git_refs(tmp_path: Path) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q")
+    (repo / "graph.py").write_text((BENCH / "linear" / "base.py").read_text(), encoding="utf-8")
+    git("add", "graph.py")
+    git("commit", "-q", "-m", "base")
+    git("tag", "base")
+    (repo / "graph.py").write_text((BENCH / "linear" / "head.py").read_text(), encoding="utf-8")
+    git("commit", "-q", "-am", "head")
+    yaml_text = (BENCH / "linear.yaml").read_text(encoding="utf-8")
+    refs = yaml_text.replace(
+        "base_patch: linear/base.py\nhead_patch: linear/head.py",
+        "repo: repo\nbase_ref: base\nhead_ref: HEAD",
+    )
+    (tmp_path / "bench").mkdir()
+    (tmp_path / "bench" / "linear.yaml").write_text(refs.replace("repo: repo", "repo: ../repo"))
+    _, results, _ = _bench(tmp_path, str(tmp_path / "bench"))
+    assert _rows(results)["linear"]["root"] == {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+    }

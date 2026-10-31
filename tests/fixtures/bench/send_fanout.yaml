@@ -1,0 +1,12 @@
+# T101a synthetic fixture. Nodes inside a subgraph are named <subgraph node>.<inner node>.
+graph: graph.py:graph
+base_patch: send_fanout/base.py
+head_patch: send_fanout/head.py
+cases:
+  - {question: "Where is my order?"}
+  - {question: "What are your hours?"}
+expected:
+  root: [worker_b]
+  propagated: [reducer]
+notes: plan sends the question to three workers in parallel; the PR edits worker_b only.
+hard_cases: [send_fanout]

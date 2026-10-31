@@ -136,6 +136,7 @@ class KpiStats:
     decision: Decision | None = None  # None: no paired case to decide on
     roots: tuple[str, ...] = ()  # nodes that drifted first in the runs whose score changed
     band: str = "blocking"  # T063: blocking, flag (BLOCK capped at INCONCLUSIVE) or advisory
+    cases: tuple[tuple[tuple[float, ...], tuple[float, ...]], ...] = ()  # T090: paired scores
 
     @property
     def flakiness(self) -> float:
@@ -205,6 +206,7 @@ def kpi_stats(
         infra=infra,
         outcome=outcome,
         paired=paired,
+        cases=tuple((tuple(b_scores[c]), tuple(n_scores[c])) for c in pairs),
         ms_total=ms_total,
         ms_mean=ms_total / len(samples) if samples else 0.0,
         tokens_total=tokens_total,

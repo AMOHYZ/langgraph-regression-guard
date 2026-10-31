@@ -6,9 +6,12 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
@@ -17,6 +20,15 @@ from typing import Any
 
 import yaml
 
+from lgcov.attribution import (
+    Benchmark,
+    Result,
+    Score,
+    parse_benchmark,
+    render_markdown,
+    results_json,
+    score,
+)
 from lgcov.calibration import (
     Band,
     Bands,
@@ -76,6 +88,7 @@ from lgcov.sampling import (
     render_gate_table,
     render_kpi_table,
 )
+from lgcov.slices import Group, failing_groups, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.taxonomy import KPISpec, load_taxonomy
 
@@ -686,20 +699,22 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         judge_calls=sum(s.samples for s in stats),
         tokens=sum(tokens) if tokens else None,
     )
-    gate_code = gate_exit_code(stats, gate.inconclusive_blocks)
+    groups = _groups(stats, l2[0], cfg, gate)
+    gate_code = groups_exit(
+        gate_exit_code(stats, gate.inconclusive_blocks), groups, gate.inconclusive_blocks
+    )
     return replace(
         result,
         exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code, llm_code),
         l2_lines=(
             *calibration,
             *([""] if calibration and stats else []),
-            *(
-                (*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats))
-                if stats
-                else ()
-            ),
+            *(_l2_tables(stats, groups, gate) if stats else ()),
         ),
-        blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
+        blocked=(
+            *(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
+            *failing_groups(groups),
+        ),
         inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
         timing=replace(judged, total=perf_counter() - start),
         calibration_lines=(*changes, *_rejudge(saved, l2[0], l2[1])),
@@ -826,6 +841,26 @@ _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
 # T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
 # never runs one, and a nightly run reports the KPIs it couldn't judge.
 _llm_judge: Callable[[KPI], Judge] | None = None
+
+
+def _groups(
+    stats: list[KpiStats], specs: list[KPISpec], cfg: Config, gate: GateConfig
+) -> list[Group]:
+    """T090: the KPIs per node and slice (failure mode), as lgcov.yaml's report.group_by says."""
+    if not cfg.group_by:
+        return []
+    where = {spec.name: (spec.node, spec.failure_mode) for spec in specs}
+    return group_kpis(stats, where, cfg.group_by, gate.alpha, gate.power)
+
+
+def _l2_tables(stats: list[KpiStats], groups: list[Group], gate: GateConfig) -> list[str]:
+    grouped = [*render_groups(groups), ""] if groups else []
+    return [
+        *render_gate_table(stats, gate.alpha, gate.power),
+        "",
+        *grouped,
+        *render_kpi_table(stats),
+    ]
 
 
 def _gate_bands(
@@ -1009,14 +1044,16 @@ def _judge_cmd(argv: list[str]) -> int:
         )
         return EXIT_ERROR
     stats = _l2_gate(plan, judges, k, gate, runs, replays, advisory, flagged)
+    groups = _groups(stats, specs, cfg, gate)
     print("\n".join([*calibration, *([""] if calibration else [])]), end="")
-    print(
-        "\n".join([*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)])
-    )
+    print("\n".join(_l2_tables(stats, groups, gate)))
     rechecked = _rejudge(saved, specs, judges)
     if rechecked:
         print("\n".join(["", *rechecked]))
-    return gate_exit_code(stats, gate.inconclusive_blocks)
+    code = groups_exit(
+        gate_exit_code(stats, gate.inconclusive_blocks), groups, gate.inconclusive_blocks
+    )
+    return code
 
 
 _BANDS = "calibration/bands.json"  # T063: in the repo, so a band moves in a reviewed diff
@@ -1277,6 +1314,106 @@ def _calibration_changes(args: argparse.Namespace, specs: list[KPISpec], cfg: Co
     return lines
 
 
+def _bench_sides(b: Benchmark, tmp: Path) -> tuple[str, str, list[Path]]:
+    """T101a: the base and head graphs as targets, from whole-file patches or git refs, and
+    the git worktrees made for them (to remove afterwards)."""
+    file, _, attr = b.graph.rpartition(":")
+    if b.base_patch and b.head_patch:
+        sides = []
+        for side, patch in (("base", b.base_patch), ("head", b.head_patch)):
+            dest = tmp / side / file
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text((b.folder / patch).read_text(encoding="utf-8"), encoding="utf-8")
+            sides.append(f"{dest}:{attr}")
+        return sides[0], sides[1], []
+    repo = (b.folder / b.repo).resolve()
+    worktrees: list[Path] = []
+    for side, ref in (("base", b.base_ref), ("head", b.head_ref)):
+        git = ["git", "-C", str(repo), "worktree", "add", "--detach", str(tmp / side), str(ref)]
+        subprocess.run(git, check=True, capture_output=True, text=True)
+        worktrees.append(tmp / side)
+    return f"{tmp / 'base' / file}:{attr}", f"{tmp / 'head' / file}:{attr}", worktrees
+
+
+def _bench_one(b: Benchmark) -> Result:
+    """Record the cases on base, replay head (unchanged nodes served, as `lgcov ci` does),
+    and score lgcov's root / propagated labels. A benchmark that can't run says why."""
+    start = perf_counter()
+    worktrees: list[Path] = []
+    expected = (tuple(sorted(b.root)), tuple(sorted(b.propagated)))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                base_target, head_target, worktrees = _bench_sides(b, Path(tmp))
+                base = _load_graph(base_target)
+                runs = [record(base, dict(inputs)) for inputs in b.cases]
+                head = _load_graph(head_target)
+                drifts = [replay_steps(head, run, (), serve=True)[0] for run in runs]
+            finally:
+                for worktree in worktrees:
+                    remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]
+                    subprocess.run(remove, check=False, capture_output=True)
+    except Exception as exc:  # user graph code and git can raise anything: a row, not a crash
+        failed = getattr(exc, "stderr", "") or str(exc)
+        return Result(
+            b.name,
+            (),
+            (),
+            Score(0, 0, 0),
+            Score(0, 0, 0),
+            perf_counter() - start,
+            *expected,
+            b.hard_cases,
+            b.notes,
+            error=f"{type(exc).__name__}: {str(failed).strip()[:200]}",
+        )
+    counts, roots = _drift_kinds(runs, drifts)
+    found = (tuple(sorted(roots)), tuple(sorted(counts.keys() - roots)))
+    return Result(
+        b.name,
+        *found,
+        score(found[0], b.root),
+        score(found[1], b.propagated),
+        perf_counter() - start,
+        *expected,
+        b.hard_cases,
+        b.notes,
+    )
+
+
+def _bench_cmd(argv: list[str]) -> int:
+    """T101a: lgcov's root / propagated labels against hand-written ones, one benchmark file
+    each. A report, not a gate: it exits 0 whatever the scores."""
+    ap = argparse.ArgumentParser(prog="lgcov bench")
+    ap.add_argument("dir", nargs="?", default="docs/benchmark", help="benchmark files (*.yaml)")
+    ap.add_argument("--only", action="append", default=[], help="run this one (file name)")
+    ap.add_argument("--out", default="docs/benchmark.md", help="write the table here")
+    ap.add_argument("--json", default="docs/benchmark-results.json", help="and the numbers")
+    args = ap.parse_args(argv)
+    folder = Path(args.dir)
+    files = [f for f in sorted(folder.glob("*.yaml")) if not args.only or f.stem in args.only]
+    if not files:
+        print(f"lgcov bench: no benchmark files (*.yaml) to run in {folder}", file=sys.stderr)
+        return EXIT_ERROR
+    benchmarks = []
+    for f in files:
+        try:
+            raw: object = yaml.safe_load(f.read_text(encoding="utf-8"))
+            benchmarks.append(parse_benchmark(f.stem, raw, f.parent))
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"lgcov bench: {f}: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+    results = [_bench_one(b) for b in benchmarks]
+    command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only)])
+    source = f"the {len(results)} benchmark files in `{folder}`"
+    md = render_markdown(results, command, datetime.now(UTC).date().isoformat(), source)
+    for path, text in ((Path(args.out), md), (Path(args.json), results_json(results))):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    print(md, end="")
+    return 0
+
+
 @dataclass(frozen=True)
 class _Expected:
     outcome: Outcome
@@ -1375,6 +1512,8 @@ def main(argv: list[str] | None = None) -> int:
         return _calibrate_cmd(argv[1:])
     if argv[:1] == ["review"]:
         return _review_cmd(argv[1:])
+    if argv[:1] == ["bench"]:
+        return _bench_cmd(argv[1:])
     if argv[:1] == ["coverage"]:
         return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:

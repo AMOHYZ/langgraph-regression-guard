@@ -1,0 +1,143 @@
+{
+  "benchmarks": [
+    {
+      "name": "linear",
+      "root": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "propagated": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "found_root": [
+        "b"
+      ],
+      "found_propagated": [
+        "c"
+      ],
+      "expected_root": [
+        "b"
+      ],
+      "expected_propagated": [
+        "c"
+      ],
+      "seconds": 0.009,
+      "hard_cases": [],
+      "notes": "The PR edits b's prompt; c only drifts because b's output did.",
+      "error": ""
+    },
+    {
+      "name": "send_fanout",
+      "root": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "propagated": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "found_root": [
+        "worker_b"
+      ],
+      "found_propagated": [
+        "reducer"
+      ],
+      "expected_root": [
+        "worker_b"
+      ],
+      "expected_propagated": [
+        "reducer"
+      ],
+      "seconds": 0.015,
+      "hard_cases": [
+        "send_fanout"
+      ],
+      "notes": "plan sends the question to three workers in parallel; the PR edits worker_b only.",
+      "error": ""
+    },
+    {
+      "name": "subgraph",
+      "root": {
+        "tp": 0,
+        "fp": 1,
+        "fn": 1,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "propagated": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "found_root": [
+        "sub"
+      ],
+      "found_propagated": [
+        "after"
+      ],
+      "expected_root": [
+        "sub.inner"
+      ],
+      "expected_propagated": [
+        "after"
+      ],
+      "seconds": 0.008,
+      "hard_cases": [
+        "subgraph"
+      ],
+      "notes": "The PR edits inner, inside the subgraph node sub; after only drifts because of it.",
+      "error": ""
+    }
+  ],
+  "micro": {
+    "root": {
+      "tp": 2,
+      "fp": 1,
+      "fn": 1,
+      "precision": 0.6666666666666666,
+      "recall": 0.6666666666666666,
+      "f1": 0.6666666666666666
+    },
+    "propagated": {
+      "tp": 3,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    }
+  },
+  "macro": {
+    "root": {
+      "precision": 0.6666666666666666,
+      "recall": 0.6666666666666666,
+      "f1": 0.6666666666666666
+    },
+    "propagated": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    }
+  }
+}

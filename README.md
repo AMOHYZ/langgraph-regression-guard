@@ -2,8 +2,8 @@
 
 Catch silent regressions in LangGraph agents on every PR. lgcov tells you which node a
 PR actually changed and which ones only inherited the damage, gates each KPI in your
-taxonomy with a paired test, and (planned) lets a judge block only once it has earned
-that against human labels. A GitHub Action; first report in 2 minutes.
+taxonomy with a paired test, and lets a judge block only once it has earned that against
+human labels. A GitHub Action; first report in 2 minutes.
 
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
 
@@ -101,6 +101,12 @@ dependency upgrades are not part of the fingerprint: pass `--live` to either
 command to re-run every node.
 
 Served vs `--live` on the demo, measured: [docs/benchmark-speed.md](docs/benchmark-speed.md) (`make bench-speed`).
+
+Root vs propagated attribution, measured: `lgcov bench DIR` records each benchmark's cases
+on base, replays head, and scores lgcov's labels against hand-written ones, precision /
+recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). For now its rows are
+three synthetic fixtures in `tests/fixtures/bench/`; real PRs come with T100. A miss on a
+hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden.
 
 ## Use in your repo
 
@@ -246,6 +252,15 @@ gate:                          # lgcov.yaml; these are the defaults
   inconclusive_blocks: false   # true: INCONCLUSIVE exits 1, like --fail-on-inconclusive
   uncalibrated: advisory       # a model judge with no labels; or flag (T063)
 ```
+
+Per node and slice. The report never gives only a mean: after the KPI table it has one table
+per node, a row per slice (the KPIs' failure mode) and the node's total when it has more than
+one, each pooling its blocking judges' paired cases into one test. The overall verdict is the
+worst group's. A group is thin, "⚠️ thin (n=6, need 93)", when it has fewer cases than it needs
+to detect a drop of its margin at power 0.8, and a thin group can't block on its own: its BLOCK
+is INCONCLUSIVE. A KPI's own BLOCK still blocks. `report.group_by: [node, slice]` in
+`lgcov.yaml` chooses the grouping; `[]` turns it off. Graph-structural coverage criteria are
+future work.
 
 Planned: sequential stopping (mSPRT), to stop judging once a KPI's verdict is clear.
 

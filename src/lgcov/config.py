@@ -74,6 +74,7 @@ class Config:
     gate: GateConfig = field(default_factory=GateConfig)
     tier: Tier = "pr"
     jev_model: str | None = None  # T063: the Jev model judges use; labels are only good for it
+    group_by: tuple[str, ...] = ("node", "slice")  # T090: report.group_by
 
 
 _KEYS = (
@@ -82,6 +83,7 @@ _KEYS = (
     "graph_entrypoint",
     "ignore_paths",
     "jev_model",
+    "report",
     "samples_per_case",
     "taxonomy",  # alias for taxonomy_path
     "taxonomy_path",
@@ -180,6 +182,16 @@ def _gate(raw: object) -> GateConfig:
     )
 
 
+def _group_by(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, dict):
+        raise ValueError("lgcov.yaml: 'report' must be a mapping")
+    _check_keys(raw, ("group_by",), "lgcov.yaml: report")
+    by = _str_list(raw.get("group_by", ["node", "slice"]), "report.group_by")
+    if not set(by) <= {"node", "slice"}:
+        raise ValueError("lgcov.yaml: 'report.group_by' takes node and slice only")
+    return tuple(g for g in ("node", "slice") if g in by)
+
+
 def _tier(value: object) -> Tier:
     for tier in TIERS:
         if value == tier:
@@ -232,6 +244,7 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         gate=_gate(d.get("gate", {})),
         tier=_tier(d.get("tier", "pr")),
         jev_model=None if "jev_model" not in d else _str(d["jev_model"], "jev_model"),
+        group_by=_group_by(d.get("report", {})),
     )
 
 
