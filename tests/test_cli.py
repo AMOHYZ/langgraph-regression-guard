@@ -1182,3 +1182,31 @@ def test_cli_ci_links_main_s_latest_nightly_run(
     url = "https://github.com/o/r/actions/runs/123"
     _, report, _ = _run_ci(tmp_path, "--nightly-url", url)
     assert f"Latest nightly run on main: {url}" in report
+
+
+# T063: `lgcov calibrate` on the demo's 40 synthetic labels.
+DEMO_LABELS = Path(__file__).resolve().parents[1] / "examples" / "demo_agent" / "labels.csv"
+
+
+def test_cli_calibrate_prints_a_row_per_judge_in_plain_words(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["calibrate", str(DEMO_LABELS)]) == 0
+    out = capsys.readouterr().out
+    assert "| judge | n | TPR: catches human-failed cases | TNR: clears human-passed cases |" in out
+    assert "| answer_states_order_status | 40 | 0.90 [0.70, 0.97] | 0.95 [0.76, 0.99] |" in out
+    assert "Threshold, answer_states_order_status: too few labels to tune (40 < 50)." in out
+
+
+def test_cli_calibrate_counts_overrides_it_cannot_map(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    overrides = tmp_path / "calibration.jsonl"
+    overrides.write_text('{"human_label": 1.0, "node": "respond"}\n', encoding="utf-8")
+    assert main(["calibrate", str(DEMO_LABELS), "--overrides", str(overrides)]) == 0
+    assert "1 override skipped: no kpi or judge_label" in capsys.readouterr().out
+
+
+def test_cli_calibrate_with_a_missing_file_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["calibrate", "no-such-labels.csv"]) == 2
+    assert "lgcov calibrate:" in capsys.readouterr().err

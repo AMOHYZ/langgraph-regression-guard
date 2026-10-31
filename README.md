@@ -248,6 +248,26 @@ gate:                          # lgcov.yaml; these are the defaults
 
 Planned: sequential stopping (mSPRT), to stop judging once a KPI's verdict is clear.
 
+### Calibrate judges against human labels
+
+`lgcov calibrate` compares each judge with human labels. Give it a CSV with the columns
+`case_id, judge_id, judge_label, human_label`, plus optional `judge_confidence` and
+`question_form`; `--overrides` adds the overrides that review decisions saved, and
+`--taxonomy` gives each KPI's labels (default `pass` / `fail`).
+
+```bash
+lgcov calibrate examples/demo_agent/labels.csv   # 40 synthetic labels for the demo judge
+```
+
+- A failure is the positive class. TPR: the share of human-failed cases the judge catches;
+  TNR: the share of human-passed cases it clears. Both with Wilson 95% intervals.
+- Cohen's κ with a seeded bootstrap interval, and the labels needed for κ ±0.10.
+- With confidences: the Brier score, accuracy at each confidence the judge actually gives
+  (the pile-up at 1.00 on its own), one temperature per question form (never pooled), and
+  from 50 labels on, the P(fail) cutoff with the best cross-validated balanced accuracy.
+- An override counts as a label only when it names its KPI and the judge's label; older
+  overrides are skipped and counted.
+
 ## Development
 
 ```bash

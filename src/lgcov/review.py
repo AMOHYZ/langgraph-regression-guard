@@ -18,6 +18,11 @@ class ReviewDecision:
     reviewer: str
     reason: str = ""
     label: float | None = None  # human score; required for "override"
+    # T063: the judge an override corrects and what it said, so `lgcov calibrate` can count
+    # the override as a label. T102 moves the judge's band from these.
+    kpi: str = ""
+    judge_label: str = ""
+    case_id: str = ""
 
     @classmethod
     def from_json(cls, raw: str) -> ReviewDecision:
@@ -35,6 +40,9 @@ class ReviewDecision:
             reviewer=d["reviewer"],
             reason=d.get("reason", ""),
             label=d.get("label"),
+            kpi=d.get("kpi", ""),
+            judge_label=d.get("judge_label", ""),
+            case_id=d.get("case_id", ""),
         )
 
     def to_json(self) -> str:
@@ -59,6 +67,9 @@ def apply_decision(
             "human_label": decision.label,
             "reviewer": decision.reviewer,
             "reason": decision.reason,
+            "kpi": decision.kpi,
+            "judge_label": decision.judge_label,
+            "case_id": decision.case_id,
         }
         with calibration_file.open("a") as f:
             f.write(json.dumps(example, sort_keys=True) + "\n")

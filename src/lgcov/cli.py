@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from lgcov.calibration import calibrate, read_labels, render_calibration, rows_from_overrides
 from lgcov.cassette import (
     ON_DIVERGENCE,
     Budget,
@@ -954,6 +955,38 @@ def _judge_cmd(argv: list[str]) -> int:
     return gate_exit_code(stats, gate.inconclusive_blocks)
 
 
+def _calibrate_cmd(argv: list[str]) -> int:
+    """T063: each judge's agreement with human labels, from a CSV and saved overrides."""
+    ap = argparse.ArgumentParser(prog="lgcov calibrate")
+    ap.add_argument(
+        "labels",
+        help="CSV: case_id, judge_id, judge_label, human_label[, judge_confidence, question_form]",
+    )
+    ap.add_argument("--overrides", help="the overrides review decisions saved (JSON lines)")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml with each KPI's labels (default pass/fail)")
+    args = ap.parse_args(argv)
+    skipped = 0
+    try:
+        rows = read_labels(Path(args.labels).read_text(encoding="utf-8"))
+        specs = load_taxonomy(args.taxonomy).kpi_specs if args.taxonomy else ()
+        score_maps = {spec.name: spec.score_map for spec in specs}
+        if args.overrides:
+            lines = Path(args.overrides).read_text(encoding="utf-8").splitlines()
+            extra, skipped = rows_from_overrides(lines, score_maps)
+            rows += extra
+        stats = calibrate(rows, score_maps)
+    except (OSError, ValueError) as exc:  # ValueError covers malformed JSON lines too
+        print(f"lgcov calibrate: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print("\n".join(render_calibration(stats)))
+    if skipped:
+        print(
+            f"{skipped} override{'' if skipped == 1 else 's'} skipped: no kpi or judge_label "
+            "(saved before T063), or a human score that isn't one of the KPI's labels."
+        )
+    return 0
+
+
 @dataclass(frozen=True)
 class _Expected:
     outcome: Outcome
@@ -1047,6 +1080,8 @@ def main(argv: list[str] | None = None) -> int:
         return _selfcheck_cmd(argv[1:])
     if argv[:1] == ["judge"]:
         return _judge_cmd(argv[1:])
+    if argv[:1] == ["calibrate"]:
+        return _calibrate_cmd(argv[1:])
     if argv[:1] == ["coverage"]:
         return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:
