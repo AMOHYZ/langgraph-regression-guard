@@ -372,3 +372,95 @@ def test_cli_replay_applies_ignore_paths_from_config(tmp_path: Path) -> None:
     assert main(["replay", "--config", str(cfg)]) == 1  # the random nonce drifts
     cfg.write_text(base + "ignore_paths: [/nonce]\n", encoding="utf-8")
     assert main(["replay", "--config", str(cfg)]) == 0
+
+
+# T078 PR A: `lgcov snapshot`, `replay --fail-on/--summary-json`, harness errors exit 2.
+def test_cli_snapshot_prints_a_graph_snapshot(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from lgcov.snapshot import GraphSnapshot
+
+    assert main(["snapshot", "--graph", f"{DEMO_GRAPH}:graph"]) == 0
+    out = capsys.readouterr().out
+    snap = GraphSnapshot.from_json(out)
+    assert {"classify", "lookup_order", "respond"} <= snap.nodes
+    conditional = {(e.source, e.target) for e in snap.edges if e.conditional}
+    assert conditional == {("classify", "lookup_order"), ("classify", "respond")}
+    path = tmp_path / "snap.json"
+    path.write_text(out, encoding="utf-8")
+    assert main([str(path), str(path)]) == 0
+    assert "No graph changes." in capsys.readouterr().out
+
+
+def test_cli_snapshot_bad_target_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["snapshot", "--graph", f"{tmp_path / 'missing.py'}:graph"]) == 2
+    assert "lgcov snapshot:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["replay", "snapshot"])
+def test_cli_unloadable_entrypoint_is_a_harness_error(
+    tmp_path: Path, command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    graph = tmp_path / "graph.py"
+    graph.write_text('raise RuntimeError("boom at import")\n', encoding="utf-8")
+    target = f"{graph}:graph"
+    args = [command, target, DEMO_BASELINE] if command == "replay" else [command, "--graph", target]
+    assert main(args) == 2
+    err = capsys.readouterr().err
+    assert "harness error, not a regression" in err
+    assert "boom at import" in err
+    assert "Traceback" not in err
+
+
+def test_cli_replay_crash_inside_the_graph_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, _ = _ab_project(tmp_path)
+    crashing = AB_GRAPH.replace('return {"b": "B1"}', 'raise RuntimeError("node b crashed")')
+    (tmp_path / "graph.py").write_text(crashing, encoding="utf-8")
+    capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 2
+    err = capsys.readouterr().err
+    assert "harness error, not a regression" in err
+    assert "node b crashed" in err
+
+
+def test_cli_replay_summary_json_counts_root_and_propagated(tmp_path: Path) -> None:
+    cfg, _ = _ab_project(tmp_path)  # a and b both changed: a drifts first (root), b after
+    summary = tmp_path / "summary.json"
+    assert main(["replay", "--config", str(cfg), "--summary-json", str(summary)]) == 1
+    assert json.loads(summary.read_text(encoding="utf-8")) == {
+        "exit_code": 1,
+        "fail_on": "any-drift",
+        "propagated_drift": ["b"],
+        "propagated_drift_count": 1,
+        "root_drift": ["a"],
+        "root_drift_count": 1,
+        "runs": 2,
+        "verdict": "fail",
+    }
+
+
+def test_cli_replay_prompt_tweak_summary_is_root_only(tmp_path: Path) -> None:
+    graph = tmp_path / "graph.py"
+    tweaked = DEMO_GRAPH.read_text(encoding="utf-8").replace("a concise", "a friendly")
+    graph.write_text(tweaked, encoding="utf-8")
+    summary = tmp_path / "summary.json"
+    args = ["replay", f"{graph}:graph", DEMO_BASELINE, "--summary-json", str(summary)]
+    assert main([*args, "--fail-on", "root-drift"]) == 1
+    data = json.loads(summary.read_text(encoding="utf-8"))
+    assert (data["root_drift"], data["propagated_drift"]) == (["respond"], [])
+
+
+def test_cli_replay_fail_on_never_exits_zero_on_drift(tmp_path: Path) -> None:
+    cfg, _ = _ab_project(tmp_path)
+    assert main(["replay", "--config", str(cfg), "--fail-on", "never"]) == 0
+
+
+def test_cli_replay_fail_on_typo_lists_allowed_values(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["replay", "--fail-on", "root-drif"])
+    assert exc.value.code == 2
+    assert "root-drift, any-drift, never; got 'root-drif'" in capsys.readouterr().err
