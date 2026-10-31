@@ -37,6 +37,18 @@ inputs:
     description: "true: an INCONCLUSIVE blocking KPI exits 1 (default false: 0, shown as ⚠️). Never 2."
     required: false
     default: "false"
+  on-divergence:
+    description: "A served node's input no longer matches: flag (run it live), live (rest of the run live) or fail (rest not checked)."
+    required: false
+    default: flag
+  budget-seconds:
+    description: "Stop starting live node calls once the run is projected to take longer. Empty: the tier's (90 on pr, none on nightly)."
+    required: false
+    default: ""
+  tier:
+    description: "pr (serve unchanged nodes, k = 1, 90 s) or nightly (every node live, every judge, k = 3). Empty: tier from lgcov.yaml, else pr."
+    required: false
+    default: ""
 
 outputs:
   report-path:
@@ -61,6 +73,9 @@ runs:
         FAIL_ON: ${{ inputs.fail-on }}
         LIVE: ${{ inputs.live }}
         FAIL_ON_INCONCLUSIVE: ${{ inputs.fail-on-inconclusive }}
+        ON_DIVERGENCE: ${{ inputs.on-divergence }}
+        BUDGET_SECONDS: ${{ inputs.budget-seconds }}
+        TIER: ${{ inputs.tier }}
       run: |
         case "$FAIL_ON" in
           root-drift|any-drift|never) ;;
@@ -83,6 +98,24 @@ runs:
             exit 2
             ;;
         esac
+        case "$ON_DIVERGENCE" in
+          fail|flag|live) ;;
+          *)
+            echo "::error title=lgcov::on-divergence must be one of fail, flag, live; got '$ON_DIVERGENCE'"
+            exit 2
+            ;;
+        esac
+        case "$TIER" in
+          ""|pr|nightly) ;;
+          *)
+            echo "::error title=lgcov::tier must be pr or nightly, or empty; got '$TIER'"
+            exit 2
+            ;;
+        esac
+        if [ -n "$BUDGET_SECONDS" ] && ! [[ "$BUDGET_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+          echo "::error title=lgcov::budget-seconds must be a number of seconds, or empty; got '$BUDGET_SECONDS'"
+          exit 2
+        fi
 
     - name: Install uv
       uses: astral-sh/setup-uv@v6
@@ -173,6 +206,26 @@ runs:
           echo "::warning title=lgcov::could not download main's coverage artifact; no baseline yet"
         fi
 
+    - name: Find main's latest nightly run
+      id: nightly
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        # T089: link the newest nightly report on main, if there is one; never a failure.
+        set +e -uo pipefail
+        query="[.artifacts[] | select(.expired | not)"
+        query+=" | select(.workflow_run.head_branch == \"$DEFAULT_BRANCH\")][0].workflow_run.id // empty"
+        id=$(gh api "repos/$REPO/actions/artifacts?name=lgcov-nightly&per_page=30" \
+          --jq "$query" 2>>"$RUNNER_TEMP/lgcov-gh.log")
+        if [ -n "$id" ]; then
+          echo "url=${GITHUB_SERVER_URL:-https://github.com}/$REPO/actions/runs/$id" >> "$GITHUB_OUTPUT"
+        fi
+        exit 0
+
     - name: Run lgcov
       id: lgcov
       shell: bash
@@ -187,6 +240,10 @@ runs:
         HARNESS_ERROR: ${{ steps.install.outputs.harness-error }}
         LIVE: ${{ inputs.live }}
         FAIL_ON_INCONCLUSIVE: ${{ inputs.fail-on-inconclusive }}
+        ON_DIVERGENCE: ${{ inputs.on-divergence }}
+        BUDGET_SECONDS: ${{ inputs.budget-seconds }}
+        TIER: ${{ inputs.tier }}
+        NIGHTLY_URL: ${{ steps.nightly.outputs.url }}
         COVERAGE_BASELINE: ${{ steps.coverage-main.outputs.path }}
       run: |
         # Actions runs bash with -e; this step checks exit codes itself.
@@ -201,6 +258,10 @@ runs:
         [ -n "$COVERAGE_BASELINE" ] && args+=(--coverage-baseline "$COVERAGE_BASELINE")
         [ "$LIVE" = "true" ] && args+=(--live)
         [ "$FAIL_ON_INCONCLUSIVE" = "true" ] && args+=(--fail-on-inconclusive)
+        args+=(--on-divergence "$ON_DIVERGENCE")
+        [ -n "$BUDGET_SECONDS" ] && args+=(--budget-seconds "$BUDGET_SECONDS")
+        [ -n "$TIER" ] && args+=(--tier "$TIER")
+        [ -n "$NIGHTLY_URL" ] && args+=(--nightly-url "$NIGHTLY_URL")
         if [ -n "$HARNESS_ERROR" ]; then
           # The project didn't install; lgcov alone is enough to render the harness report.
           uvx --from "$ACTION_PATH" lgcov "${args[@]}" --harness-error "$HARNESS_ERROR"
@@ -268,6 +329,16 @@ runs:
       with:
         name: lgcov-coverage
         path: ${{ runner.temp }}/lgcov/coverage.json
+        if-no-files-found: warn
+        overwrite: true
+
+    - name: Upload the nightly report
+      if: steps.lgcov.outputs.tier == 'nightly'
+      uses: actions/upload-artifact@v4
+      continue-on-error: true
+      with:
+        name: lgcov-nightly
+        path: ${{ runner.temp }}/lgcov/report.md
         if-no-files-found: warn
         overwrite: true
 

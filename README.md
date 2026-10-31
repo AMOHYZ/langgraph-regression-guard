@@ -136,6 +136,28 @@ jobs:
   `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
   baseline yet". A missing or unreadable baseline is a warning, never a failure.
 - Unchanged nodes are served from the cassette; `live: true` runs every node live.
+- A node whose code is unchanged but whose input no longer matches the recording has
+  diverged. `on-divergence: flag` (the default) runs it live and marks what ran after
+  it, `live` runs the rest of that run live, and `fail` leaves the node and the rest of
+  the run not checked. `budget-seconds` stops starting live node calls once the run is
+  projected to take longer, and the nodes it stops before are not checked either. A node
+  not checked is INCONCLUSIVE: never a fail, never a harness error.
+- The report ends with where the time went, e.g. `⏱ 42 s · agent 31 s (3 live / 1 served)
+  · judges 9 s (12 calls, 1.4k tokens) · budget 90 s`.
+- Two tiers. `pr` (the default) serves unchanged nodes, judges each case once, skips
+  `judge: llm` KPIs (shown as "nightly only") and has a 90 s budget. `nightly` runs every
+  node live with every judge, k from `samples_per_case` (3 if unset), no budget, and
+  uploads its report as the `lgcov-nightly` artifact, which PRs link. Run it on a schedule:
+
+  ```yaml
+  on:
+    schedule:
+      - cron: "0 3 * * *"  # the nightly tier, on main
+  # ...the same job as above, with:
+        - uses: AMOHYZ/langgraph-regression-guard@v0
+          with:
+            tier: ${{ github.event_name == 'schedule' && 'nightly' || 'pr' }}
+  ```
 - With `taxonomy:`, the run also gates the taxonomy's KPIs on the replayed outputs (see
   [The gate](#the-gate-ship-block-or-inconclusive)) and adds the table to the report, at
   most 200 model judge calls per run. `judge: jev` KPIs read `JEV_API_URL` and
@@ -143,8 +165,9 @@ jobs:
 - Outcomes and exit codes are in the table below.
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
   `cassette-dir`, `taxonomy` (turns on the KPI gate; `taxonomy_path` isn't read here),
-  `fail-on`, `fail-on-inconclusive`, `python-version`, `github-token`, `live`. Outputs:
-  `report-path`, `root-drift-count`, `propagated-drift-count`, `verdict`.
+  `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `tier`,
+  `python-version`, `github-token`, `live`. Outputs: `report-path`, `root-drift-count`,
+  `propagated-drift-count`, `verdict`.
 - Runs on Linux and macOS runners.
 
 ### Outcomes
@@ -153,7 +176,7 @@ jobs:
 |---|---|---|
 | PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI is SHIP. |
 | AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, or a node in the PR's graph raised; the report names the node. A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
-| INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK: shown as ⚠️ `needs_human`, with the cases it still needs. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1, never 2. |
+| INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK (shown as ⚠️ `needs_human`, with the cases it still needs), or replay left nodes not checked: a divergence with `on-divergence: fail`, or a budget hit. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1, never 2. |
 | INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, or a blocking KPI left with no valid judgment on a side. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
 
 A regression found in the same run wins over a judge's infra error: exit 1.

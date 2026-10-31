@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from lgcov.cli import main
+from lgcov.judges import KPI, NodeState, Verdict
 
 
 def test_cli_prints_added_and_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -596,6 +597,7 @@ def test_cli_ci_reports_root_drift_and_sets_outputs(
         "propagated-drift-count": "0",
         "report-path": str(tmp_path / "out" / "report.md"),
         "root-drift-count": "1",
+        "tier": "pr",  # T089: the effective tier, for the Action's nightly upload
         "verdict": "fail",
     }
 
@@ -911,6 +913,93 @@ def test_cli_ci_refuses_more_model_judge_calls_than_max_calls(
     assert "refusing to make 4 model judge calls" in report
 
 
+# T089: classify rewrites the question (the demo's classify has no prompt), so the nodes
+# after it get inputs the recording doesn't have: they diverge.
+def _rewriting_classify() -> str:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    src = demo.replace(
+        'return {"needs_tool": "order" in state["question"].lower()}',
+        'return {"question": state["question"].lower(), '
+        '"needs_tool": "order" in state["question"].lower()}',
+    )
+    assert src != demo
+    return src
+
+
+def test_cli_ci_divergence_flag_reruns_live_and_marks_what_ran_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    code, report, _ = _run_ci(tmp_path)  # on-divergence: flag, the default
+    assert code == 1  # classify is root drift
+    assert "Diverged, so run live (on-divergence: flag): `lookup_order` in run 1, " in report
+    assert "`respond` in run 2" in report
+    assert "Re-executed after divergence: `respond` in run 1." in report
+    assert "(5 live / 0 served)" in report
+
+
+def test_cli_ci_divergence_fail_leaves_the_rest_of_the_run_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    args = ("--on-divergence", "fail", "--fail-on", "never")
+    code, report, outputs = _run_ci(tmp_path, *args)
+    assert (code, outputs["verdict"]) == (0, "pass")  # INCONCLUSIVE exits 0 by default
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: inconclusive, needs a human")
+    assert (
+        "Not checked (on-divergence: fail): run 1 from `lookup_order` (`lookup_order`, "
+        "`respond`), run 2 from `respond` (`respond`)."
+    ) in report
+    assert "Unchanged:" not in report  # never claim a node that wasn't checked
+    code, _, _ = _run_ci(tmp_path, *args, "--fail-on-inconclusive")
+    assert code == 1  # never 2
+
+
+def test_cli_ci_divergence_live_runs_the_rest_of_each_run_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    _, report, _ = _run_ci(tmp_path, "--on-divergence", "live")
+    assert (
+        "Diverged, so the rest of the run ran live (on-divergence: live): `lookup_order` in "
+        "run 1, `respond` in run 2."
+    ) in report
+
+
+def test_cli_ci_budget_hit_leaves_nodes_not_checked_and_is_never_a_harness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    # 0 s: the first live call runs (nothing measured yet), the next one doesn't start.
+    code, report, _ = _run_ci(tmp_path, "--budget-seconds", "0", "--fail-on", "never")
+    assert code == 0
+    assert "· budget 0 s · budget hit at node `lookup_order` after " in report
+    assert "Not checked (budget hit): run 1 from `lookup_order` (`lookup_order`, " in report
+    assert "run 2 from `classify` (`classify`, `respond`)." in report
+    assert "Harness error" not in report
+
+
+def test_cli_ci_timing_line_counts_served_calls_and_its_phases_add_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import itertools
+    import re
+
+    ticks = itertools.count()  # every clock read is 1 s later
+    monkeypatch.setattr("lgcov.cli.perf_counter", lambda: float(next(ticks)))
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--budget-seconds", "900")
+    line = re.search(
+        r"⏱ (\d+) s · agent (\d+) s \(0 live / 5 served\) · judges (\d+) s \(4 calls\) "
+        r"· budget 900 s",
+        report,
+    )
+    assert line is not None, report
+    total, agent, judges = (int(g) for g in line.groups())
+    assert agent > 0 and judges > 0 and agent + judges < total  # the rest is overhead
+
+
 def test_cli_judge_node_crash_is_an_agent_failure(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -976,3 +1065,87 @@ def test_good_change_is_a_real_refactor_of_respond_only() -> None:
     recorded = {s["node"]: s["code"] for s in baseline["runs"][0]["steps"]}
     assert fingerprint(module.respond) != recorded["respond"]
     assert fingerprint(module.classify) == recorded["classify"]
+
+
+# T089 PR B: tiers. pr serves unchanged nodes, judges each case once and never runs a
+# general LLM judge; nightly runs every node live with every judge, k = 3.
+LLM_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: respond_drift
+    description: The answer loses the order status.
+kpis:
+  - name: respond_runs
+    failure_mode: respond_drift
+    node: respond
+    judge: code
+    description: Every run ends by responding.
+    rubric: Did the run visit respond?
+    check: {type: node_visited, node: respond}
+  - name: answer_tone
+    failure_mode: respond_drift
+    node: respond
+    judge: llm
+    description: A general LLM judge, so nightly only.
+    rubric: Is the answer polite?
+"""
+
+
+class _NoCallsJudge:
+    """A general LLM judge client that fails any test that calls it."""
+
+    def __init__(self, kpi: KPI) -> None:
+        self.kpi = kpi
+
+    def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
+        raise AssertionError("the pr tier called a general LLM judge")
+
+
+def test_cli_ci_pr_tier_never_calls_a_general_llm_judge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("lgcov.cli._llm_judge", _NoCallsJudge)
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(LLM_TAXONOMY, encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")  # tier: pr
+    assert code == 0
+    assert "Nightly only (`judge: llm`): `answer_tone`." in report
+    assert "| respond_runs | 2 | 100% | 100% |" in report
+    assert "(0 live / 5 served)" in report and "· budget 90 s" in report
+    assert "tier: `pr`" in report
+
+
+def test_cli_ci_nightly_tier_runs_every_node_live_with_k_3_and_no_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", DEMO_TAXONOMY, "--tier", "nightly")
+    assert code == 0
+    assert "(5 live / 0 served)" in report and "· no budget" in report
+    assert "| answer_states_order_status (n=2, k=3) | 100% | 50% | ⚠️ 50% |" in report
+    assert "tier: `nightly`" in report
+
+
+def test_cli_ci_nightly_llm_kpi_without_a_client_is_infra_error_only_when_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(LLM_TAXONOMY, encoding="utf-8")
+    args = ("--taxonomy", "taxonomy.yaml", "--tier", "nightly")
+    code, report, _ = _run_ci(tmp_path, *args)
+    assert code == 2  # answer_tone blocks: nothing judged it
+    assert "⚠️ No llm client for `answer_tone`: INFRA_ERROR." in report
+    (tmp_path / "lgcov.yaml").write_text("gate: {advisory_kpis: [answer_tone]}\n", encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, *args)
+    assert code == 0  # a misconfigured advisory judge doesn't fail every night
+    assert "⚠️ Skipped, no llm client: `answer_tone` (advisory)." in report
+
+
+def test_cli_ci_links_main_s_latest_nightly_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    url = "https://github.com/o/r/actions/runs/123"
+    _, report, _ = _run_ci(tmp_path, "--nightly-url", url)
+    assert f"Latest nightly run on main: {url}" in report

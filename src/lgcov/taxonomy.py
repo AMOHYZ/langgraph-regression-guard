@@ -12,7 +12,7 @@ from lgcov.code_judges import code_judge
 from lgcov.judges import KPI, Judge
 
 VERSION = 1
-JUDGE_KINDS = ("jev", "code", "fake")
+JUDGE_KINDS = ("jev", "code", "fake", "llm")  # T089: llm, a general LLM judge, nightly only
 BINARY_LABELS = ("pass", "fail")
 
 

@@ -16,6 +16,47 @@ _TITLES = {
 
 
 @dataclass(frozen=True)
+class Timing:
+    """T089: one `lgcov ci` run's wall-clock: total = agent + judges + overhead."""
+
+    total: float
+    agent: float  # replaying the runs: live node calls and serving
+    judges: float = 0.0  # the KPI gate's judge calls
+    live: int = 0  # node calls that ran
+    served: int = 0  # node calls answered from the cassette
+    judge_calls: int = 0
+    tokens: int | None = None
+    budget: float | None = None
+    budget_hit: tuple[str, float] | None = None  # the node it stopped at, seconds elapsed
+
+    @property
+    def overhead(self) -> float:
+        return self.total - self.agent - self.judges
+
+
+def _secs(s: float) -> str:
+    if s >= 10:
+        return f"{s:.0f} s"
+    return f"{s:.2g} s" if s == 0 or s >= 0.01 else "<0.01 s"
+
+
+def format_timing(t: Timing) -> str:
+    """E.g. `⏱ 42 s · agent 31 s (3 live / 1 served) · judges 9 s (12 calls) · budget 90 s`."""
+    parts = [f"⏱ {_secs(t.total)}", f"agent {_secs(t.agent)} ({t.live} live / {t.served} served)"]
+    if t.judge_calls:
+        tokens = ""
+        if t.tokens is not None:
+            tokens = (
+                f", {t.tokens / 1000:.1f}k tokens" if t.tokens >= 1000 else f", {t.tokens} tokens"
+            )
+        parts.append(f"judges {_secs(t.judges)} ({t.judge_calls} calls{tokens})")
+    parts.append("no budget" if t.budget is None else f"budget {_secs(t.budget)}")
+    if t.budget_hit is not None:
+        parts.append(f"budget hit at node `{t.budget_hit[0]}` after {_secs(t.budget_hit[1])}")
+    return " · ".join(parts)
+
+
+@dataclass(frozen=True)
 class CiResult:
     fail_on: FailOn
     exit_code: int
@@ -33,6 +74,9 @@ class CiResult:
     l2_lines: tuple[str, ...] = ()  # T091: the KPI gate table, then the sampling table
     blocked: tuple[str, ...] = ()  # T091: blocking KPIs whose verdict is BLOCK
     inconclusive: tuple[str, ...] = ()  # T091: blocking KPIs that are INCONCLUSIVE
+    not_checked: tuple[str, ...] = ()  # T089: nodes replay stopped before checking
+    timing: Timing | None = None  # T089
+    tier: str = ""  # T089: pr or nightly
 
 
 def _title(r: CiResult, v: ActionVerdict) -> str:
@@ -41,7 +85,7 @@ def _title(r: CiResult, v: ActionVerdict) -> str:
     drifted = drift_exit_code(r.fail_on, len(r.root_drift), len(r.propagated_drift))
     if v == "fail" and not drifted:  # T091: the KPI gate failed it, not drift
         return "🔴 lgcov: KPI regression" if r.blocked else "🔴 lgcov: inconclusive"
-    if v == "pass" and r.inconclusive:
+    if v == "pass" and (r.inconclusive or r.not_checked):
         return "⚠️ lgcov: inconclusive, needs a human"
     return _TITLES[v]
 
@@ -78,8 +122,10 @@ def render_ci_report(r: CiResult) -> str:
     if r.l2_lines:
         lines += ["### KPI gate (L2)", "", *r.l2_lines, ""]
     lines += [*r.notes, ""] if r.notes else []
+    lines += [format_timing(r.timing), ""] if r.timing else []
     lines.append(
-        f"fail-on: `{r.fail_on}` · root drift: {len(r.root_drift)} · "
+        f"fail-on: `{r.fail_on}`{f' · tier: `{r.tier}`' if r.tier else ''} · "
+        f"root drift: {len(r.root_drift)} · "
         f"propagated drift: {len(r.propagated_drift)} · verdict: **{v}**"
     )
     return "\n".join(lines) + "\n"
