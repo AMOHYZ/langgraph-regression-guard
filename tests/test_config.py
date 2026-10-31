@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from lgcov.config import Config, Thresholds, load_config, parse_config
+from lgcov.config import Config, GateConfig, Thresholds, load_config, parse_config
 
 REPO_CONFIG = Path(__file__).resolve().parents[1] / "lgcov.yaml"
 
@@ -98,6 +98,19 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         ({"graph_entrypoint": "a.py:g", "samples_per_case": 0}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": "3"}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": True}, "samples_per_case"),
+        ({"graph_entrypoint": "a.py:g", "gate": {"alpha": 0}}, "alpha"),
+        ({"graph_entrypoint": "a.py:g", "gate": {"power": 1}}, "power"),
+        ({"graph_entrypoint": "a.py:g", "gate": {"margin": -0.1}}, "margin"),
+        ({"graph_entrypoint": "a.py:g", "gate": {"inconclusive_blocks": "yes"}}, "inconclusive"),
+        ({"graph_entrypoint": "a.py:g", "gate": {"advisory_kpis": "tone"}}, "advisory_kpis"),
+        ({"graph_entrypoint": "a.py:g", "gate": {"holm": True}}, "valid keys"),
+        (
+            {
+                "graph_entrypoint": "a.py:g",
+                "gate": {"blocking_kpis": ["a"], "advisory_kpis": ["a"]},
+            },
+            "both blocking and advisory",
+        ),
     ],
 )
 def test_bad_values_name_the_field(raw: dict[str, object], field: str) -> None:
@@ -109,6 +122,31 @@ def test_repo_lgcov_yaml_is_valid() -> None:
     cfg = load_config(REPO_CONFIG)
     assert cfg.graph_entrypoint == "examples/demo_agent/graph.py:graph"
     assert (REPO_CONFIG.parent / cfg.cassette_dir / "baseline.json").is_file()
+
+
+def test_gate_defaults() -> None:
+    # T091: alpha 0.05, power 0.8, margin 0.05; every KPI blocks; INCONCLUSIVE exits 0.
+    gate = parse_config({"graph_entrypoint": "a.py:g"}).gate
+    assert gate == GateConfig(0.05, 0.8, 0.05, None, (), False)
+
+
+def test_gate_section_loads_typed(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "graph_entrypoint: a.py:g\n"
+        "gate:\n  alpha: 0.01\n  power: 0.9\n  margin: 0.02\n"
+        "  blocking_kpis: [grounded]\n  advisory_kpis: [tone]\n  inconclusive_blocks: true\n",
+    )
+    assert load_config(path).gate == GateConfig(0.01, 0.9, 0.02, ("grounded",), ("tone",), True)
+
+
+def test_gate_advisory_kpis() -> None:
+    kpis = ["grounded", "tone", "polite"]
+    assert GateConfig().advisory(kpis) == frozenset()
+    assert GateConfig(advisory_kpis=("tone",)).advisory(kpis) == {"tone"}
+    assert GateConfig(blocking_kpis=("grounded",)).advisory(kpis) == {"tone", "polite"}
+    with pytest.raises(ValueError, match=r"\['typo'\]"):
+        GateConfig(advisory_kpis=("typo",)).advisory(kpis)
 
 
 def test_samples_per_case_defaults_to_one_and_reads_from_the_file() -> None:

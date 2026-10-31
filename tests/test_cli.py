@@ -779,9 +779,51 @@ def test_cli_judge_samples_three_and_shows_a_flaky_row(
     assert main([*_judge_args(tmp_path), "--taxonomy", DEMO_TAXONOMY, "--samples", "3"]) == 0
     out = capsys.readouterr().out
     assert "Planned: 24 judge calls, 12 to model judges (--max-calls 200)" in out
-    assert "| 🟢 respond_runs (n=2, k=3) | 100% | 100% | 0% |" in out
-    assert "| 🟢 answer_states_order_status (n=2, k=3) | 100% | 50% | ⚠️ 50% |" in out
+    assert "| respond_runs (n=2, k=3) | 100% | 100% | 0% |" in out
+    assert "| answer_states_order_status (n=2, k=3) | 100% | 50% | ⚠️ 50% |" in out
     assert "Top flaky cases, answer_states_order_status: `run-0/respond`" in out
+    # T091: the paired gate table; the same flaky case on both sides is no change, and
+    # with no spread in the differences there is no MDE to give.
+    assert "| KPI | n | base | PR | Δ (95% CI) | p adj. | δ | MDE | N* | verdict | root |" in out
+    assert (
+        "| answer_states_order_status | 2 | 83% | 83% | +0.00 [+0.00, +0.00] | 1.000 | 0.05 "
+        "| — | — | 🟢 SHIP | — |"
+    ) in out
+
+
+# T091: base passes both cases and the PR fails its order case: n=2 can't decide that.
+UNDECIDED_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: respond_drift
+    description: The answer loses the order status.
+kpis:
+  - name: answer_states_order_status
+    failure_mode: respond_drift
+    node: respond
+    judge: fake
+    description: The 2nd order answer judged fails; with k=1 that is the PR's.
+    rubric: Does the answer state the order's status?
+    check: {fail_every: "2", when_input_contains: "order"}
+"""
+
+
+def test_cli_judge_inconclusive_exits_zero_unless_gate_inconclusive_blocks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    taxonomy = tmp_path / "taxonomy.yaml"
+    taxonomy.write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    args = [*_judge_args(tmp_path), "--taxonomy", str(taxonomy)]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "| answer_states_order_status | 2 | 100% | 50% |" in out
+    assert "⚠️ INCONCLUSIVE" in out
+    assert "| ⚠️ underpowered: need 6 more cases for answer_states_order_status (N*=8) |" in out
+    config = tmp_path / "lgcov.yaml"
+    config.write_text("gate: {inconclusive_blocks: true}\n", encoding="utf-8")
+    assert main([*args, "--config", str(config)]) == 1
+    assert main([*args, "--fail-on-inconclusive"]) == 1
 
 
 def test_cli_judge_refuses_more_model_calls_than_max_calls(
@@ -839,6 +881,34 @@ def test_cli_ci_missing_cassette_is_a_harness_error(
     code, report, _ = _run_ci(tmp_path)
     assert code == 2
     assert "⚠️ Harness error, not a regression" in report
+
+
+# T091: with a taxonomy, the Action's run gates the KPIs and the PR comment shows the table.
+def test_cli_ci_gates_kpis_and_fails_on_inconclusive_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    assert (code, outputs["verdict"]) == (0, "pass")
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: inconclusive, needs a human")
+    assert "| answer_states_order_status | 2 | 100% | 50% |" in report
+    assert "| ⚠️ underpowered: need 6 more cases for answer_states_order_status" in report
+    code, report, outputs = _run_ci(
+        tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on-inconclusive"
+    )
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: inconclusive")
+
+
+def test_cli_ci_refuses_more_model_judge_calls_than_max_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--max-calls", "3")
+    assert code == 2  # 4 model judge calls planned: a harness limit, not a regression
+    assert "refusing to make 4 model judge calls" in report
 
 
 def test_cli_judge_node_crash_is_an_agent_failure(

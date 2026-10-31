@@ -173,6 +173,14 @@ def benjamini_hochberg(pvalues: Sequence[float], alpha: float = 0.05) -> list[bo
     return reject
 
 
+def benjamini_hochberg_adjusted(pvalues: Sequence[float]) -> list[float]:
+    m, adjusted, running = len(pvalues), [1.0] * len(pvalues), 1.0
+    for rank, i in reversed(list(enumerate(_order(pvalues)))):
+        running = min(running, m * pvalues[i] / (rank + 1))
+        adjusted[i] = running
+    return adjusted
+
+
 def decide(
     delta: float, ci: tuple[float, float], margin: float = 0.05, significant: bool = True
 ) -> Decision:

@@ -37,10 +37,10 @@ TPR/TNR.
 test and reports a p-value and an effect size, where Reenact gates on a fixed score
 tolerance (0.05) and EvalView on fixed score thresholds, or in its statistical mode on a
 fixed pass rate (by default 80% of 10 runs).
-*Status: partly shipped.* Today's gate fails only when the 95% bootstrap interval of the
-base-to-PR score drop clears the tolerance. It resamples the two sides independently and
-reports no p-value or effect size yet. EvalView's statistical mode does report
-confidence intervals, for one version's pass rate.
+*Status: shipped (T091).* Each case's base and PR scores are paired (exact McNemar, or a
+sign-flip test), with Δ, its 95% CI, a Holm-adjusted p-value, the MDE and the cases still
+needed (N*), and a non-inferiority margin decides SHIP, BLOCK or INCONCLUSIVE. EvalView's
+statistical mode does report confidence intervals, for one version's pass rate.
 
 **(e) Human override recalibrates the judges.** When a reviewer overrides a verdict, that
 label feeds back into the judge for that KPI.
@@ -50,7 +50,7 @@ already uses human labels to set each criterion's gate level.
 
 ## Where that leaves us
 
-(a) is the clear lead today, and (d) is partly ahead. (b), (c) and (e) are still to
+(a) and (d) are ahead today. (b), (c) and (e) are still to
 build, and Reenact already ships simpler versions of all three.
 
 ## How this was checked
@@ -61,8 +61,8 @@ build, and Reenact already ships simpler versions of all three.
   EvalView: `core/types.py` (`VarianceConfig`: 10 runs, 0.8 pass rate, 0.95 confidence
   level) and `core/root_cause.py` (deterministic root-tool attribution, optional AI
   enrichment).
-- lgcov: `cassette.py` (`replay`, `diff_cassettes`), `judge_gate.py`
-  (`bootstrap_drop_ci`) and `review.py` (`apply_decision`).
+- lgcov: `cassette.py` (`replay`, `diff_cassettes`), `stats.py` (`paired_test`,
+  `holm`) and `review.py` (`apply_decision`).
 - Not yet compared live: Reenact records LangChain chat-model and tool calls through
   callbacks, and the demo agent's fake LLM is plain Python, so Reenact would record
   nothing on demo PR #7. A fair run needs the demo to call a LangChain chat model.

@@ -14,7 +14,7 @@ inputs:
     required: false
     default: ""
   taxonomy:
-    description: "taxonomy.yaml to validate. Empty skips L2; judges don't run in the Action yet."
+    description: "taxonomy.yaml whose KPIs gate the PR (L2, paired test per KPI). Empty skips L2."
     required: false
     default: ""
   fail-on:
@@ -31,6 +31,10 @@ inputs:
     default: ${{ github.token }}
   live:
     description: "true runs every node live; false (default) serves unchanged nodes from the cassette."
+    required: false
+    default: "false"
+  fail-on-inconclusive:
+    description: "true: an INCONCLUSIVE blocking KPI exits 1 (default false: 0, shown as ⚠️). Never 2."
     required: false
     default: "false"
 
@@ -56,6 +60,7 @@ runs:
       env:
         FAIL_ON: ${{ inputs.fail-on }}
         LIVE: ${{ inputs.live }}
+        FAIL_ON_INCONCLUSIVE: ${{ inputs.fail-on-inconclusive }}
       run: |
         case "$FAIL_ON" in
           root-drift|any-drift|never) ;;
@@ -68,6 +73,13 @@ runs:
           true|false) ;;
           *)
             echo "::error title=lgcov::live must be true or false; got '$LIVE'"
+            exit 2
+            ;;
+        esac
+        case "$FAIL_ON_INCONCLUSIVE" in
+          true|false) ;;
+          *)
+            echo "::error title=lgcov::fail-on-inconclusive must be true or false; got '$FAIL_ON_INCONCLUSIVE'"
             exit 2
             ;;
         esac
@@ -174,6 +186,7 @@ runs:
         BASE_DIR: ${{ steps.base.outputs.dir }}
         HARNESS_ERROR: ${{ steps.install.outputs.harness-error }}
         LIVE: ${{ inputs.live }}
+        FAIL_ON_INCONCLUSIVE: ${{ inputs.fail-on-inconclusive }}
         COVERAGE_BASELINE: ${{ steps.coverage-main.outputs.path }}
       run: |
         # Actions runs bash with -e; this step checks exit codes itself.
@@ -187,6 +200,7 @@ runs:
         args+=(--coverage-out "$RUNNER_TEMP/lgcov/coverage.json")
         [ -n "$COVERAGE_BASELINE" ] && args+=(--coverage-baseline "$COVERAGE_BASELINE")
         [ "$LIVE" = "true" ] && args+=(--live)
+        [ "$FAIL_ON_INCONCLUSIVE" = "true" ] && args+=(--fail-on-inconclusive)
         if [ -n "$HARNESS_ERROR" ]; then
           # The project didn't install; lgcov alone is enough to render the harness report.
           uvx --from "$ACTION_PATH" lgcov "${args[@]}" --harness-error "$HARNESS_ERROR"

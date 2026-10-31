@@ -28,7 +28,7 @@ from lgcov.cassette import (
 from lgcov.ci_report import CiResult, render_ci_report
 from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
-from lgcov.config import load_config
+from lgcov.config import Config, GateConfig, load_config
 from lgcov.coverage import (
     CoverageSnapshot,
     coverage_delta,
@@ -39,7 +39,15 @@ from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, ve
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import FakeJudge, Judge, NodeState
-from lgcov.sampling import judge_samples, kpi_stats, render_kpi_table
+from lgcov.sampling import (
+    KpiStats,
+    gate_exit_code,
+    gate_kpis,
+    judge_samples,
+    kpi_stats,
+    render_gate_table,
+    render_kpi_table,
+)
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.taxonomy import KPISpec, load_taxonomy
 
@@ -126,14 +134,19 @@ def _drift_kinds(
     counts: dict[str, int] = {}
     roots: set[str] = set()
     for run, run_drifts in zip(runs, drifts, strict=True):
-        drifted = {d.node for d in run_drifts}
-        for node in drifted:
+        for node in {d.node for d in run_drifts}:
             counts[node] = counts.get(node, 0) + 1
-        # nodes the change added are not in the baseline steps; they sort last
-        ordered = [s.node for s in run.steps if s.node in drifted] + sorted(drifted)
-        if ordered:
-            roots.add(ordered[0])
+        root = _run_root(run, run_drifts)
+        if root:
+            roots.add(root)
     return counts, roots
+
+
+def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
+    drifted = {d.node for d in run_drifts}
+    # nodes the change added are not in the baseline steps; they sort last
+    ordered = [s.node for s in run.steps if s.node in drifted] + sorted(drifted)
+    return ordered[0] if ordered else None
 
 
 def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[str]:
@@ -177,6 +190,7 @@ def _node_failure(prog: str, exc: NodeError) -> int:
 
 
 _LIVE_HELP = "re-run every node; by default a node whose code and input match is served"
+_INCONCLUSIVE_HELP = "exit 1 on an INCONCLUSIVE blocking KPI; overrides gate.inconclusive_blocks"
 
 
 def _fail_on_arg(value: str) -> FailOn:
@@ -479,16 +493,17 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         cfg = load_config(args.config, overrides)
     except (OSError, ValueError) as exc:
         return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
-    notes: list[str] = []
+    l2 = None
     if args.taxonomy:
         try:
-            tax = load_taxonomy(args.taxonomy)
+            specs = list(load_taxonomy(args.taxonomy).kpi_specs)
+            l2 = (specs, [_l2_judge(spec) for spec in specs])
         except (OSError, ValueError) as exc:
             return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid taxonomy: {exc}")
-        notes.append(
-            f"Taxonomy `{args.taxonomy}`: {len(tax.kpi_specs)} KPIs, validated. "
-            "L2 judges don't run in the Action yet."
-        )
+        try:
+            cfg.gate.advisory([spec.name for spec in specs])
+        except ValueError as exc:
+            return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
     try:
         # Exception: importing user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
@@ -498,7 +513,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
             fail_on, EXIT_ERROR, harness_error=_harness_message("cannot load graph", exc)
         )
     graph_lines, graph_note = _base_diff(args.base_dir, cfg.graph_entrypoint, head)
-    partial = CiResult(fail_on, EXIT_ERROR, tuple(graph_lines), graph_note, notes=tuple(notes))
+    partial = CiResult(fail_on, EXIT_ERROR, tuple(graph_lines), graph_note)
     try:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -527,16 +542,52 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         Path(args.coverage_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.coverage_out).write_text(cov.to_json(), encoding="utf-8")
     base, note = _coverage_baseline(args.coverage_baseline)
-    return replace(
+    drift_code = drift_exit_code(fail_on, len(root), len(downstream))
+    result = replace(
         partial,
-        exit_code=drift_exit_code(fail_on, len(root), len(downstream)),
+        exit_code=drift_code,
         replay_lines=tuple(_replay_markdown(runs, drifts)),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
-        notes=(*partial.notes, note) if note else partial.notes,
+        notes=(note,) if note else (),
     )
+    if l2 is None:
+        return result
+    try:
+        stats, gate = _ci_gate(args, cfg, *l2, runs, replays)
+    except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
+        msg = _harness_message("L2 gate failed", exc)
+        return replace(result, exit_code=drift_code or EXIT_ERROR, harness_error=msg)
+    gate_code = gate_exit_code(stats, gate.inconclusive_blocks)
+    return replace(
+        result,
+        exit_code=1 if 1 in (drift_code, gate_code) else max(drift_code, gate_code),
+        l2_lines=(*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)),
+        blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
+        inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
+    )
+
+
+def _ci_gate(
+    args: argparse.Namespace,
+    cfg: Config,
+    specs: list[KPISpec],
+    judges: list[Judge],
+    runs: list[Cassette],
+    replays: list[tuple[list[Drift], list[Step]]],
+) -> tuple[list[KpiStats], GateConfig]:
+    """T091: the L2 gate on recorded vs replayed outputs, as `lgcov judge` runs it."""
+    plan = _l2_plan(specs, runs, replays)
+    _, model = _l2_calls(plan, cfg.samples_per_case)
+    if model > args.max_calls:
+        raise ValueError(
+            f"refusing to make {model} model judge calls (more than --max-calls "
+            f"{args.max_calls}); lower samples_per_case or raise --max-calls"
+        )
+    gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
+    return _l2_gate(plan, judges, cfg.samples_per_case, gate, runs, replays), gate
 
 
 def _coverage_baseline(path: str | None) -> tuple[CoverageSnapshot | None, str]:
@@ -557,7 +608,7 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
     ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
     ap.add_argument("--cassette-dir", help="overrides cassette_dir")
-    ap.add_argument("--taxonomy", help="validate this taxonomy.yaml (L2 doesn't run yet)")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml: gate its KPIs (L2) on the replay")
     ap.add_argument("--base-dir", help="checkout of the PR's base commit, for the graph diff")
     ap.add_argument("--fail-on", type=_fail_on_arg, default="root-drift", help="exit 1 on")
     ap.add_argument("--harness-error", help="an earlier step failed; report it and exit 2")
@@ -565,6 +616,8 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--coverage-out", help="write this run's coverage.json here")
     ap.add_argument("--coverage-baseline", help="main's coverage.json; missing = no baseline yet")
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""), help="commit SHA")
+    ap.add_argument("--max-calls", type=int, default=200, help="refuse more model judge calls")
+    ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()
@@ -607,9 +660,12 @@ def _l2_judge(spec: KPISpec) -> Judge:
     return JevJudge(kpi)
 
 
-def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> dict[str, tuple[NodeState, NodeState]]:
+_Cases = dict[str, tuple[NodeState, NodeState]]
+
+
+def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> _Cases:
     """One case per run: the trace for code judges, else the node's own input and output."""
-    cases: dict[str, tuple[NodeState, NodeState]] = {}
+    cases: _Cases = {}
     for i, steps in enumerate(runs):
         case_id = f"run-{i}/{spec.node}"
         if spec.judge == "code":
@@ -626,6 +682,50 @@ def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> dict[str, tuple[NodeStat
     return cases
 
 
+def _l2_plan(
+    specs: list[KPISpec], runs: list[Cassette], replays: list[tuple[list[Drift], list[Step]]]
+) -> list[tuple[KPISpec, _Cases, _Cases]]:
+    base, fresh = [r.steps for r in runs], [steps for _, steps in replays]
+    return [(spec, _l2_cases(spec, base), _l2_cases(spec, fresh)) for spec in specs]
+
+
+def _l2_calls(plan: list[tuple[KPISpec, _Cases, _Cases]], k: int) -> tuple[int, int]:
+    """Judge calls in all, and those to model judges (every judge but code ones)."""
+    total = sum((len(b) + len(n)) * k for _, b, n in plan)
+    return total, sum((len(b) + len(n)) * k for spec, b, n in plan if spec.judge != "code")
+
+
+def _l2_gate(
+    plan: list[tuple[KPISpec, _Cases, _Cases]],
+    judges: list[Judge],
+    k: int,
+    gate: GateConfig,
+    runs: list[Cassette],
+    replays: list[tuple[list[Drift], list[Step]]],
+) -> list[KpiStats]:
+    """T091: k samples per case on both sides, each case paired, then gated across KPIs."""
+    run_roots = [_run_root(r, d) for r, (d, _) in zip(runs, replays, strict=True)]
+    stats = []
+    for (spec, base, new), judge in zip(plan, judges, strict=True):
+        base_samples = {c: judge_samples(judge, i, o, k) for c, (i, o) in base.items()}
+        new_samples = {c: judge_samples(judge, i, o, k) for c, (i, o) in new.items()}
+        roots = {f"run-{i}/{spec.node}": r for i, r in enumerate(run_roots) if r}
+        stats.append(
+            kpi_stats(
+                spec.to_kpi(),
+                k,
+                base_samples,
+                new_samples,
+                gate.margin if spec.margin is None else spec.margin,
+                code=spec.judge == "code",
+                alpha=gate.alpha,
+                power=gate.power,
+                case_roots=roots,
+            )
+        )
+    return gate_kpis(stats, gate.advisory([spec.name for spec, _, _ in plan]), gate.alpha)
+
+
 def _judge_cmd(argv: list[str]) -> int:
     """T073: the taxonomy's judges, k samples per case, on recorded and fresh outputs."""
     ap = argparse.ArgumentParser(prog="lgcov judge")
@@ -636,6 +736,7 @@ def _judge_cmd(argv: list[str]) -> int:
     ap.add_argument("--samples", type=int, help="k samples per case; overrides samples_per_case")
     ap.add_argument("--max-calls", type=int, default=200, help="refuse more model judge calls")
     ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
+    ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
     args = ap.parse_args(argv)
     overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
     try:
@@ -643,6 +744,7 @@ def _judge_cmd(argv: list[str]) -> int:
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
         return EXIT_ERROR
+    gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
     k = cfg.samples_per_case if args.samples is None else args.samples
     taxonomy_path = args.taxonomy or cfg.taxonomy_path
     if k < 1 or not taxonomy_path:
@@ -652,10 +754,15 @@ def _judge_cmd(argv: list[str]) -> int:
         )
         return EXIT_ERROR
     try:
-        specs = load_taxonomy(taxonomy_path).kpi_specs
+        specs = list(load_taxonomy(taxonomy_path).kpi_specs)
         judges = [_l2_judge(spec) for spec in specs]
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid taxonomy: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        gate.advisory([spec.name for spec in specs])
+    except ValueError as exc:
+        print(f"lgcov judge: invalid config: {exc}", file=sys.stderr)
         return EXIT_ERROR
     try:
         # Exception: importing user graph code can raise anything.
@@ -667,15 +774,13 @@ def _judge_cmd(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return _harness_error("lgcov judge", "cannot read baseline", exc)
     try:
-        fresh = [replay_steps(graph, r, cfg.ignore_paths, serve=not args.live)[1] for r in runs]
+        replays = [replay_steps(graph, r, cfg.ignore_paths, serve=not args.live) for r in runs]
     except NodeError as exc:
         return _node_failure("lgcov judge", exc)
     except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
         return _harness_error("lgcov judge", "replay failed outside node code", exc)
-    base_runs = [r.steps for r in runs]
-    plan = [(spec, _l2_cases(spec, base_runs), _l2_cases(spec, fresh)) for spec in specs]
-    total = sum((len(b) + len(n)) * k for _, b, n in plan)
-    model = sum((len(b) + len(n)) * k for spec, b, n in plan if spec.judge != "code")
+    plan = _l2_plan(specs, runs, replays)
+    total, model = _l2_calls(plan, k)
     print(f"Planned: {total} judge calls, {model} to model judges (--max-calls {args.max_calls})")
     if model > args.max_calls:
         print(
@@ -684,16 +789,11 @@ def _judge_cmd(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return EXIT_ERROR
-    stats = []
-    for (spec, base, new), judge in zip(plan, judges, strict=True):
-        base_samples = {c: judge_samples(judge, i, o, k) for c, (i, o) in base.items()}
-        new_samples = {c: judge_samples(judge, i, o, k) for c, (i, o) in new.items()}
-        stats.append(
-            kpi_stats(spec.to_kpi(), k, base_samples, new_samples, code=spec.judge == "code")
-        )
-    print("\n".join(render_kpi_table(stats)))
-    outcomes = {s.outcome for s in stats}
-    return 1 if "fail" in outcomes else EXIT_ERROR if "infra_error" in outcomes else 0
+    stats = _l2_gate(plan, judges, k, gate, runs, replays)
+    print(
+        "\n".join([*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)])
+    )
+    return gate_exit_code(stats, gate.inconclusive_blocks)
 
 
 @dataclass(frozen=True)
@@ -752,6 +852,8 @@ def _selfcheck_cmd(argv: list[str]) -> int:
                 coverage_out=None,
                 coverage_baseline=None,
                 commit="",
+                max_calls=200,
+                fail_on_inconclusive=False,
             )
         )
         actual = Outcome(result.exit_code)
