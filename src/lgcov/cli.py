@@ -10,22 +10,29 @@ import sys
 from dataclasses import asdict, dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
+from time import perf_counter
 from types import CodeType
 from typing import Any
 
 import yaml
 
 from lgcov.cassette import (
+    ON_DIVERGENCE,
+    Budget,
     Cassette,
     Drift,
     NodeError,
+    OnDivergence,
+    Replay,
     Step,
     accept_nodes,
     record,
     replay,
+    replay_run,
     replay_steps,
+    unservable,
 )
-from lgcov.ci_report import CiResult, render_ci_report
+from lgcov.ci_report import CiResult, Timing, render_ci_report
 from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import Config, GateConfig, load_config
@@ -149,7 +156,9 @@ def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
     return ordered[0] if ordered else None
 
 
-def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[str]:
+def _replay_markdown(
+    runs: list[Cassette], drifts: list[list[Drift]], not_checked: tuple[str, ...] = ()
+) -> list[str]:
     """Per-node drift table: root or downstream, and in how many runs."""
     counts, roots = _drift_kinds(runs, drifts)
     lines = ["### Cassette replay", ""]
@@ -159,9 +168,32 @@ def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[st
     for node in sorted(counts):
         kind = "root" if node in roots else "downstream"
         lines.append(f"| `{node}` | {kind} | {counts[node]}/{len(runs)} |")
-    unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys())
+    unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys() - set(not_checked))
     if unchanged:
         lines += ["", "Unchanged: " + ", ".join(f"`{n}`" for n in unchanged)]
+    return lines
+
+
+def _divergence_lines(replays: list[Replay], on_divergence: OnDivergence) -> list[str]:
+    """T089: the runs that diverged from the recording, and what that did to them."""
+    runs = list(enumerate(replays, 1))
+    calls = [(f"`{c.node}` in run {i}", c.how) for i, r in runs for c in r.calls]
+    first = [where for where, how in calls if how == "diverged"]
+    after = [where for where, how in calls if how == "after_divergence"]
+    lines = []
+    if first and on_divergence == "flag":
+        lines.append(f"Diverged, so run live (on-divergence: flag): {', '.join(first)}.")
+        lines += [f"Re-executed after divergence: {', '.join(after)}."] if after else []
+    if first and on_divergence == "live":
+        what = "Diverged, so the rest of the run ran live (on-divergence: live)"
+        lines.append(f"{what}: {', '.join(first)}.")
+    for why, label in (("diverged", "on-divergence: fail"), ("budget", "budget hit")):
+        stopped = [
+            f"run {i} from `{r.halt.node}` ({', '.join(f'`{n}`' for n in r.not_checked)})"
+            for i, r in runs
+            if r.halt is not None and r.halt.why == why
+        ]
+        lines += [f"Not checked ({label}): {', '.join(stopped)}."] if stopped else []
     return lines
 
 
@@ -191,6 +223,16 @@ def _node_failure(prog: str, exc: NodeError) -> int:
 
 _LIVE_HELP = "re-run every node; by default a node whose code and input match is served"
 _INCONCLUSIVE_HELP = "exit 1 on an INCONCLUSIVE blocking KPI; overrides gate.inconclusive_blocks"
+
+
+def _budget_arg(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = -1.0
+    if not seconds >= 0:  # also catches nan
+        raise argparse.ArgumentTypeError(f"must be a number of seconds >= 0, got {value!r}")
+    return seconds
 
 
 def _fail_on_arg(value: str) -> FailOn:
@@ -485,6 +527,8 @@ def _base_diff(base_dir: str | None, target: str, head: GraphSnapshot) -> tuple[
 
 
 def _ci_result(args: argparse.Namespace) -> CiResult:
+    start = perf_counter()
+    budget = Budget(args.budget_seconds, perf_counter)  # T089: from the start of the run
     fail_on: FailOn = args.fail_on
     if args.harness_error:
         return CiResult(fail_on, EXIT_ERROR, harness_error=args.harness_error)
@@ -518,8 +562,13 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
+    budget.expected_live = sum(len(r.steps) for r in runs) if args.live else unservable(graph, runs)
+    agent_start = perf_counter()
     try:
-        replays = [replay_steps(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
+        replays = [
+            replay_run(graph, run, cfg.ignore_paths, not args.live, args.on_divergence, budget)
+            for run in runs
+        ]
     except NodeError as exc:
         original = f"{type(exc.original).__name__}: {exc.original}"
         if exc.transport:
@@ -533,40 +582,71 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     except Exception as exc:  # replay itself, or a router / subgraph (not attributed yet, T109)
         msg = _harness_message("replay failed outside node code", exc)
         return replace(partial, harness_error=msg)
-    drifts = [d for d, _ in replays]
+    agent = perf_counter() - agent_start
+    pairs = [(list(r.drifts), list(r.steps)) for r in replays]
+    drifts = [d for d, _ in pairs]
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
     # T083: coverage of the runs replay just did; nothing executes again for it.
-    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in replays], args.commit)
+    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in pairs], args.commit)
     if args.coverage_out:
         Path(args.coverage_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.coverage_out).write_text(cov.to_json(), encoding="utf-8")
     base, note = _coverage_baseline(args.coverage_baseline)
+    # T089: nodes a run stopped before (divergence or budget) are INCONCLUSIVE, never a fail.
+    not_checked = tuple(dict.fromkeys(n for r in replays for n in r.not_checked))
+    blocks = args.fail_on_inconclusive or cfg.gate.inconclusive_blocks
     drift_code = drift_exit_code(fail_on, len(root), len(downstream))
+    l1_code = max(drift_code, int(blocks and bool(not_checked)))
+    diverged = _divergence_lines(replays, args.on_divergence)
+    calls = [c for r in replays for c in r.calls]
+    timing = Timing(
+        0.0,
+        agent,
+        live=sum(1 for c in calls if c.how != "served"),
+        served=sum(1 for c in calls if c.how == "served"),
+        budget=args.budget_seconds,
+        budget_hit=budget.hit,
+    )
     result = replace(
         partial,
-        exit_code=drift_code,
-        replay_lines=tuple(_replay_markdown(runs, drifts)),
+        exit_code=l1_code,
+        replay_lines=(
+            *_replay_markdown(runs, drifts, not_checked),
+            *([""] if diverged else []),
+            *diverged,
+        ),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
         notes=(note,) if note else (),
+        not_checked=not_checked,
+        timing=replace(timing, total=perf_counter() - start),
     )
     if l2 is None:
         return result
+    judge_start = perf_counter()
     try:
-        stats, gate = _ci_gate(args, cfg, *l2, runs, replays)
+        stats, gate = _ci_gate(args, cfg, *l2, runs, pairs)
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
-        return replace(result, exit_code=drift_code or EXIT_ERROR, harness_error=msg)
+        return replace(result, exit_code=l1_code or EXIT_ERROR, harness_error=msg)
+    tokens = [s.tokens_total for s in stats if s.tokens_total]  # code judges report 0
+    judged = replace(
+        timing,
+        judges=perf_counter() - judge_start,
+        judge_calls=sum(s.samples for s in stats),
+        tokens=sum(tokens) if tokens else None,
+    )
     gate_code = gate_exit_code(stats, gate.inconclusive_blocks)
     return replace(
         result,
-        exit_code=1 if 1 in (drift_code, gate_code) else max(drift_code, gate_code),
+        exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code),
         l2_lines=(*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)),
         blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
         inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
+        timing=replace(judged, total=perf_counter() - start),
     )
 
 
@@ -618,6 +698,18 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""), help="commit SHA")
     ap.add_argument("--max-calls", type=int, default=200, help="refuse more model judge calls")
     ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
+    ap.add_argument(
+        "--on-divergence",
+        choices=ON_DIVERGENCE,
+        default="flag",
+        help="a served node's input no longer matches: flag (run it live), live (run the "
+        "rest of the run live) or fail (leave the rest of the run not checked)",
+    )
+    ap.add_argument(
+        "--budget-seconds",
+        type=_budget_arg,
+        help="stop starting live node calls once the run is projected to take longer",
+    )
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()
@@ -854,6 +946,8 @@ def _selfcheck_cmd(argv: list[str]) -> int:
                 commit="",
                 max_calls=200,
                 fail_on_inconclusive=False,
+                on_divergence="flag",
+                budget_seconds=None,
             )
         )
         actual = Outcome(result.exit_code)

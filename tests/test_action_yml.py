@@ -40,6 +40,8 @@ def test_action_is_composite_with_the_documented_inputs_and_outputs() -> None:
         "github-token": "${{ github.token }}",
         "live": "false",
         "fail-on-inconclusive": "false",
+        "on-divergence": "flag",
+        "budget-seconds": "",
     }
     assert set(_dict(action["outputs"])) == {
         "report-path",
@@ -97,6 +99,18 @@ def test_fail_on_inconclusive_is_checked_first_and_reaches_lgcov_ci() -> None:
     assert "--fail-on-inconclusive" in str(run["run"])
 
 
+def test_divergence_and_budget_inputs_are_checked_first_and_reach_lgcov_ci() -> None:
+    # T089: a served node whose input diverged, and a wall-clock budget for live calls.
+    first = str(_steps()[0].get("run", ""))
+    assert "on-divergence must be one of fail, flag, live" in first
+    assert "budget-seconds must be a number of seconds" in first
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    env = _dict(run["env"])
+    assert env["ON_DIVERGENCE"] == "${{ inputs.on-divergence }}"
+    assert env["BUDGET_SECONDS"] == "${{ inputs.budget-seconds }}"
+    assert "--on-divergence" in str(run["run"]) and "--budget-seconds" in str(run["run"])
+
+
 def test_release_ignores_the_floating_v0_tag() -> None:
     workflow = _yaml(ROOT / ".github" / "workflows" / "release.yml")
     push = _dict(_dict(workflow.get("on", workflow.get(True)))["push"])
@@ -151,6 +165,8 @@ def test_run_step_survives_drift_under_github_bash_flags(tmp_path: Path) -> None
         "HARNESS_ERROR": "",
         "LIVE": "false",
         "FAIL_ON_INCONCLUSIVE": "false",
+        "ON_DIVERGENCE": "flag",
+        "BUDGET_SECONDS": "",
         "COVERAGE_BASELINE": "",
     }
     script = _step("Run lgcov")

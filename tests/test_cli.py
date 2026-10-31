@@ -911,6 +911,93 @@ def test_cli_ci_refuses_more_model_judge_calls_than_max_calls(
     assert "refusing to make 4 model judge calls" in report
 
 
+# T089: classify rewrites the question (the demo's classify has no prompt), so the nodes
+# after it get inputs the recording doesn't have: they diverge.
+def _rewriting_classify() -> str:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    src = demo.replace(
+        'return {"needs_tool": "order" in state["question"].lower()}',
+        'return {"question": state["question"].lower(), '
+        '"needs_tool": "order" in state["question"].lower()}',
+    )
+    assert src != demo
+    return src
+
+
+def test_cli_ci_divergence_flag_reruns_live_and_marks_what_ran_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    code, report, _ = _run_ci(tmp_path)  # on-divergence: flag, the default
+    assert code == 1  # classify is root drift
+    assert "Diverged, so run live (on-divergence: flag): `lookup_order` in run 1, " in report
+    assert "`respond` in run 2" in report
+    assert "Re-executed after divergence: `respond` in run 1." in report
+    assert "(5 live / 0 served)" in report
+
+
+def test_cli_ci_divergence_fail_leaves_the_rest_of_the_run_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    args = ("--on-divergence", "fail", "--fail-on", "never")
+    code, report, outputs = _run_ci(tmp_path, *args)
+    assert (code, outputs["verdict"]) == (0, "pass")  # INCONCLUSIVE exits 0 by default
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: inconclusive, needs a human")
+    assert (
+        "Not checked (on-divergence: fail): run 1 from `lookup_order` (`lookup_order`, "
+        "`respond`), run 2 from `respond` (`respond`)."
+    ) in report
+    assert "Unchanged:" not in report  # never claim a node that wasn't checked
+    code, _, _ = _run_ci(tmp_path, *args, "--fail-on-inconclusive")
+    assert code == 1  # never 2
+
+
+def test_cli_ci_divergence_live_runs_the_rest_of_each_run_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    _, report, _ = _run_ci(tmp_path, "--on-divergence", "live")
+    assert (
+        "Diverged, so the rest of the run ran live (on-divergence: live): `lookup_order` in "
+        "run 1, `respond` in run 2."
+    ) in report
+
+
+def test_cli_ci_budget_hit_leaves_nodes_not_checked_and_is_never_a_harness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    # 0 s: the first live call runs (nothing measured yet), the next one doesn't start.
+    code, report, _ = _run_ci(tmp_path, "--budget-seconds", "0", "--fail-on", "never")
+    assert code == 0
+    assert "· budget 0 s · budget hit at node `lookup_order` after " in report
+    assert "Not checked (budget hit): run 1 from `lookup_order` (`lookup_order`, " in report
+    assert "run 2 from `classify` (`classify`, `respond`)." in report
+    assert "Harness error" not in report
+
+
+def test_cli_ci_timing_line_counts_served_calls_and_its_phases_add_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import itertools
+    import re
+
+    ticks = itertools.count()  # every clock read is 1 s later
+    monkeypatch.setattr("lgcov.cli.perf_counter", lambda: float(next(ticks)))
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--budget-seconds", "900")
+    line = re.search(
+        r"⏱ (\d+) s · agent (\d+) s \(0 live / 5 served\) · judges (\d+) s \(4 calls\) "
+        r"· budget 900 s",
+        report,
+    )
+    assert line is not None, report
+    total, agent, judges = (int(g) for g in line.groups())
+    assert agent > 0 and judges > 0 and agent + judges < total  # the rest is overhead
+
+
 def test_cli_judge_node_crash_is_an_agent_failure(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
