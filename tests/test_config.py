@@ -103,6 +103,7 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         ({"graph_entrypoint": "a.py:g", "tier": "weekly"}, "tier"),
         ({"graph_entrypoint": "a.py:g", "gate": {"uncalibrated": "blocking"}}, "uncalibrated"),
         ({"graph_entrypoint": "a.py:g", "jev_model": ""}, "jev_model"),
+        ({"graph_entrypoint": "a.py:g", "report": {"group_by": ["kpi"]}}, "group_by"),
         ({"graph_entrypoint": "a.py:g", "gate": {"alpha": 0}}, "alpha"),
         ({"graph_entrypoint": "a.py:g", "gate": {"power": 1}}, "power"),
         ({"graph_entrypoint": "a.py:g", "gate": {"margin": -0.1}}, "margin"),
@@ -202,3 +203,10 @@ def test_gate_uncalibrated_and_the_pinned_jev_model() -> None:
     }
     cfg = parse_config(raw)
     assert (cfg.gate.uncalibrated, cfg.jev_model) == ("flag", "jev-2026-10")
+
+
+def test_report_groups_by_node_and_slice_by_default() -> None:
+    # T090: the report breaks KPI results down; it never shows only a mean.
+    assert parse_config({"graph_entrypoint": "a.py:g"}).group_by == ("node", "slice")
+    raw = {"graph_entrypoint": "a.py:g", "report": {"group_by": ["slice"]}}
+    assert parse_config(raw).group_by == ("slice",)

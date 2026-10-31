@@ -253,6 +253,15 @@ gate:                          # lgcov.yaml; these are the defaults
   uncalibrated: advisory       # a model judge with no labels; or flag (T063)
 ```
 
+Per node and slice. The report never gives only a mean: after the KPI table it has one table
+per node, a row per slice (the KPIs' failure mode) and the node's total when it has more than
+one, each pooling its blocking judges' paired cases into one test. The overall verdict is the
+worst group's. A group is thin, "⚠️ thin (n=6, need 93)", when it has fewer cases than it needs
+to detect a drop of its margin at power 0.8, and a thin group can't block on its own: its BLOCK
+is INCONCLUSIVE. A KPI's own BLOCK still blocks. `report.group_by: [node, slice]` in
+`lgcov.yaml` chooses the grouping; `[]` turns it off. Graph-structural coverage criteria are
+future work.
+
 Planned: sequential stopping (mSPRT), to stop judging once a KPI's verdict is clear.
 
 ### Calibrate judges against human labels

@@ -88,6 +88,7 @@ from lgcov.sampling import (
     render_gate_table,
     render_kpi_table,
 )
+from lgcov.slices import Group, failing_groups, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.taxonomy import KPISpec, load_taxonomy
 
@@ -698,20 +699,22 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         judge_calls=sum(s.samples for s in stats),
         tokens=sum(tokens) if tokens else None,
     )
-    gate_code = gate_exit_code(stats, gate.inconclusive_blocks)
+    groups = _groups(stats, l2[0], cfg, gate)
+    gate_code = groups_exit(
+        gate_exit_code(stats, gate.inconclusive_blocks), groups, gate.inconclusive_blocks
+    )
     return replace(
         result,
         exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code, llm_code),
         l2_lines=(
             *calibration,
             *([""] if calibration and stats else []),
-            *(
-                (*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats))
-                if stats
-                else ()
-            ),
+            *(_l2_tables(stats, groups, gate) if stats else ()),
         ),
-        blocked=tuple(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
+        blocked=(
+            *(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
+            *failing_groups(groups),
+        ),
         inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
         timing=replace(judged, total=perf_counter() - start),
         calibration_lines=(*changes, *_rejudge(saved, l2[0], l2[1])),
@@ -838,6 +841,26 @@ _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
 # T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
 # never runs one, and a nightly run reports the KPIs it couldn't judge.
 _llm_judge: Callable[[KPI], Judge] | None = None
+
+
+def _groups(
+    stats: list[KpiStats], specs: list[KPISpec], cfg: Config, gate: GateConfig
+) -> list[Group]:
+    """T090: the KPIs per node and slice (failure mode), as lgcov.yaml's report.group_by says."""
+    if not cfg.group_by:
+        return []
+    where = {spec.name: (spec.node, spec.failure_mode) for spec in specs}
+    return group_kpis(stats, where, cfg.group_by, gate.alpha, gate.power)
+
+
+def _l2_tables(stats: list[KpiStats], groups: list[Group], gate: GateConfig) -> list[str]:
+    grouped = [*render_groups(groups), ""] if groups else []
+    return [
+        *render_gate_table(stats, gate.alpha, gate.power),
+        "",
+        *grouped,
+        *render_kpi_table(stats),
+    ]
 
 
 def _gate_bands(
@@ -1021,14 +1044,16 @@ def _judge_cmd(argv: list[str]) -> int:
         )
         return EXIT_ERROR
     stats = _l2_gate(plan, judges, k, gate, runs, replays, advisory, flagged)
+    groups = _groups(stats, specs, cfg, gate)
     print("\n".join([*calibration, *([""] if calibration else [])]), end="")
-    print(
-        "\n".join([*render_gate_table(stats, gate.alpha, gate.power), "", *render_kpi_table(stats)])
-    )
+    print("\n".join(_l2_tables(stats, groups, gate)))
     rechecked = _rejudge(saved, specs, judges)
     if rechecked:
         print("\n".join(["", *rechecked]))
-    return gate_exit_code(stats, gate.inconclusive_blocks)
+    code = groups_exit(
+        gate_exit_code(stats, gate.inconclusive_blocks), groups, gate.inconclusive_blocks
+    )
+    return code
 
 
 _BANDS = "calibration/bands.json"  # T063: in the repo, so a band moves in a reviewed diff

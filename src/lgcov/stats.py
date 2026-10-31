@@ -126,6 +126,12 @@ def _required(sd: float, effect: float, alpha: float, power: float) -> int | Non
     return math.ceil(z * z * sd * sd / (effect * effect))
 
 
+def cases_needed(sd: float, effect: float, alpha: float = 0.05, power: float = 0.8) -> int | None:
+    """T090: paired cases needed to detect `effect` at alpha / power, given the SD of the
+    per-case difference; None for no effect."""
+    return _required(sd, effect, alpha, power)
+
+
 def required_n(
     p_a: float, p_b: float, rho: float, alpha: float = 0.05, power: float = 0.8
 ) -> int | None:
