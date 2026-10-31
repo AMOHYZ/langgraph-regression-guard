@@ -7,11 +7,13 @@ import importlib.util
 import json
 import os
 import sys
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
 from types import CodeType
 from typing import Any
+
+import yaml
 
 from lgcov.cassette import (
     Cassette,
@@ -694,6 +696,78 @@ def _judge_cmd(argv: list[str]) -> int:
     return 1 if "fail" in outcomes else EXIT_ERROR if "infra_error" in outcomes else 0
 
 
+@dataclass(frozen=True)
+class _Expected:
+    outcome: Outcome
+    root: str | None  # the node lgcov must blame, if any
+    fail_on: FailOn
+    cassette_dir: str  # relative to the fixture folder
+
+
+def _expected(path: Path) -> _Expected:
+    raw: object = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("must be a mapping")
+    names = {o.name: o for o in Outcome}
+    outcome, root = raw.get("outcome"), raw.get("root")
+    if outcome not in names:
+        raise ValueError(f"outcome must be one of {sorted(names)}, got {outcome!r}")
+    if root is not None and not isinstance(root, str):
+        raise ValueError("root must be a node name")
+    return _Expected(
+        outcome=names[str(outcome)],
+        root=root,
+        fail_on=parse_fail_on(str(raw.get("fail_on", "root-drift"))),
+        cassette_dir=str(raw.get("cassette_dir", "../cassettes")),
+    )
+
+
+def _selfcheck_cmd(argv: list[str]) -> int:
+    """T074: run the harness on fixtures whose outcome is known; a mismatch is a lgcov bug."""
+    ap = argparse.ArgumentParser(prog="lgcov selfcheck")
+    ap.add_argument("--dir", default="tests/fixtures/selfcheck", help="fixture folders")
+    args = ap.parse_args(argv)
+    fixtures = sorted(p.parent for p in Path(args.dir).glob("*/expected.yaml"))
+    if not fixtures:
+        print(f"lgcov selfcheck: no fixtures (*/expected.yaml) under {args.dir}", file=sys.stderr)
+        return EXIT_ERROR
+    rows, all_ok = [], True
+    for fixture in fixtures:
+        try:
+            want = _expected(fixture / "expected.yaml")
+        except (OSError, ValueError) as exc:
+            print(f"lgcov selfcheck: {fixture.name}/expected.yaml: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        # The same path the GitHub Action takes (`lgcov ci`), on this fixture alone.
+        result = _ci_result(
+            argparse.Namespace(
+                fail_on=want.fail_on,
+                harness_error=None,
+                graph=f"{fixture / 'graph.py'}:graph",
+                cassette_dir=str(fixture / want.cassette_dir),
+                config=str(fixture / "lgcov.yaml"),  # usually absent: defaults
+                taxonomy=None,
+                base_dir=None,
+                live=False,
+                coverage_out=None,
+                coverage_baseline=None,
+                commit="",
+            )
+        )
+        actual = Outcome(result.exit_code)
+        ok = actual == want.outcome and (want.root is None or want.root in result.root_drift)
+        all_ok = all_ok and ok
+        expected = want.outcome.name + (f" @ {want.root}" if want.root else "")
+        root = ", ".join(result.root_drift) or "—"
+        rows.append(
+            f"| {fixture.name} | {expected} | {actual.name} | {root} | {'✓' if ok else '✗'} |"
+        )
+    print(
+        "\n".join(["| fixture | expected | actual | root | ok |", "|---|---|---|---|---|", *rows])
+    )
+    return 0 if all_ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--version"]:
@@ -705,6 +779,8 @@ def main(argv: list[str] | None = None) -> int:
         return _replay(argv[1:])
     if argv[:1] == ["snapshot"]:
         return _snapshot(argv[1:])
+    if argv[:1] == ["selfcheck"]:
+        return _selfcheck_cmd(argv[1:])
     if argv[:1] == ["judge"]:
         return _judge_cmd(argv[1:])
     if argv[:1] == ["coverage"]:

@@ -1,0 +1,3 @@
+# What `lgcov selfcheck` must report for this fixture.
+outcome: INFRA_ERROR
+cassette_dir: missing-cassettes  # relative to this folder; doesn't exist
