@@ -1092,6 +1092,21 @@ def test_cli_ci_a_router_that_raises_is_an_agent_failure_naming_the_router(
     assert "Node `route` raised KeyError" in report
 
 
+def test_cli_ci_a_router_returning_an_unmapped_key_is_an_agent_failure_naming_the_router(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    typo = demo.replace(  # "lookup" is not in route's Literal["lookup_order", "respond"]
+        'return "lookup_order" if state["needs_tool"] else "respond"',
+        'return "lookup" if state["needs_tool"] else "respond"',
+    )
+    assert typo != demo
+    _ci_project(tmp_path, monkeypatch, typo)
+    code, report, outputs = _run_ci(tmp_path, "--fail-on", "never")
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert "Node `route` raised KeyError" in report
+
+
 def test_cli_ci_a_router_timeout_is_a_harness_error_naming_the_router(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
