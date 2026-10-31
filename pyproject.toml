@@ -2,7 +2,19 @@
 name = "langgraph-regression-guard"
 version = "0.1.0"
 description = "Catch silent regressions in LangGraph agents on every PR: cassette replay of node I/O, calibrated LLM judges, and human review."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
+authors = [{ name = "Ahmed Mohy" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
 dependencies = [
     "httpx>=0.28.1",
     "langgraph>=1.2.16",
@@ -10,6 +22,7 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/AMOHYZ/langgraph-regression-guard"
 Repository = "https://github.com/AMOHYZ/langgraph-regression-guard"
 Issues = "https://github.com/AMOHYZ/langgraph-regression-guard/issues"
 

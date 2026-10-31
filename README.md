@@ -1,7 +1,7 @@
 # langgraph-regression-guard
 
 Catch silent regressions in LangGraph agents on every PR: cassette replay of
-node I/O, calibrated LLM judges, and human review, as a GitHub Action.
+node I/O, LLM judges with a confidence gate, and human review, as a GitHub Action.
 
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
 
@@ -18,16 +18,100 @@ graph still compiles, the edges still fire, the output just gets worse.
 
 Three layers, one per level of confidence:
 
-- **L1 — Cassettes.** Record each node's inputs and outputs once, then replay
-  them on every PR. The diff tells you whether a change breaks a node at its
-  root or only propagates from upstream.
-- **L2 — Judge gate.** Typed, calibrated LLM judges score KPIs with explicit
-  probabilities and a confidence gate: low-confidence verdicts defer to a
+- **L1 — Cassettes.** Record each node's output once, then re-run the graph on
+  every PR and compare every node with the recording. The diff tells you
+  whether a change breaks a node at its root or only propagates from upstream.
+- **L2 — Judge gate.** Typed LLM judges and deterministic code checks score
+  KPIs, each verdict with a confidence: low-confidence verdicts defer to a
   human instead of guessing.
 - **L3 — Review loop.** An accept / reject / override decision per verdict;
-  accepting re-baselines the cassette, overriding recalibrates the judge.
+  accepting re-baselines the cassette, and an override is saved as a labelled
+  example for calibrating the judge.
+
+How this compares with Reenact and EvalView, and what is built today:
+[docs/why-us.md](docs/why-us.md).
 
 ## Quickstart
+
+Needs Python 3.12+. Runs offline: the demo agent uses a fake, deterministic LLM.
+
+Minutes to first report: 2 (clean venv, steps below pasted as-is; measured 2026-10-27,
+41–70 s of which is `pip install`).
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install "git+https://github.com/AMOHYZ/langgraph-regression-guard"
+lgcov --version
+
+# 1. A graph to guard: the demo agent (or point graph_entrypoint at your own).
+curl -fsSLO https://raw.githubusercontent.com/AMOHYZ/langgraph-regression-guard/main/examples/demo_agent/graph.py
+printf 'graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n' > lgcov.yaml
+
+# 2. Record a baseline: one cassette run per input.
+echo '[{"question": "Where is my order?"}, {"question": "What are your hours?"}]' > inputs.json
+lgcov record --inputs inputs.json
+
+# 3. Replay it: the first report.
+lgcov replay                 # "No cassette drift (2 runs)."
+
+# 4. Make a change and replay again.
+sed -i.bak 's/a concise support/a friendly, detailed support/' graph.py
+lgcov replay                 # `respond` | root | 2/2, exit code 1
+
+# 5. The change is intended: re-baseline only that node.
+lgcov cassette accept --nodes respond
+lgcov replay                 # "No cassette drift (2 runs)."
+```
+
+Example `lgcov.yaml`:
+
+```yaml
+graph_entrypoint: graph.py:graph   # required, "<file.py>:<attr>"
+cassette_dir: cassettes
+taxonomy_path: taxonomy.yaml       # optional; `taxonomy:` is an alias
+thresholds:
+  min_node_coverage: 80            # percent, 0..100
+  max_drifted_nodes: 3             # optional; omit for no limit
+  fail_on: [fail]
+ignore_paths: [/meta/nonce]        # JSON pointers into node I/O
+```
+
+Precedence: CLI flag > file > default.
+
+## Use in your repo
+
+Record a baseline first (see Quickstart), commit `lgcov.yaml` and your cassettes,
+then add this workflow:
+
+```yaml
+name: lgcov
+on: pull_request  # not pull_request_target: the Action runs your PR's own graph code
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  lgcov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: AMOHYZ/langgraph-regression-guard@v0
+        with:
+          fail-on: root-drift  # root-drift | any-drift | never
+```
+
+- Each PR gets one report comment, updated in place on every push. PRs from forks get
+  a read-only token, so there the report goes to the job summary instead.
+- `root-drift` and `any-drift` fail the same PRs for now: until replay records node
+  inputs, the first node to drift in each run counts as root.
+- Exit codes: 0 pass, 1 drift that `fail-on` cares about, 2 harness error (install,
+  graph load or replay crashed), which is never reported as a regression.
+- Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
+  `cassette-dir`, `taxonomy` (validated only; L2 judges don't run in the Action yet),
+  `fail-on`, `python-version`, `github-token`. Outputs: `report-path`,
+  `root-drift-count`, `propagated-drift-count`, `verdict`.
+- Runs on Linux and macOS runners.
+
+## Development
 
 ```bash
 cp .env.example .env   # fill in JEV_API_URL / JEV_API_KEY for L2/L3
@@ -38,9 +122,12 @@ uv run graph-diff old.json new.json   # node/edge diff of two graph snapshots
 
 ## Roadmap
 
-- Calibrated typed judges: verified probability calibration per KPI.
+- Serve unchanged nodes from cassettes, so a PR only calls the model for the
+  nodes it changed.
+- Judges you can trust: Cohen's kappa with a confidence interval, and TPR/TNR
+  against human labels, per KPI.
+- A paired significance test per KPI, with p-value and effect size.
 - Self-improvement loop: reviewer overrides feed back into judge calibration.
-- Ship as a GitHub Action that posts the regression report on every PR.
 
 ## License
 

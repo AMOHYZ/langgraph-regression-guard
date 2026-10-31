@@ -11,8 +11,8 @@
 
 | | hit |
 |---|---|
-| nodes | 50.0% |
-| edges | 33.3% |
+| nodes | 50.0% (no baseline) |
+| edges | 33.3% (no baseline) |
 
 <details>
 <summary>Never hit: 2 nodes, 2 edges</summary>

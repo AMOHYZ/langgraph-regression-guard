@@ -1,9 +1,19 @@
 """T052: node/edge coverage of a snapshot from execution traces."""
 
+import json
+from pathlib import Path
+
+import pytest
 from fixtures.build_examples import build_conditional, build_linear
 from fixtures.graphs import linear
 
-from lgcov.coverage import coverage
+from lgcov.coverage import (
+    CoverageReport,
+    coverage,
+    format_coverage_delta,
+    load_coverage,
+    write_coverage,
+)
 from lgcov.snapshot import Edge, snapshot_from_compiled
 from lgcov.trace import record_trace
 
@@ -53,3 +63,38 @@ def test_t055_trace_feeds_coverage() -> None:
     rep = coverage(snap, runs)
     # Traces record node names only, so __start__/__end__ stay unhit in v0.
     assert rep.node_pct == 50.0
+
+
+# T083: coverage.json artifact + delta vs a main baseline.
+
+
+@pytest.mark.parametrize(
+    ("current", "baseline", "want"),
+    [
+        (75.0, 100.0, "75.0% (-25.0% vs main)"),
+        (60.0, 50.0, "60.0% (+10.0% vs main)"),
+        (80.0, 80.0, "80.0% (+0.0% vs main)"),
+        (75.0, None, "75.0% (no baseline)"),
+    ],
+)
+def test_format_coverage_delta(current: float, baseline: float | None, want: str) -> None:
+    assert format_coverage_delta(current, baseline) == want
+
+
+def test_coverage_json_round_trip_stable_key_order(tmp_path: Path) -> None:
+    rep = CoverageReport(
+        node_pct=50.0,
+        edge_pct=33.3,
+        unhit_nodes=["__end__", "__start__"],
+        unhit_edges=[Edge("__start__", "a"), Edge("b", "__end__")],
+    )
+    path = tmp_path / "coverage.json"
+    write_coverage(path, rep)
+    body = path.read_text(encoding="utf-8")
+    assert list(json.loads(body)) == [
+        "edge_pct",
+        "node_pct",
+        "unhit_edges",
+        "unhit_nodes",
+    ]
+    assert load_coverage(path) == rep
