@@ -1,7 +1,9 @@
 # langgraph-regression-guard
 
-Catch silent regressions in LangGraph agents on every PR: cassette replay of
-node I/O, LLM judges with a confidence gate, and human review, as a GitHub Action.
+Catch silent regressions in LangGraph agents on every PR. lgcov tells you which node a
+PR actually changed and which ones only inherited the damage, gates each KPI in your
+taxonomy with a paired test, and (planned) lets a judge block only once it has earned
+that against human labels. A GitHub Action; first report in 2 minutes.
 
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
 
@@ -30,8 +32,8 @@ Three layers, one per level of confidence:
   accepting re-baselines the cassette, and an override is saved as a labelled
   example for calibrating the judge.
 
-How this compares with Reenact and EvalView, and what is built today:
-[docs/why-us.md](docs/why-us.md).
+How this compares with Reenact, graphtrace, EvalView, AgentAssay, statgate, Kitaru and
+LangSmith, and what is built today: [docs/why-us.md](docs/why-us.md).
 
 ## Quickstart
 
