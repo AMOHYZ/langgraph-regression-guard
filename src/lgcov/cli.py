@@ -15,8 +15,9 @@ from typing import Any
 from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import load_config
+from lgcov.drift_gate import FailOn, drift_exit_code, parse_fail_on, verdict
 from lgcov.graph_diff import diff_graphs
-from lgcov.snapshot import Edge, GraphSnapshot
+from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.taxonomy import load_taxonomy
 
 # 0 = no change / accepted, 1 = graph/replay changed or named node not drifted,
@@ -93,9 +94,11 @@ def _load_runs(path: str) -> list[Cassette]:
     return [Cassette(inputs=r["inputs"], steps=[Step(**s) for s in r["steps"]]) for r in d["runs"]]
 
 
-def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[str]:
-    """Per-node drift table. "root" = the first node to drift in some run, in execution
-    order; "downstream" nodes drifted only after an earlier one did.
+def _drift_kinds(
+    runs: list[Cassette], drifts: list[list[Drift]]
+) -> tuple[dict[str, int], set[str]]:
+    """Runs each node drifted in, and the root nodes. "root" = the first node to drift
+    in some run, in execution order; "downstream" nodes drifted only after an earlier one.
     """
     counts: dict[str, int] = {}
     roots: set[str] = set()
@@ -107,6 +110,12 @@ def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[st
         ordered = [s.node for s in run.steps if s.node in drifted] + sorted(drifted)
         if ordered:
             roots.add(ordered[0])
+    return counts, roots
+
+
+def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[str]:
+    """Per-node drift table: root or downstream, and in how many runs."""
+    counts, roots = _drift_kinds(runs, drifts)
     lines = ["### Cassette replay", ""]
     if not counts:
         return [*lines, f"No cassette drift ({len(runs)} runs)."]
@@ -120,6 +129,20 @@ def _replay_markdown(runs: list[Cassette], drifts: list[list[Drift]]) -> list[st
     return lines
 
 
+def _harness_error(prog: str, what: str, exc: BaseException) -> int:
+    """Infra failures exit 2 and say so, so CI never reports them as a regression."""
+    msg = f"{prog}: harness error, not a regression: {what}: {type(exc).__name__}: {exc}"
+    print(msg, file=sys.stderr)
+    return EXIT_ERROR
+
+
+def _fail_on_arg(value: str) -> FailOn:
+    try:
+        return parse_fail_on(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def _replay(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lgcov replay")
     ap.add_argument("target", nargs="?", help="<file.py>:<attr>; overrides graph_entrypoint")
@@ -127,6 +150,8 @@ def _replay(argv: list[str]) -> int:
         "baseline", nargs="?", help="cassette JSON; default <cassette_dir>/baseline.json"
     )
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    ap.add_argument("--fail-on", type=_fail_on_arg, default="any-drift", help="exit 1 on")
+    ap.add_argument("--summary-json", help="also write drift counts and verdict here")
     args = ap.parse_args(argv)
     try:
         cfg = load_config(args.config, {"graph_entrypoint": args.target})
@@ -135,18 +160,54 @@ def _replay(argv: list[str]) -> int:
         return EXIT_ERROR
     baseline = args.baseline or str(Path(cfg.cassette_dir) / "baseline.json")
     try:
+        # Exception: importing user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
-    except (OSError, ImportError, SyntaxError, ValueError) as exc:
-        print(f"lgcov replay: cannot load graph: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+    except Exception as exc:
+        return _harness_error("lgcov replay", "cannot load graph", exc)
     try:
         runs = _load_runs(baseline)
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        print(f"lgcov replay: cannot read baseline: {exc!r}", file=sys.stderr)
-        return EXIT_ERROR
-    drifts = [replay(graph, run, cfg.ignore_paths) for run in runs]
+        return _harness_error("lgcov replay", "cannot read baseline", exc)
+    try:
+        drifts = [replay(graph, run, cfg.ignore_paths) for run in runs]
+    except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
+        return _harness_error("lgcov replay", "the graph crashed during replay", exc)
     print("\n".join(_replay_markdown(runs, drifts)))
-    return 1 if any(drifts) else 0
+    counts, roots = _drift_kinds(runs, drifts)
+    root, downstream = sorted(roots), sorted(counts.keys() - roots)
+    code = drift_exit_code(args.fail_on, len(root), len(downstream))
+    if args.summary_json:
+        summary = {
+            "exit_code": code,
+            "fail_on": args.fail_on,
+            "propagated_drift": downstream,
+            "propagated_drift_count": len(downstream),
+            "root_drift": root,
+            "root_drift_count": len(root),
+            "runs": len(runs),
+            "verdict": verdict(code),
+        }
+        Path(args.summary_json).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return code
+
+
+def _snapshot(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="lgcov snapshot")
+    ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    args = ap.parse_args(argv)
+    try:
+        cfg = load_config(args.config, {"graph_entrypoint": args.graph})
+    except (OSError, ValueError) as exc:
+        print(f"lgcov snapshot: invalid config: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        # Exception: importing user graph code can raise anything.
+        snap = snapshot_from_compiled(_load_graph(cfg.graph_entrypoint))
+    except Exception as exc:
+        return _harness_error("lgcov snapshot", "cannot load graph", exc)
+    print(snap.to_json(), end="")
+    return 0
 
 
 def _write_runs(path: Path, runs: list[Cassette]) -> None:
@@ -288,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
         return _taxonomy_check(argv[1:])
     if argv[:1] == ["replay"]:
         return _replay(argv[1:])
+    if argv[:1] == ["snapshot"]:
+        return _snapshot(argv[1:])
     if argv[:1] == ["record"]:
         return _record(argv[1:])
     if argv[:1] == ["cassette"]:
