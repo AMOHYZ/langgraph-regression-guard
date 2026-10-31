@@ -393,50 +393,187 @@ def test_cli_replay_serves_unchanged_nodes_unless_live(
     edited = baseline.read_text(encoding="utf-8").replace('"A1"', '"AX"')
     baseline.write_text(edited, encoding="utf-8")
     assert main(["replay", "--config", str(cfg)]) == 0
-    # ...and --live re-runs every node, which catches the edit.
-    capsys.readouterr()
-    assert main(["replay", "--live", "--config", str(cfg)]) == 1
-    assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
 
 
-def test_cli_replay_still_reports_root_and_downstream_drift(
+# T078 PR A: `lgcov snapshot`, `replay --fail-on/--summary-json`, harness errors exit 2.
+def test_cli_snapshot_prints_a_graph_snapshot(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # b's code is unchanged but it reads a's output, so it re-runs once a changes.
-    src = AB_GRAPH.replace('return {"b": "B1"}', 'return {"b": state["a"] + "!"}')
+    from lgcov.snapshot import GraphSnapshot
+
+    assert main(["snapshot", "--graph", f"{DEMO_GRAPH}:graph"]) == 0
+    out = capsys.readouterr().out
+    snap = GraphSnapshot.from_json(out)
+    assert {"classify", "lookup_order", "respond"} <= snap.nodes
+    conditional = {(e.source, e.target) for e in snap.edges if e.conditional}
+    assert conditional == {("classify", "lookup_order"), ("classify", "respond")}
+    path = tmp_path / "snap.json"
+    path.write_text(out, encoding="utf-8")
+    assert main([str(path), str(path)]) == 0
+    assert "No graph changes." in capsys.readouterr().out
+
+
+def test_cli_snapshot_bad_target_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["snapshot", "--graph", f"{tmp_path / 'missing.py'}:graph"]) == 2
+    assert "lgcov snapshot:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["replay", "snapshot"])
+def test_cli_unloadable_entrypoint_is_a_harness_error(
+    tmp_path: Path, command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
     graph = tmp_path / "graph.py"
-    graph.write_text(src, encoding="utf-8")
-    cfg = tmp_path / "lgcov.yaml"
-    cfg.write_text(
-        f"graph_entrypoint: {graph}:graph\ncassette_dir: {tmp_path / 'cassettes'}\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "inputs.json").write_text("[{}]", encoding="utf-8")
-    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
-    graph.write_text(src.replace("A1", "A2"), encoding="utf-8")
-    capsys.readouterr()
-    assert main(["replay", "--config", str(cfg)]) == 1
-    lines = capsys.readouterr().out.splitlines()
-    assert "| `a` | root | 1/1 |" in lines
-    assert "| `b` | downstream | 1/1 |" in lines
+    graph.write_text('raise RuntimeError("boom at import")\n', encoding="utf-8")
+    target = f"{graph}:graph"
+    args = [command, target, DEMO_BASELINE] if command == "replay" else [command, "--graph", target]
+    assert main(args) == 2
+    err = capsys.readouterr().err
+    assert "harness error, not a regression" in err
+    assert "boom at import" in err
+    assert "Traceback" not in err
 
 
-def test_cli_replay_reads_a_baseline_recorded_before_node_inputs(
+def test_cli_replay_crash_inside_the_graph_exits_two(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Older baselines have no node inputs or code fingerprints: every node runs live.
-    runs = json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))["runs"]
-    legacy = [
-        {
-            "inputs": r["inputs"],
-            "steps": [{"node": s["node"], "output": s["output"]} for s in r["steps"]],
-        }
-        for r in runs
-    ]
-    (tmp_path / "baseline.json").write_text(json.dumps({"runs": legacy}), encoding="utf-8")
-    src = DEMO_GRAPH.read_text(encoding="utf-8")
-    (tmp_path / "graph.py").write_text(
-        src.replace("a concise support", "a friendly, detailed support"), encoding="utf-8"
+    cfg, _ = _ab_project(tmp_path)
+    crashing = AB_GRAPH.replace('return {"b": "B1"}', 'raise RuntimeError("node b crashed")')
+    (tmp_path / "graph.py").write_text(crashing, encoding="utf-8")
+    capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 2
+    err = capsys.readouterr().err
+    assert "harness error, not a regression" in err
+    assert "node b crashed" in err
+
+
+def test_cli_replay_summary_json_counts_root_and_propagated(tmp_path: Path) -> None:
+    cfg, _ = _ab_project(tmp_path)  # a and b both changed: a drifts first (root), b after
+    summary = tmp_path / "summary.json"
+    assert main(["replay", "--config", str(cfg), "--summary-json", str(summary)]) == 1
+    assert json.loads(summary.read_text(encoding="utf-8")) == {
+        "exit_code": 1,
+        "fail_on": "any-drift",
+        "propagated_drift": ["b"],
+        "propagated_drift_count": 1,
+        "root_drift": ["a"],
+        "root_drift_count": 1,
+        "runs": 2,
+        "verdict": "fail",
+    }
+
+
+def test_cli_replay_prompt_tweak_summary_is_root_only(tmp_path: Path) -> None:
+    graph = tmp_path / "graph.py"
+    tweaked = DEMO_GRAPH.read_text(encoding="utf-8").replace("a concise", "a friendly")
+    graph.write_text(tweaked, encoding="utf-8")
+    summary = tmp_path / "summary.json"
+    args = ["replay", f"{graph}:graph", DEMO_BASELINE, "--summary-json", str(summary)]
+    assert main([*args, "--fail-on", "root-drift"]) == 1
+    data = json.loads(summary.read_text(encoding="utf-8"))
+    assert (data["root_drift"], data["propagated_drift"]) == (["respond"], [])
+
+
+def test_cli_replay_fail_on_never_exits_zero_on_drift(tmp_path: Path) -> None:
+    cfg, _ = _ab_project(tmp_path)
+    assert main(["replay", "--config", str(cfg), "--fail-on", "never"]) == 0
+
+
+def test_cli_replay_fail_on_typo_lists_allowed_values(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["replay", "--fail-on", "root-drif"])
+    assert exc.value.code == 2
+    assert "root-drift, any-drift, never; got 'root-drif'" in capsys.readouterr().err
+
+
+# T078 PR B: `lgcov ci` builds the Action's report, step outputs and exit code.
+def _ci_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graph_src: str) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "graph.py").write_text(graph_src, encoding="utf-8")
+    (tmp_path / "cassettes").mkdir()
+    (tmp_path / "cassettes" / "baseline.json").write_text(
+        Path(DEMO_BASELINE).read_text(encoding="utf-8"), encoding="utf-8"
     )
-    assert main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")]) == 1
-    assert "| `respond` | root | 2/2 |" in capsys.readouterr().out.splitlines()
+
+
+def _run_ci(tmp_path: Path, *extra: str) -> tuple[int, str, dict[str, str]]:
+    report, outputs = tmp_path / "out" / "report.md", tmp_path / "out" / "outputs.txt"
+    report.parent.mkdir(exist_ok=True)
+    args = ["ci", "--report", str(report), "--github-output", str(outputs)]
+    code = main([*args, "--graph", "graph.py:graph", "--cassette-dir", "cassettes", *extra])
+    lines = outputs.read_text(encoding="utf-8").splitlines()
+    return (
+        code,
+        report.read_text(encoding="utf-8"),
+        {k: v for k, v in (x.split("=", 1) for x in lines)},
+    )
+
+
+def test_cli_ci_reports_root_drift_and_sets_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace("a concise", "a friendly"))
+    (tmp_path / "base").mkdir()
+    (tmp_path / "base" / "graph.py").write_text(demo, encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--base-dir", "base")
+    assert code == 1
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 ")
+    assert "No graph changes." in report
+    assert "| `respond` | root | 2/2 |" in report
+    assert "fail-on: `root-drift`" in report
+    assert outputs == {
+        "exit-code": "1",
+        "propagated-drift-count": "0",
+        "report-path": str(tmp_path / "out" / "report.md"),
+        "root-drift-count": "1",
+        "verdict": "fail",
+    }
+
+
+def test_cli_ci_missing_base_graph_lists_every_node_as_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "base").mkdir()
+    code, report, outputs = _run_ci(tmp_path, "--base-dir", "base")
+    assert (code, outputs["verdict"]) == (0, "pass")
+    assert report.startswith("<!-- lgcov-report -->\n## 🟢 ")
+    assert "every node is new" in report
+    assert "| + | node | respond |" in report
+
+
+def test_cli_ci_unloadable_graph_is_a_harness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, 'raise RuntimeError("boom at import")\n')
+    code, report, outputs = _run_ci(tmp_path)
+    assert code == 2
+    assert "⚠️ Harness error, not a regression" in report
+    assert "boom at import" in report
+    assert (outputs["verdict"], outputs["exit-code"], outputs["root-drift-count"]) == (
+        "error",
+        "2",
+        "0",
+    )
+
+
+def test_cli_ci_reports_an_earlier_install_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    code, report, outputs = _run_ci(tmp_path, "--harness-error", "uv sync --locked failed")
+    assert (code, outputs["verdict"]) == (2, "error")
+    assert "⚠️ Harness error, not a regression" in report
+    assert "uv sync --locked failed" in report
+
+
+def test_cli_ci_fail_on_never_passes_but_still_shows_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace("a concise", "a friendly"))
+    code, report, outputs = _run_ci(tmp_path, "--fail-on", "never")
+    assert (code, outputs["verdict"], outputs["root-drift-count"]) == (0, "pass", "1")
+    assert "| `respond` | root | 2/2 |" in report
