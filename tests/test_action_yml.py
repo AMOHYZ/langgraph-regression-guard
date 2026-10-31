@@ -1,5 +1,7 @@
 """T078: action.yml's public contract, and the workflows around it."""
 
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -78,3 +80,75 @@ def test_readme_snippet_uses_the_action_on_pull_request() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "uses: AMOHYZ/langgraph-regression-guard@v0" in readme
     assert "on: pull_request" in readme
+
+
+# Regression: Actions runs `shell: bash` as `bash --noprofile --norc -e -o pipefail`, so
+# lgcov's exit 1 (drift) or a failed install killed the step before the PR comment and
+# the verdict gate could run. These steps must handle exit codes themselves.
+GITHUB_BASH = ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c"]
+
+
+def _step(name: str) -> str:
+    for step in _steps():
+        if step.get("name") == name:
+            return str(step["run"])
+    raise AssertionError(f"no step named {name!r}")
+
+
+def _executable(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_run_step_survives_drift_under_github_bash_flags(tmp_path: Path) -> None:
+    # A fake `lgcov ci` that writes its report and outputs, then exits 1 for drift.
+    _executable(
+        tmp_path / ".venv" / "bin" / "lgcov",
+        'mkdir -p "$(dirname "$3")"; echo report > "$3"; echo exit-code=1 >> "$5"; exit 1\n',
+    )
+    out = tmp_path / "github_output"
+    out.touch()
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(tmp_path / "tmp"),
+        "GITHUB_OUTPUT": str(out),
+        "ACTION_PATH": str(tmp_path),
+        "UV_PYTHON": "3.12",
+        "GRAPH": "",
+        "CASSETTE_DIR": "",
+        "TAXONOMY": "",
+        "FAIL_ON": "root-drift",
+        "BASE_DIR": "",
+        "HARNESS_ERROR": "",
+    }
+    script = _step("Run lgcov")
+    result = subprocess.run(
+        [*GITHUB_BASH, script], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert "exit-code=1" in out.read_text(encoding="utf-8")
+
+
+def test_install_step_records_a_failed_install_under_github_bash_flags(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    _executable(bin_dir / "uv", "echo 'lockfile out of date' >&2; exit 1\n")
+    (tmp_path / "uv.lock").touch()
+    out = tmp_path / "github_output"
+    out.touch()
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "ACTION_PATH": str(tmp_path),
+        "UV_PYTHON": "3.12",
+    }
+    script = _step("Install your project and lgcov")
+    result = subprocess.run(
+        [*GITHUB_BASH, script], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    outputs = out.read_text(encoding="utf-8")
+    assert "harness-error<<LGCOV_EOF" in outputs
+    assert "lockfile out of date" in outputs
