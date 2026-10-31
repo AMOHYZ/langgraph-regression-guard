@@ -216,3 +216,13 @@ def test_record_streams_an_object_without_graph_nodes_as_before() -> None:
             return [{"a": {"x": inputs["x"] + 1}}]
 
     assert record(Streams(), {"x": 1}).steps == [Step("a", {"x": 2})]
+
+
+def test_replay_steps_returns_the_fresh_run_in_order() -> None:
+    # T083: coverage reuses the run replay already did (served steps included).
+    from lgcov.cassette import replay_steps
+
+    cassette = record(linear(), {"x": 1})
+    drifts, steps = replay_steps(linear(), cassette, serve=True)
+    assert drifts == []
+    assert [s.node for s in steps] == ["a", "b"]

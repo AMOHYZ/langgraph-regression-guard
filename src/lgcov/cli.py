@@ -13,7 +13,7 @@ from pathlib import Path
 from types import CodeType
 from typing import Any
 
-from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay
+from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay, replay_steps
 from lgcov.ci_report import CiResult, render_ci_report
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import load_config
@@ -474,19 +474,39 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
     try:
-        drifts = [replay(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
+        replays = [replay_steps(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
     except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
         msg = _harness_message("the graph crashed during replay", exc)
         return replace(partial, harness_error=msg)
+    drifts = [d for d, _ in replays]
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
+    # T083: coverage of the runs replay just did; nothing executes again for it.
+    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in replays], args.commit)
+    if args.coverage_out:
+        Path(args.coverage_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.coverage_out).write_text(cov.to_json(), encoding="utf-8")
+    base, note = _coverage_baseline(args.coverage_baseline)
     return replace(
         partial,
         exit_code=drift_exit_code(fail_on, len(root), len(downstream)),
         replay_lines=tuple(_replay_markdown(runs, drifts)),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
+        coverage_line=format_coverage_line(cov, base),
+        newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
+        notes=(*partial.notes, note) if note else partial.notes,
     )
+
+
+def _coverage_baseline(path: str | None) -> tuple[CoverageSnapshot | None, str]:
+    """Main's coverage.json if there is a readable one. A bad file is a note, never an error."""
+    if not path or not Path(path).is_file():
+        return None, ""
+    try:
+        return CoverageSnapshot.from_json(Path(path).read_text(encoding="utf-8")), ""
+    except (OSError, ValueError) as exc:
+        return None, f"Could not read main's coverage.json ({exc}); showing no baseline yet."
 
 
 def _ci(argv: list[str]) -> int:
@@ -502,6 +522,9 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--fail-on", type=_fail_on_arg, default="root-drift", help="exit 1 on")
     ap.add_argument("--harness-error", help="an earlier step failed; report it and exit 2")
     ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
+    ap.add_argument("--coverage-out", help="write this run's coverage.json here")
+    ap.add_argument("--coverage-baseline", help="main's coverage.json; missing = no baseline yet")
+    ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""), help="commit SHA")
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()

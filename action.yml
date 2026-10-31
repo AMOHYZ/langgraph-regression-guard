@@ -29,6 +29,10 @@ inputs:
     description: "Token for the PR comment. Read-only on forks: the report then goes to the job summary."
     required: false
     default: ${{ github.token }}
+  live:
+    description: "true runs every node live; false (default) serves unchanged nodes from the cassette."
+    required: false
+    default: "false"
 
 outputs:
   report-path:
@@ -47,15 +51,23 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Check fail-on
+    - name: Check inputs
       shell: bash
       env:
         FAIL_ON: ${{ inputs.fail-on }}
+        LIVE: ${{ inputs.live }}
       run: |
         case "$FAIL_ON" in
           root-drift|any-drift|never) ;;
           *)
             echo "::error title=lgcov::fail-on must be one of root-drift, any-drift, never; got '$FAIL_ON'"
+            exit 2
+            ;;
+        esac
+        case "$LIVE" in
+          true|false) ;;
+          *)
+            echo "::error title=lgcov::live must be true or false; got '$LIVE'"
             exit 2
             ;;
         esac
@@ -116,6 +128,39 @@ runs:
           echo "::warning title=lgcov::could not check out the base commit; the graph diff is skipped"
         fi
 
+    - name: Download main's coverage
+      id: coverage-main
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        # T083: a missing or unreadable baseline is a warning and "no baseline yet", never a failure.
+        set +e -uo pipefail
+        log="$RUNNER_TEMP/lgcov-gh.log"
+        query="[.artifacts[] | select(.expired | not)"
+        query+=" | select(.workflow_run.head_branch == \"$DEFAULT_BRANCH\")][0].id // empty"
+        id=$(gh api "repos/$REPO/actions/artifacts?name=lgcov-coverage&per_page=30" \
+          --jq "$query" 2>"$log")
+        if [ $? -ne 0 ]; then
+          echo "::warning title=lgcov::could not list coverage artifacts ($(head -c 200 "$log" | tr '\n' ' ')); no baseline yet"
+          exit 0
+        fi
+        if [ -z "$id" ]; then
+          echo "lgcov: no coverage artifact from $DEFAULT_BRANCH yet; no baseline yet"
+          exit 0
+        fi
+        dir="$RUNNER_TEMP/lgcov-coverage-main"
+        mkdir -p "$dir"
+        if gh api "repos/$REPO/actions/artifacts/$id/zip" > "$dir/artifact.zip" 2>"$log" \
+           && unzip -o -q "$dir/artifact.zip" -d "$dir" && [ -f "$dir/coverage.json" ]; then
+          echo "path=$dir/coverage.json" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning title=lgcov::could not download main's coverage artifact; no baseline yet"
+        fi
+
     - name: Run lgcov
       id: lgcov
       shell: bash
@@ -128,6 +173,8 @@ runs:
         FAIL_ON: ${{ inputs.fail-on }}
         BASE_DIR: ${{ steps.base.outputs.dir }}
         HARNESS_ERROR: ${{ steps.install.outputs.harness-error }}
+        LIVE: ${{ inputs.live }}
+        COVERAGE_BASELINE: ${{ steps.coverage-main.outputs.path }}
       run: |
         # Actions runs bash with -e; this step checks exit codes itself.
         set +e -uo pipefail
@@ -137,6 +184,9 @@ runs:
         [ -n "$CASSETTE_DIR" ] && args+=(--cassette-dir "$CASSETTE_DIR")
         [ -n "$TAXONOMY" ] && args+=(--taxonomy "$TAXONOMY")
         [ -n "$BASE_DIR" ] && args+=(--base-dir "$BASE_DIR")
+        args+=(--coverage-out "$RUNNER_TEMP/lgcov/coverage.json")
+        [ -n "$COVERAGE_BASELINE" ] && args+=(--coverage-baseline "$COVERAGE_BASELINE")
+        [ "$LIVE" = "true" ] && args+=(--live)
         if [ -n "$HARNESS_ERROR" ]; then
           # The project didn't install; lgcov alone is enough to render the harness report.
           uvx --from "$ACTION_PATH" lgcov "${args[@]}" --harness-error "$HARNESS_ERROR"
@@ -168,7 +218,8 @@ runs:
           };
           const pr = context.payload.pull_request;
           if (!pr) {
-            await toSummary('not a pull_request event');
+            core.info('lgcov: not a pull_request event; the report is in the job summary.');
+            await core.summary.addRaw(body).write();
             return;
           }
           try {
@@ -195,6 +246,16 @@ runs:
                 'PRs from forks get a read-only token',
             );
           }
+
+    - name: Upload coverage for main
+      if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      uses: actions/upload-artifact@v4
+      continue-on-error: true
+      with:
+        name: lgcov-coverage
+        path: ${{ runner.temp }}/lgcov/coverage.json
+        if-no-files-found: warn
+        overwrite: true
 
     - name: Exit with the verdict
       shell: bash
