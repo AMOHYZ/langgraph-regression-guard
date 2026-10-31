@@ -362,10 +362,7 @@ uv run graph-diff old.json new.json   # node/edge diff of two graph snapshots
 
 ## Roadmap
 
-- Judges you can trust: Cohen's kappa with a confidence interval, and TPR/TNR
-  against human labels, per KPI.
 - Sequential stopping (mSPRT) for the KPI gate.
-- Self-improvement loop: reviewer overrides feed back into judge calibration.
 
 ## License
 
