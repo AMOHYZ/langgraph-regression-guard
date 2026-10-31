@@ -5,6 +5,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import os
 import sys
 from dataclasses import asdict, replace
 from importlib.metadata import version
@@ -12,10 +13,16 @@ from pathlib import Path
 from types import CodeType
 from typing import Any
 
-from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay
+from lgcov.cassette import Cassette, Drift, Step, accept_nodes, record, replay, replay_steps
 from lgcov.ci_report import CiResult, render_ci_report
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import load_config
+from lgcov.coverage import (
+    CoverageSnapshot,
+    coverage_delta,
+    format_coverage_line,
+    snapshot_coverage,
+)
 from lgcov.drift_gate import FailOn, drift_exit_code, parse_fail_on, verdict
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
@@ -141,6 +148,9 @@ def _harness_error(prog: str, what: str, exc: BaseException) -> int:
     return EXIT_ERROR
 
 
+_LIVE_HELP = "re-run every node; by default a node whose code and input match is served"
+
+
 def _fail_on_arg(value: str) -> FailOn:
     try:
         return parse_fail_on(value)
@@ -157,6 +167,7 @@ def _replay(argv: list[str]) -> int:
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
     ap.add_argument("--fail-on", type=_fail_on_arg, default="any-drift", help="exit 1 on")
     ap.add_argument("--summary-json", help="also write drift counts and verdict here")
+    ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
     args = ap.parse_args(argv)
     try:
         cfg = load_config(args.config, {"graph_entrypoint": args.target})
@@ -174,7 +185,7 @@ def _replay(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return _harness_error("lgcov replay", "cannot read baseline", exc)
     try:
-        drifts = [replay(graph, run, cfg.ignore_paths) for run in runs]
+        drifts = [replay(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
     except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
         return _harness_error("lgcov replay", "the graph crashed during replay", exc)
     print("\n".join(_replay_markdown(runs, drifts)))
@@ -212,6 +223,49 @@ def _snapshot(argv: list[str]) -> int:
     except Exception as exc:
         return _harness_error("lgcov snapshot", "cannot load graph", exc)
     print(snap.to_json(), end="")
+    return 0
+
+
+def _coverage_cmd(argv: list[str]) -> int:
+    """T083: coverage of the recorded runs (nothing re-runs), and its trend vs main."""
+    ap = argparse.ArgumentParser(prog="lgcov coverage")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
+    ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
+    ap.add_argument("--cassette-dir", help="overrides cassette_dir")
+    ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""), help="commit SHA")
+    ap.add_argument("--out", help="write coverage.json here")
+    ap.add_argument("--baseline", help="main's coverage.json; a missing file = no baseline yet")
+    args = ap.parse_args(argv)
+    overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
+    try:
+        cfg = load_config(args.config, overrides)
+    except (OSError, ValueError) as exc:
+        print(f"lgcov coverage: invalid config: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        # Exception: importing user graph code can raise anything.
+        snap = snapshot_from_compiled(_load_graph(cfg.graph_entrypoint))
+    except Exception as exc:
+        return _harness_error("lgcov coverage", "cannot load graph", exc)
+    try:
+        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _harness_error("lgcov coverage", "cannot read baseline", exc)
+    cov = snapshot_coverage(snap, [[s.node for s in r.steps] for r in runs], args.commit)
+    base = None
+    if args.baseline and Path(args.baseline).is_file():
+        try:
+            base = CoverageSnapshot.from_json(Path(args.baseline).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"lgcov coverage: cannot read baseline coverage: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(cov.to_json(), encoding="utf-8")
+    print(format_coverage_line(cov, base))
+    newly = coverage_delta(base, cov).newly_uncovered if base else ()
+    if newly:
+        print("Newly uncovered: " + ", ".join(f"`{n}`" for n in newly))
     return 0
 
 
@@ -420,19 +474,39 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
     try:
-        drifts = [replay(graph, run, cfg.ignore_paths) for run in runs]
+        replays = [replay_steps(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
     except Exception as exc:  # a node raised; we can't tell a PR bug from a CI problem
         msg = _harness_message("the graph crashed during replay", exc)
         return replace(partial, harness_error=msg)
+    drifts = [d for d, _ in replays]
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
+    # T083: coverage of the runs replay just did; nothing executes again for it.
+    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in replays], args.commit)
+    if args.coverage_out:
+        Path(args.coverage_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.coverage_out).write_text(cov.to_json(), encoding="utf-8")
+    base, note = _coverage_baseline(args.coverage_baseline)
     return replace(
         partial,
         exit_code=drift_exit_code(fail_on, len(root), len(downstream)),
         replay_lines=tuple(_replay_markdown(runs, drifts)),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
+        coverage_line=format_coverage_line(cov, base),
+        newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
+        notes=(*partial.notes, note) if note else partial.notes,
     )
+
+
+def _coverage_baseline(path: str | None) -> tuple[CoverageSnapshot | None, str]:
+    """Main's coverage.json if there is a readable one. A bad file is a note, never an error."""
+    if not path or not Path(path).is_file():
+        return None, ""
+    try:
+        return CoverageSnapshot.from_json(Path(path).read_text(encoding="utf-8")), ""
+    except (OSError, ValueError) as exc:
+        return None, f"Could not read main's coverage.json ({exc}); showing no baseline yet."
 
 
 def _ci(argv: list[str]) -> int:
@@ -447,6 +521,10 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--base-dir", help="checkout of the PR's base commit, for the graph diff")
     ap.add_argument("--fail-on", type=_fail_on_arg, default="root-drift", help="exit 1 on")
     ap.add_argument("--harness-error", help="an earlier step failed; report it and exit 2")
+    ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
+    ap.add_argument("--coverage-out", help="write this run's coverage.json here")
+    ap.add_argument("--coverage-baseline", help="main's coverage.json; missing = no baseline yet")
+    ap.add_argument("--commit", default=os.environ.get("GITHUB_SHA", ""), help="commit SHA")
     args = ap.parse_args(argv)
     result = _ci_result(args)
     report = Path(args.report).resolve()
@@ -478,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
         return _replay(argv[1:])
     if argv[:1] == ["snapshot"]:
         return _snapshot(argv[1:])
+    if argv[:1] == ["coverage"]:
+        return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:
         return _ci(argv[1:])
     if argv[:1] == ["record"]:

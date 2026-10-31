@@ -11,15 +11,14 @@
 
 | | hit |
 |---|---|
-| nodes | 50.0% (no baseline) |
-| edges | 33.3% (no baseline) |
+| nodes | 75% (no baseline yet) |
+| edges | 33.3% (no baseline yet) |
 
 <details>
-<summary>Never hit: 2 nodes, 2 edges</summary>
+<summary>Never hit: 1 nodes, 2 edges</summary>
 
-- node `__end__`
-- node `__start__`
-- edge `__start__ → a`
+- node `b`
+- edge `a → b`
 - edge `b → __end__`
 
 </details>

@@ -1,9 +1,14 @@
 import json
+import threading
 from collections.abc import Callable, Sequence
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import asdict, dataclass
+from types import FunctionType
 from typing import Any, TypedDict
 
+from langgraph.graph import START
+
+from lgcov.fingerprint import fingerprint
 from lgcov.normalize import normalize
 
 
@@ -11,6 +16,11 @@ from lgcov.normalize import normalize
 class Step:
     node: str
     output: Any
+    # The node's input and code fingerprint when recorded, so replay can serve `output`
+    # while both still match. None in cassettes recorded before nodes kept them, and
+    # code is None for a node with no fingerprint: such steps always run live.
+    input: Any = None
+    code: str | None = None
 
 
 @dataclass
@@ -35,17 +45,77 @@ class Drift:
 
 
 def record(graph: Any, inputs: dict[str, Any]) -> Cassette:
-    """Run the graph once and save every node's output, in order.
+    """Run the graph once and save every node's output, in order, with the input and
+    code fingerprint `replay` needs to serve it later.
 
     graph is typed Any on purpose: LangGraph's generic types change between
     versions and would break mypy --strict on upgrades. A Protocol can replace
     it later.
     """
+    return Cassette(inputs=inputs, steps=_run(graph, inputs, (), ()))
+
+
+def _key(value: Any, ignore_paths: Sequence[str]) -> str | None:
+    # Canonical JSON of the masked value; None if it is not JSON, so never kept or served.
+    try:
+        return json.dumps(normalize(value, ignore_paths), sort_keys=True)
+    except (TypeError, ValueError):
+        return None
+
+
+def _run(
+    graph: Any, inputs: dict[str, Any], served: Sequence[Step], ignore_paths: Sequence[str]
+) -> list[Step]:
+    """Stream the graph once; return its steps with each node's input and fingerprint.
+
+    Each plain-function node is wrapped: a call whose fingerprint and masked input match an
+    unused step of `served` returns that step's output instead of running the node.
+    """
+    lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
+    unused = [(s, _key(s.input, ignore_paths)) for s in served if s.code is not None]
+    calls: list[tuple[str, Any, Any, str | None]] = []  # node, input, returned, fingerprint
+
+    def wrap(name: str, fn: Callable[..., Any], code: str | None) -> Callable[..., Any]:
+        def call(state: Any, *args: Any, **kwargs: Any) -> Any:
+            key = _key(state, ignore_paths)
+            snapshot = deepcopy(state) if key is not None else None  # before fn can mutate it
+            hit: Step | None = None
+            if code is not None and key is not None:
+                with lock:
+                    want = (name, code, key)
+                    i = next(
+                        (i for i, (s, k) in enumerate(unused) if (s.node, s.code, k) == want), None
+                    )
+                    hit = None if i is None else unused.pop(i)[0]
+            out = deepcopy(hit.output) if hit is not None else fn(state, *args, **kwargs)
+            if key is not None:
+                with lock:
+                    calls.append((name, snapshot, out, code))
+            return out
+
+        return call
+
+    original = getattr(graph, "nodes", {})  # an object with only .stream() runs as it is
+    nodes = dict(original)
+    for name, spec in original.items():
+        fn = getattr(spec.bound, "func", None)
+        if name != START and isinstance(fn, FunctionType):  # subgraphs etc. run untouched
+            bound = copy(spec.bound)  # LangGraph's node runnable calls .func on invoke
+            bound.func = wrap(name, fn, fingerprint(fn))
+            nodes[name] = spec.copy({"bound": bound})
+    runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
-    for chunk in graph.stream(inputs, stream_mode="updates"):
+    for chunk in runner.stream(inputs, stream_mode="updates"):
         for node, update in chunk.items():
-            steps.append(Step(node=node, output=update))
-    return Cassette(inputs=inputs, steps=steps)
+            with lock:  # the call that made this update (a returned {} streams as None)
+                i = next(
+                    (i for i, c in enumerate(calls) if (c[0], c[2] or None) == (node, update)), None
+                )
+                call = None if i is None else calls.pop(i)
+            steps.append(
+                Step(node, update) if call is None else Step(node, update, call[1], call[3])
+            )
+    return steps
 
 
 def _by_node(steps: list[Step], ignore_paths: Sequence[str] = ()) -> dict[str, list[str]]:
@@ -57,15 +127,34 @@ def _by_node(steps: list[Step], ignore_paths: Sequence[str] = ()) -> dict[str, l
     return {n: sorted(v) for n, v in out.items()}
 
 
-def replay(graph: Any, cassette: Cassette, ignore_paths: Sequence[str] = ()) -> list[Drift]:
-    """Re-run with the recorded inputs; return nodes whose (normalised) outputs changed."""
+def replay(
+    graph: Any, cassette: Cassette, ignore_paths: Sequence[str] = (), serve: bool = False
+) -> list[Drift]:
+    """Re-run with the recorded inputs; return nodes whose (normalised) outputs changed.
+
+    serve=True (what `lgcov replay` does) skips the nodes a change left alone: a node whose
+    code fingerprint (see lgcov.fingerprint) and normalised input both match a recorded
+    step returns that step's output without running. A node whose code changed, and any
+    node whose input changed because of it, still runs and is compared.
+    """
+    return replay_steps(graph, cassette, ignore_paths, serve)[0]
+
+
+def replay_steps(
+    graph: Any, cassette: Cassette, ignore_paths: Sequence[str] = (), serve: bool = False
+) -> tuple[list[Drift], list[Step]]:
+    """`replay`, plus the fresh run's steps in order (served ones included), so coverage
+    can reuse the run instead of executing the graph again.
+    """
     expected = _by_node(cassette.steps, ignore_paths)
-    actual = _by_node(record(graph, cassette.inputs).steps, ignore_paths)
-    return [
+    fresh = _run(graph, cassette.inputs, cassette.steps if serve else (), ignore_paths)
+    actual = _by_node(fresh, ignore_paths)
+    drifts = [
         Drift(node=n, expected=expected.get(n), actual=actual.get(n))
         for n in sorted(expected.keys() | actual.keys())
         if expected.get(n) != actual.get(n)
     ]
+    return drifts, fresh
 
 
 def accept_nodes(baseline: Cassette, fresh: Cassette, nodes: set[str]) -> tuple[Cassette, set[str]]:
@@ -97,7 +186,7 @@ def accept_nodes(baseline: Cassette, fresh: Cassette, nodes: set[str]) -> tuple[
         i = used.get(step.node, 0)
         used[step.node] = i + 1
         new = by_node[step.node][i]
-        if new != step:
+        if new.output != step.output:  # a new input or code alone is no drift
             changed.add(step.node)
         steps.append(new)
     return Cassette(inputs=baseline.inputs, steps=steps), changed

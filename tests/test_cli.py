@@ -265,8 +265,13 @@ def test_cli_accept_b_leaves_a_byte_identical(
     out = capsys.readouterr().out
     assert "| `b` |" in out
     assert str(baseline) in out
-    # Only b's output text changed; every other byte, a's entries included, is untouched.
-    assert baseline.read_text(encoding="utf-8") == before.replace('"B1"', '"B2"')
+    after = baseline.read_text(encoding="utf-8")
+    runs = json.loads(before)["runs"]
+    for run, new in zip(runs, json.loads(after)["runs"], strict=True):
+        assert new["steps"][1]["output"] == {"b": "B2"}
+        run["steps"][1] = new["steps"][1]  # b's steps are re-recorded whole (output, input, code)
+    # ...and every other byte, a's entries included, is untouched.
+    assert after == json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n"
     summary = baseline.parent / "accept.md"
     assert summary.is_file()
     assert "| `b` |" in summary.read_text(encoding="utf-8")
@@ -304,8 +309,11 @@ def test_cli_accept_all_drifted(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert main(["cassette", "accept", "--all-drifted", "--config", str(cfg)]) == 0
     out = capsys.readouterr().out
     assert "| `a` |" in out and "| `b` |" in out
-    after = baseline.read_text(encoding="utf-8")
-    assert after == before.replace('"A1"', '"A2"').replace('"B1"', '"B2"')
+    after = json.loads(baseline.read_text(encoding="utf-8"))
+    want = json.loads(before.replace('"A1"', '"A2"').replace('"B1"', '"B2"'))
+    for step in (s for r in (*after["runs"], *want["runs"]) for s in r["steps"]):
+        del step["code"]  # fingerprints of the edited code, so they change too
+    assert after == want
     assert main(["replay", "--config", str(cfg)]) == 0
 
 
@@ -369,9 +377,69 @@ def test_cli_replay_applies_ignore_paths_from_config(tmp_path: Path) -> None:
     cfg.write_text(base, encoding="utf-8")
     (tmp_path / "inputs.json").write_text("[{}]", encoding="utf-8")
     assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
-    assert main(["replay", "--config", str(cfg)]) == 1  # the random nonce drifts
+    # --live: unchanged b would be served from the cassette, never rolling a new nonce.
+    assert main(["replay", "--live", "--config", str(cfg)]) == 1  # the random nonce drifts
     cfg.write_text(base + "ignore_paths: [/nonce]\n", encoding="utf-8")
+    assert main(["replay", "--live", "--config", str(cfg)]) == 0
+
+
+# Replay serves a node from the cassette when its code fingerprint and input match.
+def test_cli_replay_serves_unchanged_nodes_unless_live(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    (tmp_path / "graph.py").write_text(AB_GRAPH, encoding="utf-8")  # the recorded code again
+    # A hand-edited output is served as recorded, which shows `a` did not run...
+    edited = baseline.read_text(encoding="utf-8").replace('"A1"', '"AX"')
+    baseline.write_text(edited, encoding="utf-8")
     assert main(["replay", "--config", str(cfg)]) == 0
+    # ...and --live re-runs every node, which catches the edit.
+    capsys.readouterr()
+    assert main(["replay", "--live", "--config", str(cfg)]) == 1
+    assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
+
+
+def test_cli_replay_still_reports_root_and_downstream_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # b's code is unchanged but it reads a's output, so it re-runs once a changes.
+    src = AB_GRAPH.replace('return {"b": "B1"}', 'return {"b": state["a"] + "!"}')
+    graph = tmp_path / "graph.py"
+    graph.write_text(src, encoding="utf-8")
+    cfg = tmp_path / "lgcov.yaml"
+    cfg.write_text(
+        f"graph_entrypoint: {graph}:graph\ncassette_dir: {tmp_path / 'cassettes'}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "inputs.json").write_text("[{}]", encoding="utf-8")
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    graph.write_text(src.replace("A1", "A2"), encoding="utf-8")
+    capsys.readouterr()
+    assert main(["replay", "--config", str(cfg)]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert "| `a` | root | 1/1 |" in lines
+    assert "| `b` | downstream | 1/1 |" in lines
+
+
+def test_cli_replay_reads_a_baseline_recorded_before_node_inputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Older baselines have no node inputs or code fingerprints: every node runs live.
+    runs = json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))["runs"]
+    legacy = [
+        {
+            "inputs": r["inputs"],
+            "steps": [{"node": s["node"], "output": s["output"]} for s in r["steps"]],
+        }
+        for r in runs
+    ]
+    (tmp_path / "baseline.json").write_text(json.dumps({"runs": legacy}), encoding="utf-8")
+    src = DEMO_GRAPH.read_text(encoding="utf-8")
+    (tmp_path / "graph.py").write_text(
+        src.replace("a concise support", "a friendly, detailed support"), encoding="utf-8"
+    )
+    assert main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")]) == 1
+    assert "| `respond` | root | 2/2 |" in capsys.readouterr().out.splitlines()
 
 
 # T078 PR A: `lgcov snapshot`, `replay --fail-on/--summary-json`, harness errors exit 2.
@@ -531,6 +599,7 @@ def test_cli_ci_unloadable_graph_is_a_harness_error(
     assert code == 2
     assert "⚠️ Harness error, not a regression" in report
     assert "boom at import" in report
+    assert "Coverage:" not in report
     assert (outputs["verdict"], outputs["exit-code"], outputs["root-drift-count"]) == (
         "error",
         "2",
@@ -556,3 +625,115 @@ def test_cli_ci_fail_on_never_passes_but_still_shows_drift(
     code, report, outputs = _run_ci(tmp_path, "--fail-on", "never")
     assert (code, outputs["verdict"], outputs["root-drift-count"]) == (0, "pass", "1")
     assert "| `respond` | root | 2/2 |" in report
+
+
+def test_cli_ci_serves_unchanged_nodes_unless_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    # A hand-edited tool result is served as recorded, which shows the nodes did not run...
+    edited = baseline.read_text(encoding="utf-8").replace("#42: shipped", "#42: lost")
+    baseline.write_text(edited, encoding="utf-8")
+    assert _run_ci(tmp_path)[0] == 0
+    # ...and --live re-runs every node, which catches the edit.
+    code, report, _ = _run_ci(tmp_path, "--live")
+    assert code == 1
+    assert "| `lookup_order` | root | 1/2 |" in report
+
+
+# T083: `lgcov coverage` from the recorded runs (nothing re-runs), with trend vs main.
+def _coverage_args(tmp_path: Path, runs: list[int] | None = None) -> list[str]:
+    data = json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))
+    if runs is not None:
+        data["runs"] = [data["runs"][i] for i in runs]
+    (tmp_path / "cassettes").mkdir(exist_ok=True)
+    (tmp_path / "cassettes" / "baseline.json").write_text(json.dumps(data), encoding="utf-8")
+    cassettes = str(tmp_path / "cassettes")
+    return ["coverage", "--graph", f"{DEMO_GRAPH}:graph", "--cassette-dir", cassettes]
+
+
+def test_cli_coverage_out_writes_the_snapshot_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from lgcov.coverage import CoverageSnapshot
+
+    out = tmp_path / "coverage.json"
+    args = [*_coverage_args(tmp_path), "--commit", "abc123", "--out", str(out)]
+    assert main(args) == 0
+    cov = CoverageSnapshot.from_json(out.read_text(encoding="utf-8"))
+    assert (cov.nodes_total, cov.nodes_hit, cov.commit_sha) == (5, 5, "abc123")
+    assert "Nodes 100% · Edges 100% (no baseline yet)" in capsys.readouterr().out
+
+
+def test_cli_coverage_baseline_prints_the_trend_and_newly_uncovered(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main_cov = tmp_path / "coverage.main.json"
+    assert main([*_coverage_args(tmp_path), "--out", str(main_cov)]) == 0
+    capsys.readouterr()
+    # Only the hours run: lookup_order is never visited.
+    assert main([*_coverage_args(tmp_path, runs=[1]), "--baseline", str(main_cov)]) == 0
+    out = capsys.readouterr().out
+    assert "Nodes 80% (−20% vs main) · Edges 60% (−40% vs main)" in out
+    assert "Newly uncovered: `lookup_order`" in out
+
+
+def test_cli_coverage_missing_baseline_is_no_baseline_yet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = [*_coverage_args(tmp_path), "--baseline", str(tmp_path / "missing.json")]
+    assert main(args) == 0
+    assert "(no baseline yet)" in capsys.readouterr().out
+
+
+def test_cli_coverage_malformed_baseline_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = tmp_path / "coverage.main.json"
+    bad.write_text("{}", encoding="utf-8")
+    assert main([*_coverage_args(tmp_path), "--baseline", str(bad)]) == 2
+    assert "lgcov coverage:" in capsys.readouterr().err
+
+
+# T083 C2: `lgcov ci` reports coverage of the runs replay just did, and the trend vs main.
+def test_cli_ci_reports_coverage_with_no_baseline_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lgcov.coverage import CoverageSnapshot
+
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    cov_out = tmp_path / "out" / "coverage.json"
+    code, report, _ = _run_ci(tmp_path, "--coverage-out", str(cov_out), "--commit", "abc123")
+    assert code == 0
+    assert "Coverage: Nodes 100% · Edges 100% (no baseline yet)" in report
+    cov = CoverageSnapshot.from_json(cov_out.read_text(encoding="utf-8"))
+    assert (cov.nodes_hit, cov.commit_sha) == (5, "abc123")
+
+
+def test_cli_ci_coverage_trend_lists_newly_uncovered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    never_the_tool = demo.replace('"order" in state["question"].lower()', "False")
+    assert never_the_tool != demo
+    _ci_project(tmp_path, monkeypatch, never_the_tool)
+    main_cov = tmp_path / "coverage.main.json"
+    args = ["coverage", "--graph", f"{DEMO_GRAPH}:graph", "--cassette-dir", "cassettes"]
+    assert main([*args, "--out", str(main_cov)]) == 0  # main covered every node
+    code, report, _ = _run_ci(tmp_path, "--coverage-baseline", str(main_cov))
+    assert code == 1  # classify drifted
+    assert "Coverage: Nodes 80% (−20% vs main) · Edges 60% (−40% vs main)" in report
+    assert "Newly uncovered: `lookup_order`" in report
+
+
+def test_cli_ci_unreadable_coverage_baseline_is_no_baseline_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    bad = tmp_path / "coverage.main.json"
+    bad.write_text("not json", encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--coverage-baseline", str(bad))
+    assert code == 0  # a bad baseline is a note, never a failure
+    assert "(no baseline yet)" in report
+    assert "could not read main's coverage.json" in report.lower()
