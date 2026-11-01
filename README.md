@@ -133,7 +133,10 @@ Root vs propagated attribution, measured: `lgcov bench DIR` records each benchma
 on base, replays head, and scores lgcov's labels against hand-written ones, precision /
 recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). For now its rows are
 three synthetic fixtures in `tests/fixtures/bench/`; real PRs come with T100. A miss on a
-hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden.
+hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden. The
+mutation operators for injecting known regressions into open_deep_research, each with the
+KPI that should catch it and its root and propagated labels, are in
+[docs/mutations.yaml](docs/mutations.yaml); nothing applies them yet.
 
 ## Use in your repo
 
