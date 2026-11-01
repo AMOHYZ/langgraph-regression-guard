@@ -1,0 +1,201 @@
+# T118: the benchmark's mutation operators. Each injects one known regression into
+# open_deep_research and says where it should show: the KPI that should catch it (from
+# docs/taxonomy.yaml), and the nodes lgcov should name as root and as propagated, named as in
+# docs/benchmark/ (a subgraph's inner node is <subgraph node>.<node>; the researchers' nodes
+# run under research_supervisor.supervisor_tools).
+#
+# Every location was read at `ref`, PR #163's merge, the head of
+# docs/benchmark/open_deep_research-163.yaml. The labels are predictions from that code, not
+# recorded runs: nothing applies the operators yet, and running one needs the agent's API
+# keys, like the #163 row.
+#
+# confidence (high | medium | low) is how likely the operator is to actually trip its KPI.
+# A low-confidence miss counts as "operator too weak", not as an attribution false negative.
+#
+# Each entry: id; operator (its class); confidence; description (the edit); location (kind:
+# node | prompt | tool | router | state_key; name: its name in the code; file); activation
+# (the inputs it shows on); regression (kpi, root, propagated). tests/test_mutations.py
+# checks this file against that schema, the taxonomy's KPIs and the #163 row's node names.
+version: 1
+system: open_deep_research
+graph: src/open_deep_research/deep_researcher.py:deep_researcher
+ref: 6532a4176a93cc9bb2102b3d825dcefa560c85d9
+taxonomy: docs/taxonomy.yaml
+operators:
+  - id: supervisor_prompt_drops_delegation
+    operator: prompt_edit
+    confidence: high
+    description: >-
+      lead_researcher_prompt loses its instruction to delegate: the sentences telling the
+      supervisor to call the ConductResearch tool are cut, so it answers or finishes on its
+      own.
+    location: {kind: prompt, name: lead_researcher_prompt, file: src/open_deep_research/prompts.py}
+    activation: >-
+      Any question that needs outside sources: both #163 cases.
+    regression:
+      kpi: supervisor_delegates
+      root: [write_research_brief]  # it formats the prompt into the supervisor's system message
+      propagated:
+        - research_supervisor.supervisor
+        - research_supervisor.supervisor_tools
+        - final_report_generation
+
+  - id: researcher_prompt_drops_think_step
+    operator: prompt_edit
+    confidence: high
+    description: >-
+      research_system_prompt loses its think_tool step: the rule to use think_tool after
+      each search, and the paragraph on analysing each search with it, are cut.
+    location: {kind: prompt, name: research_system_prompt, file: src/open_deep_research/prompts.py}
+    activation: >-
+      Any research unit that searches at least once: both #163 cases.
+    regression:
+      kpi: researcher_uses_think_tool
+      root: [research_supervisor.supervisor_tools.researcher]  # it formats the prompt
+      propagated:
+        - research_supervisor.supervisor_tools.researcher_tools
+        - research_supervisor.supervisor_tools.compress_research
+        - research_supervisor.supervisor_tools
+        - research_supervisor.supervisor
+        - final_report_generation
+
+  - id: search_takes_one_query
+    operator: tool_schema_change
+    confidence: medium
+    description: >-
+      tavily_search's `queries: List[str]` becomes `query: str`, so each search call
+      carries one query instead of several. The researcher can make up for it with more
+      calls.
+    location: {kind: tool, name: tavily_search, file: src/open_deep_research/utils.py}
+    activation: >-
+      Topics the researcher would search with several queries at once, like comparisons
+      across vendors or across years: both #163 cases.
+    regression:
+      kpi: report_claims_supported
+      root: [research_supervisor.supervisor_tools.researcher]  # it binds the tool's schema
+      propagated:
+        - research_supervisor.supervisor_tools.researcher_tools
+        - research_supervisor.supervisor_tools.compress_research
+        - research_supervisor.supervisor_tools
+        - research_supervisor.supervisor
+        - final_report_generation
+
+  - id: supervisor_stops_once_it_delegates
+    operator: router_flip
+    confidence: high
+    description: >-
+      supervisor_tools' `no_tool_calls = not most_recent_message.tool_calls` is inverted,
+      so the research phase ends exactly when the supervisor delegates, before any
+      researcher runs. supervisor_delegates still passes: the supervisor did call
+      ConductResearch.
+    location: {kind: router, name: supervisor_tools, file: src/open_deep_research/deep_researcher.py}
+    activation: >-
+      Any question the supervisor delegates: both #163 cases.
+    regression:
+      kpi: report_claims_supported
+      root: [research_supervisor.supervisor_tools]
+      propagated: [final_report_generation]
+
+  - id: notes_key_renamed
+    operator: state_key_rename
+    confidence: high
+    description: >-
+      The `notes` state key becomes `findings` in AgentState, SupervisorState and
+      supervisor_tools' updates, but final_report_generation still reads
+      `state.get("notes", [])`: it writes the report from no findings, and nothing fails.
+    location: {kind: state_key, name: notes, file: src/open_deep_research/state.py}
+    activation: >-
+      Every run that reaches final_report_generation: both #163 cases.
+    regression:
+      kpi: report_claims_supported
+      root: [research_supervisor.supervisor_tools]  # its last update writes the renamed key
+      propagated: [final_report_generation]
+
+  - id: report_model_downsized
+    operator: model_swap
+    confidence: low
+    description: >-
+      final_report_model's default goes from openai:gpt-4.1 to openai:gpt-4.1-nano.
+    location: {kind: node, name: final_report_generation, file: src/open_deep_research/configuration.py}
+    activation: >-
+      Reports that pull many sources together, like the #163 three-vendor comparison.
+    regression:
+      kpi: report_claims_supported
+      root: [final_report_generation]
+      propagated: []
+
+  - id: compression_runs_hot
+    operator: model_swap
+    confidence: low
+    description: >-
+      A temperature change, filed under model_swap: compress_research's model runs at
+      temperature 1.5 ("temperature" added to configurable_model's configurable_fields and
+      set in compress_research's model config). ODR sets no temperature today, so it runs
+      at OpenAI's default, 1.0.
+    location: {kind: node, name: compress_research, file: src/open_deep_research/deep_researcher.py}
+    activation: >-
+      Research units with many findings to compress: both #163 cases.
+    regression:
+      kpi: report_claims_supported
+      root: [research_supervisor.supervisor_tools.compress_research]
+      propagated:
+        - research_supervisor.supervisor_tools
+        - research_supervisor.supervisor
+        - final_report_generation
+
+  - id: search_returns_one_result
+    operator: retrieval_k_change
+    confidence: medium
+    description: >-
+      tavily_search's max_results goes from 5 to 1 per query. It's an injected argument
+      the model never sees, so the researcher isn't told; it can make up for it with more
+      searches.
+    location: {kind: tool, name: tavily_search, file: src/open_deep_research/utils.py}
+    activation: >-
+      Questions that need more than one source per query, like prices across vendors or the
+      EU AI Act's 2021 and 2024 texts: both #163 cases.
+    regression:
+      kpi: report_claims_supported
+      root: [research_supervisor.supervisor_tools.researcher_tools]  # the search runs there
+      propagated:
+        - research_supervisor.supervisor_tools.researcher
+        - research_supervisor.supervisor_tools.compress_research
+        - research_supervisor.supervisor_tools
+        - research_supervisor.supervisor
+        - final_report_generation
+
+  - id: research_fan_out_keeps_one
+    operator: send_fan_out_drop
+    confidence: medium
+    description: >-
+      supervisor_tools runs only the first ConductResearch call of each round
+      (`conduct_research_calls[:1]`, not `[:max_concurrent_research_units]`), and the
+      others get its "did not run" reply. ODR fans out with asyncio.gather inside
+      supervisor_tools, not with Send; the operator is the same: branches of the fan-out
+      never run. The supervisor may re-delegate them in later rounds, up to 6.
+    location: {kind: node, name: supervisor_tools, file: src/open_deep_research/deep_researcher.py}
+    activation: >-
+      Questions the supervisor splits into two or more research units at once, like the
+      #163 three-vendor comparison.
+    regression:
+      kpi: report_claims_supported
+      root: [research_supervisor.supervisor_tools]
+      propagated: [research_supervisor.supervisor, final_report_generation]
+
+  - id: compressed_research_cut
+    operator: subgraph_output_change
+    confidence: medium
+    description: >-
+      The researcher subgraph's output keeps only the first paragraph of
+      compressed_research, the text compress_research hands back to supervisor_tools. The
+      report still has the research brief.
+    location: {kind: node, name: compress_research, file: src/open_deep_research/deep_researcher.py}
+    activation: >-
+      Research units whose findings run past one paragraph: both #163 cases.
+    regression:
+      kpi: report_claims_supported
+      root: [research_supervisor.supervisor_tools.compress_research]
+      propagated:
+        - research_supervisor.supervisor_tools
+        - research_supervisor.supervisor
+        - final_report_generation
