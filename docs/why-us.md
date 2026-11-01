@@ -52,8 +52,8 @@ cloud.
 **Paired statistics, done properly.** This is standard technique, not a differentiator.
 Each case's base and PR scores are paired: an exact McNemar test for binary KPIs, a
 sign-flip test otherwise. Δ gets a BCa bootstrap CI, a non-inferiority margin δ decides
-SHIP, BLOCK or INCONCLUSIVE, and an INCONCLUSIVE KPI shows the cases it needs (N*, from
-Kotawala 2026, Eq. 6).
+SHIP, BLOCK or INCONCLUSIVE, and an INCONCLUSIVE KPI shows the cases it needs to detect Δ
+(N*, from Kotawala 2026, Eq. 6).
 *Status: built ([PR #26](https://github.com/AMOHYZ/langgraph-regression-guard/pull/26),
 [PR #27](https://github.com/AMOHYZ/langgraph-regression-guard/pull/27)).* The design
 follows [statgate](https://github.com/yashchimata/statgate) (see [NOTICE](../NOTICE)),

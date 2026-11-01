@@ -103,7 +103,8 @@ def test_tokens_are_unknown_unless_some_judgment_reports_usage() -> None:
 def test_flakiness_alone_never_fails_the_gate() -> None:
     cases = _cases(*[["pass", "fail", "pass"]] * 4)  # same flaky cases on base and new
     stats = kpi_stats(KPI_, 3, base=cases, new=cases)
-    assert (stats.outcome, stats.flakiness) == ("pass", 1.0)
+    # T150: never a fail; 4 identical cases are too few to rule out a drop of the margin
+    assert (stats.outcome, stats.flakiness) == ("needs_human", 1.0)
     assert stats.flaky_cases == ("run-0", "run-1", "run-2", "run-3")
 
 
@@ -164,7 +165,7 @@ def test_a_kpi_with_mostly_infra_samples_shows_judge_unreliable() -> None:
 
     cases = _cases(["pass", "timeout", "conn"])  # 2 of 3 judgments didn't run
     stats = kpi_stats(KPI_, 3, base=cases, new=cases)
-    assert stats.outcome == "pass" and stats.judge_unreliable
+    assert stats.outcome == "needs_human" and stats.judge_unreliable  # T150: 1 case
     assert "| ⚠️ judge unreliable: grounded (4 of 6 judgments didn't run) | | | | | |" in (
         render_kpi_table([stats])
     )
@@ -208,7 +209,7 @@ def test_holm_stops_a_borderline_kpi_from_blocking() -> None:
     gated = gate_kpis([grounded, kpi_stats(POLITE, 1, same, same)])
     assert [(s.kpi, s.decision, s.outcome) for s in gated] == [
         ("grounded", "INCONCLUSIVE", "needs_human"),
-        ("polite", "SHIP", "pass"),
+        ("polite", "INCONCLUSIVE", "needs_human"),  # T150: 60 identical cases, under 74
     ]
     assert gated[0].p_adjusted == pytest.approx(0.0625)  # Holm with m = 2
     assert gate_exit_code(gated) == 0
@@ -240,7 +241,7 @@ def test_gate_table_row_has_n_rates_delta_ci_p_margin_mde_n_star_verdict_and_roo
     assert lines[:3] == [
         "| KPI | n | base | PR | Δ (95% CI) | p adj. | δ | MDE | N* | verdict | root |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
-        "| grounded | 200 | 100% | 90% | -0.10 [-0.14, -0.06] | <0.001 | 0.05 | 0.05 | 71 "
+        "| grounded | 200 | 100% | 90% | -0.10 [-0.14, -0.06] | <0.001 | 0.05 | 0.06 | 71 "
         "| 🔴 BLOCK | `respond` |",  # run-50 didn't change: its root isn't this KPI's
     ]
 
@@ -255,3 +256,16 @@ def test_a_flag_band_caps_a_block_at_inconclusive_and_still_counts_as_blocking()
     table = "\n".join(render_gate_table([flagged]))
     assert "| grounded (flag) |" in table
     assert "⚠️ INCONCLUSIVE (judge band: flag)" in table
+
+
+# T150: identical sides are evidence of no drop once the 3.69/n bound is under the margin.
+def test_identical_sides_under_74_cases_say_how_many_they_need() -> None:
+    same = _cases(*[["pass"]] * 50)
+    stats = kpi_stats(KPI_, 1, same, same)
+    assert (stats.decision, stats.outcome) == ("INCONCLUSIVE", "needs_human")
+    table = "\n".join(render_gate_table([stats]))
+    assert "| 0.05 | — | 74 | ⚠️ INCONCLUSIVE |" in table
+    assert "| ⚠️ underpowered: need 24 more cases for grounded (N*=74) |" in table
+    hundred = _cases(*[["pass"]] * 100)
+    shipped = kpi_stats(KPI_, 1, hundred, hundred)
+    assert (shipped.decision, shipped.outcome) == ("SHIP", "pass")

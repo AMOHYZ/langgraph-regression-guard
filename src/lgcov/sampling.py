@@ -28,6 +28,7 @@ from lgcov.stats import (
     decide,
     holm,
     holm_adjusted,
+    no_drop_cases,
     paired_test,
 )
 
@@ -137,6 +138,7 @@ class KpiStats:
     roots: tuple[str, ...] = ()  # nodes that drifted first in the runs whose score changed
     band: str = "blocking"  # T063: blocking, flag (BLOCK capped at INCONCLUSIVE) or advisory
     cases: tuple[tuple[tuple[float, ...], tuple[float, ...]], ...] = ()  # T090: paired scores
+    score_range: float = 1.0  # T150: the KPI's highest score minus its lowest
 
     @property
     def flakiness(self) -> float:
@@ -216,6 +218,7 @@ def kpi_stats(
         confidence=fmean(confidence[c] for c in pairs) if pairs else 0.0,
         margin=margin,
         roots=tuple(roots),
+        score_range=max(kpi.score_map.values()) - min(kpi.score_map.values()),
     )
     return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence)[0]
 
@@ -245,7 +248,16 @@ def gate_kpis(
             family, adjust(pvalues), reject(pvalues, alpha), strict=True
         ):
             s = gated[i]
-            decision = decide(r.delta, r.ci, s.margin, significant)
+            decision = decide(
+                r.delta,
+                r.ci,
+                s.margin,
+                significant,
+                discordant=r.discordant,
+                n=r.n,
+                scale=s.score_range,
+                alpha=alpha,
+            )
             capped = s.band == "flag"
             outcome = gate_outcome(decision, s.confidence, min_confidence, blocking, capped)
             gated[i] = replace(s, p_adjusted=p_adj, decision=decision, outcome=outcome)
@@ -320,19 +332,23 @@ def render_gate_table(
             )
             continue
         mde = "—" if r.sd < 1e-9 else f"{r.mde:.2f}"  # no spread seen: nothing to size it by
+        needed = r.required_n
+        if r.discordant == 0:  # T150: identical sides SHIP from this many cases
+            needed = no_drop_cases(s.margin, alpha, s.score_range)
         lines.append(
             f"| {name} | {r.n} | {_pct(r.base_rate)} | {_pct(r.new_rate)} "
             f"| {r.delta:+.2f} [{r.ci[0]:+.2f}, {r.ci[1]:+.2f}] | {_p(s.p_adjusted)} "
-            f"| {s.margin:.2f} | {mde} | {r.required_n or '—'} | {_verdict(s)} | {roots} |"
+            f"| {s.margin:.2f} | {mde} | {needed or '—'} | {_verdict(s)} | {roots} |"
         )
-        if s.decision == "INCONCLUSIVE" and r.required_n is not None and r.n < r.required_n:
-            need = f"need {r.required_n - r.n} more cases for {s.kpi} (N*={r.required_n})"
+        if s.decision == "INCONCLUSIVE" and needed is not None and r.n < needed:
+            need = f"need {needed - r.n} more cases for {s.kpi} (N*={needed})"
             lines.append(f"| ⚠️ underpowered: {need} |" + " |" * 10)
     lines += [
         "",
         "Cases paired base vs PR. p adj.: Holm across blocking KPIs, Benjamini-Hochberg across "
         "advisory ones. δ: non-inferiority margin. MDE: smallest drop this n detects. N*: "
-        f"cases needed to detect Δ (α {alpha:g}, power {power:g}).",
+        f"cases needed to detect Δ (α {alpha:g}, power {power:g}); with no discordant pair, "
+        "the identical cases that rule out a drop of δ.",
     ]
     return lines
 

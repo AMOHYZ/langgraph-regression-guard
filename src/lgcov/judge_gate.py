@@ -48,6 +48,16 @@ def verdict_gate(
     if not base_v or not new_v:
         return "needs_human"
     r = paired_test([[v.score] for v in base_v], [[v.score] for v in new_v], alpha)
-    decision = decide(r.delta, r.ci, margin, r.p <= alpha)
+    scores = base_v[0].kpi.score_map.values()  # T150: the range scales the no-drop bound
+    decision = decide(
+        r.delta,
+        r.ci,
+        margin,
+        r.p <= alpha,
+        discordant=r.discordant,
+        n=r.n,
+        scale=max(scores) - min(scores),
+        alpha=alpha,
+    )
     confidence = fmean(v.confidence for v in new_v)
     return gate_outcome(decision, confidence, min_confidence, capped=band != "blocking")
