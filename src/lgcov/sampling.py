@@ -359,8 +359,29 @@ def render_gate_table(
         "smallest drop this n detects. N*: "
         f"cases needed to detect Δ (α {alpha:g}, power {power:g}); with no discordant pair, "
         "the identical cases that rule out a drop of δ.",
+        "",
+        _guarantee(k_gate(stats), alpha),
     ]
     return lines
+
+
+def _guarantee(k: int, alpha: float) -> str:
+    """T114: what SHIP and BLOCK claim, in plain words; docs/gate.md has it too."""
+    if k == 0:
+        return "No KPI blocks this PR (K_gate = 0), so the gate makes no SHIP or BLOCK claim."
+    # The CI decide() reads is always 95%; with no discordant pair, the no-drop bound's side
+    # is alpha / 2, the larger of the two above alpha = 0.05.
+    side = "2.5% (one side of the 95% CI)" if alpha <= 0.05 else f"{alpha / 2 * 100:g}% (α/2)"
+    return (
+        f"**What SHIP and BLOCK guarantee.** SHIP needs every blocking KPI (K_gate = {k}) to "
+        "pass its own non-inferiority test: its 95% CI rules out a drop of δ. Since all of "
+        f"them must pass, a wrong SHIP is no likelier than one KPI's wrong pass, {side}, "
+        "however many KPIs there are. That makes SHIP an intersection-union test, which "
+        "needs no multiplicity correction. BLOCK is a claim about one KPI, and every blocking "
+        "KPI is another chance of a false alarm, so BLOCK p-values are Holm-corrected across "
+        f"all K_gate = {k}: the chance of even one false BLOCK stays at α = {alpha:g}. A node "
+        "or slice group never goes further than its KPIs' own verdicts."
+    )
 
 
 def render_kpi_table(stats: Sequence[KpiStats]) -> list[str]:

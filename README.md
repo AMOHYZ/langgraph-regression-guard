@@ -305,6 +305,9 @@ a case's k samples averaged first. Per KPI, against a non-inferiority margin δ:
   says how many more cases it needs: N* is the number needed to detect Δ at α and the set
   power (Kotawala 2026, Eq. 6, for paired binary outcomes), or the 74 identical cases.
 
+What SHIP and BLOCK guarantee, in one paragraph: [docs/gate.md](docs/gate.md). The PR
+comment prints it under the gate table.
+
 How it's computed:
 
 - A binary KPI with k = 1 gets an exact McNemar test; graded scores or k > 1 get a paired
