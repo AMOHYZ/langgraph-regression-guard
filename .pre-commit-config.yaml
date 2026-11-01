@@ -20,3 +20,10 @@ repos:
       language: system
       types: [python]
       pass_filenames: false
+    # T116: docs/banned-phrases.txt nowhere in the repo; the README has why-us.md's tagline.
+    - id: docs-lint
+      name: docs lint
+      entry: uv run python -m lgcov.docs_lint
+      language: system
+      pass_filenames: false
+      always_run: true
