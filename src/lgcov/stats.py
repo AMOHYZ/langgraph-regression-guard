@@ -7,7 +7,9 @@ case, each side is averaged within the case first, and d_i = s_PR,i - s_base,i.
 - Graded scores or K > 1: paired sign-flip permutation (exact for n <= 20, else seeded
   Monte Carlo), plus a seeded BCa bootstrap 95% CI on the mean difference.
 - Per-KPI decision against a non-inferiority margin; Holm or Benjamini-Hochberg across
-  KPIs; required N (Kotawala 2026, Eq. 6, McNemar-Connor) and a one-sided MDE.
+  KPIs. T150: the detection N (Kotawala 2026, Eq. 6, McNemar-Connor) and the
+  non-inferiority N are different numbers; identical sides are judged by a no-drop bound;
+  the MDE is two-sided, like the 95% CI decide() reads.
 
 Design credit: the sign-flip p-value's (extreme + 1) / (B + 1) form and the BCa interval
 (tie-aware bias correction, jackknife acceleration, fallback when the correction
@@ -128,7 +130,8 @@ def _required(sd: float, effect: float, alpha: float, power: float) -> int | Non
 
 def cases_needed(sd: float, effect: float, alpha: float = 0.05, power: float = 0.8) -> int | None:
     """T090: paired cases needed to detect `effect` at alpha / power, given the SD of the
-    per-case difference; None for no effect."""
+    per-case difference; None for no effect. Detection only (T150): it sizes the thin rule,
+    whether a group has the cases to BLOCK; it is not the non-inferiority N."""
     return _required(sd, effect, alpha, power)
 
 
@@ -138,13 +141,45 @@ def required_n(
     """Cases needed to detect p_A - p_B with paired outcomes (Kotawala 2026, Eq. 6,
     McNemar-Connor), with rho the correlation of the paired outcomes. Not Cohen's h x
     (1 - rho), which understates N by about half.
+
+    DETECTION only (superiority, T150): the cases to find a true difference. It sizes N* for
+    an INCONCLUSIVE KPI's observed delta. It is never the non-inferiority (harm) rule's N, the
+    cases SHIP needs to rule out a drop of the margin: that is ni_required_n.
     """
     return _required(sigma_d(p_a, p_b, rho), p_a - p_b, alpha, power)
 
 
+def ni_required_n(
+    p_a: float, p_b: float, rho: float, margin: float, alpha: float = 0.05, power: float = 0.8
+) -> int | None:
+    """T150: cases for the non-inferiority test, enough for the 95% CI's low end to clear
+    -margin when the true rates are p_A (base) and p_B (PR): what SHIP needs. Two-sided z,
+    since decide() reads the low end of a two-sided 95% CI (a one-sided test at alpha / 2).
+    None when the expected drop reaches the margin: then no N shows non-inferiority.
+    """
+    room = p_b - p_a + margin
+    if room <= _EPS:
+        return None
+    return _required(sigma_d(p_a, p_b, rho), room, alpha, power)
+
+
 def mde(sd: float, n: int, alpha: float = 0.05, power: float = 0.8) -> float:
-    """One-sided minimum detectable effect for n paired cases."""
-    return (_N.inv_cdf(1 - alpha) + _N.inv_cdf(power)) * sd / math.sqrt(n)
+    """Two-sided minimum detectable effect for n paired cases (T150): the z of the 95% CI
+    decide() reads, so it is the smallest drop this n can show."""
+    return (_N.inv_cdf(1 - alpha / 2) + _N.inv_cdf(power)) * sd / math.sqrt(n)
+
+
+def no_drop_bound(n: int, alpha: float = 0.05, scale: float = 1.0) -> float:
+    """T150: with no discordant pair among n cases, the one-sided upper bound on the drop
+    at the end of the 95% CI decide() reads: -ln(alpha / 2) / n, about 3.69 / n (a little
+    above the exact Clopper-Pearson 1 - (alpha / 2)^(1/n)), times the KPI's score range for
+    graded scores."""
+    return -math.log(alpha / 2) * scale / n
+
+
+def no_drop_cases(margin: float, alpha: float = 0.05, scale: float = 1.0) -> int:
+    """T150: the fewest identical cases whose no-drop bound is under the margin: 74 at 0.05."""
+    return math.floor(-math.log(alpha / 2) * scale / margin) + 1
 
 
 def _order(pvalues: Sequence[float]) -> list[int]:
@@ -188,14 +223,32 @@ def benjamini_hochberg_adjusted(pvalues: Sequence[float]) -> list[float]:
 
 
 def decide(
-    delta: float, ci: tuple[float, float], margin: float = 0.05, significant: bool = True
+    delta: float,
+    ci: tuple[float, float],
+    margin: float = 0.05,
+    significant: bool = True,
+    *,
+    discordant: int | None = None,
+    n: int = 0,
+    scale: float = 1.0,
+    alpha: float = 0.05,
 ) -> Decision:
     """BLOCK: the whole CI is below 0, the drop is at least the margin, and the
     (multiplicity-adjusted) test rejects. SHIP: the CI's low end is above -margin.
+
+    T150: a NaN anywhere is INCONCLUSIVE. No discordant pair among n cases is evidence of no
+    drop: SHIP once no_drop_bound(n) is under the margin, INCONCLUSIVE before. Any other
+    zero-width CI (every case moved the same way) can't SHIP: it says nothing about spread.
     """
     lo, hi = ci
+    if math.isnan(delta) or math.isnan(lo) or math.isnan(hi):
+        return "INCONCLUSIVE"
+    if discordant == 0:
+        return "SHIP" if n > 0 and no_drop_bound(n, alpha, scale) < margin else "INCONCLUSIVE"
     if hi < 0 and delta <= -margin and significant:
         return "BLOCK"
+    if hi - lo < _EPS:
+        return "INCONCLUSIVE"
     if lo > -margin:
         return "SHIP"
     return "INCONCLUSIVE"
@@ -213,7 +266,8 @@ class PairedResult:
     rho: float  # correlation of the paired per-case scores
     sd: float  # SD of the per-case difference (Eq. 6 for binary KPIs)
     required_n: int | None  # to detect delta at alpha / power; None if delta is 0
-    mde: float  # one-sided minimum detectable effect at this n
+    mde: float  # two-sided minimum detectable effect at this n (T150)
+    discordant: int  # T150: cases that differ between the sides (b + c for binary KPIs)
     base_rate_ci: tuple[float, float] | None = None  # Wilson, binary KPIs only
     new_rate_ci: tuple[float, float] | None = None
 
@@ -251,10 +305,12 @@ def paired_test(
         c = sum(1 for x, y in zip(b_means, n_means, strict=True) if x == 0.0 and y == 1.0)
         p, method, sd = mcnemar_exact_p(b, c), "mcnemar", sigma_d(p_a, p_b, rho)
         rate_cis = (wilson(round(p_a * n), n), wilson(round(p_b * n), n))
+        discordant = b + c
     else:
         p, method = sign_flip_p(diffs, seed=seed), "sign-flip"
         sd = stdev(diffs) if n > 1 else 0.0
         rate_cis = (None, None)
+        discordant = sum(1 for d in diffs if abs(d) > _EPS)
     delta = fmean(diffs)
     return PairedResult(
         n=n,
@@ -268,6 +324,7 @@ def paired_test(
         sd=sd,
         required_n=_required(sd, delta, alpha, power),
         mde=mde(sd, n, alpha, power),
+        discordant=discordant,
         base_rate_ci=rate_cis[0],
         new_rate_ci=rate_cis[1],
     )

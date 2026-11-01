@@ -83,10 +83,12 @@ def _verdicts(kpi: KPI, label: str, n: int, confidence: float) -> list[Verdict]:
     return [Verdict(kpi, label, kpi.score_map[label], confidence, {}) for _ in range(n)]
 
 
-def test_equal_verdict_distributions_pass() -> None:
-    base = _verdicts(GOOD_BAD, "good", 10, 0.9) + _verdicts(GOOD_BAD, "bad", 2, 0.9)
-    new = _verdicts(GOOD_BAD, "good", 10, 0.9) + _verdicts(GOOD_BAD, "bad", 2, 0.9)
-    assert verdict_gate(base, new) == "pass"
+def test_equal_verdicts_pass_once_there_are_enough_cases() -> None:
+    # T150: no discordant pair is evidence, but 12 cases leave room for a drop of 0.31
+    few = _verdicts(GOOD_BAD, "good", 10, 0.9) + _verdicts(GOOD_BAD, "bad", 2, 0.9)
+    assert verdict_gate(few, few) == "needs_human"
+    many = _verdicts(GOOD_BAD, "good", 70, 0.9) + _verdicts(GOOD_BAD, "bad", 10, 0.9)
+    assert verdict_gate(many, many) == "pass"  # 80 cases: the drop is at most 0.046
 
 
 def test_confident_drop_fails() -> None:

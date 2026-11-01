@@ -11,7 +11,14 @@ from dataclasses import dataclass
 
 from lgcov.judge_gate import OUTCOMES, GateOutcome
 from lgcov.sampling import KpiStats
-from lgcov.stats import Decision, PairedResult, cases_needed, decide, paired_test
+from lgcov.stats import (
+    Decision,
+    PairedResult,
+    cases_needed,
+    decide,
+    no_drop_cases,
+    paired_test,
+)
 
 GROUP_BY = ("node", "slice")
 _SEVERITY: dict[GateOutcome, int] = {"pass": 0, "needs_human": 1, "infra_error": 1, "fail": 2}
@@ -31,7 +38,8 @@ class Group:
     blocking: bool  # a judge in it can block (band blocking, not advisory)
     result: PairedResult | None  # None: no paired case
     margin: float
-    needed: int | None  # cases to detect a drop of `margin`; None: no effect to detect
+    needed: int | None  # cases to detect a drop of `margin` (T150: or, with no discordant
+    # pair, the identical cases SHIP takes); None: no effect to detect
     decision: Decision | None
     outcome: GateOutcome
     left_out: tuple[str, ...] = ()  # the group's flag or advisory KPIs, beside blocking ones
@@ -61,8 +69,20 @@ def _group(
             node, slice_, kpis, bool(blocking), None, margin, None, None, "needs_human", left_out
         )
     r = paired_test([list(b) for b, _ in units], [list(n) for _, n in units], alpha, power)
+    scale = max(m.score_range for m in pool)
     needed = cases_needed(r.sd, margin, alpha, power)
-    decision = decide(r.delta, r.ci, margin, r.p <= alpha)
+    if r.discordant == 0:  # T150: identical sides SHIP from this many cases
+        needed = no_drop_cases(margin, alpha, scale)
+    decision = decide(
+        r.delta,
+        r.ci,
+        margin,
+        r.p <= alpha,
+        discordant=r.discordant,
+        n=r.n,
+        scale=scale,
+        alpha=alpha,
+    )
     if decision == "BLOCK" and needed is not None and r.n < needed:
         decision = "INCONCLUSIVE"  # thin: too few cases to block on its own
     outcome = OUTCOMES[decision]

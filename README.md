@@ -296,16 +296,24 @@ a case's k samples averaged first. Per KPI, against a non-inferiority margin δ:
 - **BLOCK** (exit 1): the whole 95% CI of Δ is below 0, Δ ≤ −δ, and the adjusted p is
   under α. A BLOCK the judge isn't confident of (mean confidence under 0.7) is
   INCONCLUSIVE instead.
-- **SHIP** (exit 0): the CI's low end is above −δ, so any drop is smaller than δ.
-- **INCONCLUSIVE** (exit 0, or 1 with the switch): neither. A ⚠️ row says how many more
-  cases it needs: N* is the number needed to detect Δ at α and the set power (Kotawala
-  2026, Eq. 6, for paired binary outcomes).
+- **SHIP** (exit 0): the CI's low end is above −δ, so any drop is smaller than δ. With no
+  discordant pair (every case scored the same on both sides, as replay makes an unchanged
+  KPI), the drop is at most 3.69/n (−ln(α/2)/n, times the score range for graded KPIs), so
+  identical sides SHIP from 74 cases at δ = 0.05.
+- **INCONCLUSIVE** (exit 0, or 1 with the switch): neither; or a NaN; or a zero-width CI
+  with Δ ≠ 0 (every case moved the same way, so there's no spread to judge by). A ⚠️ row
+  says how many more cases it needs: N* is the number needed to detect Δ at α and the set
+  power (Kotawala 2026, Eq. 6, for paired binary outcomes), or the 74 identical cases.
 
 How it's computed:
 
 - A binary KPI with k = 1 gets an exact McNemar test; graded scores or k > 1 get a paired
   sign-flip test (exact up to 20 cases). The CI is a seeded BCa bootstrap; MDE is the
-  smallest drop this many cases detects.
+  smallest drop this many cases detects, two-sided like the CI.
+- Finding a drop and ruling one out take different numbers of cases. At p = 0.80, ρ = 0.3,
+  α = 0.05 and power 0.8, detecting a true 0.05 drop takes 765 (`required_n`, which sizes
+  N*); showing the PR is at most 0.05 worse, when it isn't worse at all, takes 704
+  (`ni_required_n`). 765 is a detection number, not a non-inferiority or harm one.
 - p is adjusted with Holm across the blocking KPIs and Benjamini–Hochberg across the
   advisory ones, so adding KPIs doesn't add false alarms. Advisory KPIs never fail a PR.
 - The old outcome names stay as aliases: `pass` = SHIP, `fail` = BLOCK, `needs_human` =
@@ -325,8 +333,8 @@ Per node and slice. The report never gives only a mean: after the KPI table it h
 per node, a row per slice (the KPIs' failure mode) and the node's total when it has more than
 one, each pooling its blocking judges' paired cases into one test. The overall verdict is the
 worst group's. A group is thin, "⚠️ thin (n=6, need 93)", when it has fewer cases than it needs
-to detect a drop of its margin at power 0.8, and a thin group can't block on its own: its BLOCK
-is INCONCLUSIVE. A KPI's own BLOCK still blocks. `report.group_by: [node, slice]` in
+to detect a drop of its margin at power 0.8 (with no discordant pair, the identical cases that
+rule one out), and a thin group can't block on its own: its BLOCK is INCONCLUSIVE. A KPI's own BLOCK still blocks. `report.group_by: [node, slice]` in
 `lgcov.yaml` chooses the grouping; `[]` turns it off. Graph-structural coverage criteria are
 future work.
 

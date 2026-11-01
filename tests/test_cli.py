@@ -827,13 +827,14 @@ def test_cli_judge_samples_three_and_shows_a_flaky_row(
     assert "| KPI | n | base | PR | Δ (95% CI) | p adj. | δ | MDE | N* | verdict | root |" in out
     assert (
         "| answer_states_order_status (advisory) | 2 | 83% | 83% | +0.00 [+0.00, +0.00] | 1.000 "
-        "| 0.05 | — | — | 🟢 SHIP | — |"
-    ) in out  # T063: no calibration labels, so advisory
+        "| 0.05 | — | 74 | ⚠️ INCONCLUSIVE | — |"
+    ) in out  # T063: no calibration labels, so advisory; T150: 2 identical cases, need 74
+    assert "need 72 more cases for respond_runs (N*=74)" in out
     assert "⚠️ 1 of 2 judges uncalibrated: no model judge can block this PR." in out
     # T090: per node and slice; only blocking judges' cases are pooled into the verdict
     assert "#### Node `respond`" in out
     assert "| `respond_drift` | `respond_runs`; not pooled: `answer_states_order_status` |" in out
-    assert "Overall: 🟢 SHIP." in out
+    assert "Overall: ⚠️ INCONCLUSIVE, from" in out  # exit 0 all the same
 
 
 # T091: base passes both cases and the PR fails its order case: n=2 can't decide that.
