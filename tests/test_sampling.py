@@ -11,6 +11,7 @@ from lgcov.sampling import (
     gate_exit_code,
     gate_kpis,
     judge_samples,
+    k_gate,
     kpi_stats,
     render_gate_table,
     usage_tokens,
@@ -269,3 +270,50 @@ def test_identical_sides_under_74_cases_say_how_many_they_need() -> None:
     hundred = _cases(*[["pass"]] * 100)
     shipped = kpi_stats(KPI_, 1, hundred, hundred)
     assert (shipped.decision, shipped.outcome) == ("SHIP", "pass")
+
+
+# T114: Holm's m is K_gate, the blocking KPIs the run judges, fixed before any p is seen.
+TONE = KPI.binary("tone", "the answer keeps a calm tone", "Is the tone calm?")
+
+
+def test_k_gate_one_blocks_where_k_gate_three_cannot() -> None:
+    base, new = _drop(60, 6)  # exact McNemar p = 2 / 2**6 = 0.031
+    same = _cases(*[["pass"]] * 60)
+    kpis = [kpi_stats(KPI_, 1, base, new), *(kpi_stats(k, 1, same, same) for k in (POLITE, TONE))]
+    one = gate_kpis(kpis, advisory={"polite", "tone"})  # lgcov.yaml's gate.advisory_kpis
+    three = gate_kpis(kpis)
+    assert (k_gate(one), one[0].decision) == (1, "BLOCK")
+    assert one[0].p_adjusted == pytest.approx(0.03125)
+    assert (k_gate(three), three[0].decision) == (3, "INCONCLUSIVE")
+    assert three[0].p_adjusted == pytest.approx(0.09375)
+    assert "Holm across the K_gate = 3 blocking KPIs" in "\n".join(render_gate_table(three))
+
+
+def test_a_blocking_kpi_with_no_paired_case_still_counts_in_k_gate() -> None:
+    base, new = _drop(60, 6)
+    unpaired = kpi_stats(POLITE, 1, {}, {})  # its node never ran: no case on either side
+    gated = gate_kpis([kpi_stats(KPI_, 1, base, new), unpaired])
+    assert (k_gate(gated), gated[0].decision, gated[1].decision) == (2, "INCONCLUSIVE", None)
+    assert gated[0].p_adjusted == pytest.approx(0.0625)  # Holm with m = 2, not 1
+
+
+def test_the_gate_table_says_what_ship_and_block_guarantee() -> None:
+    base, new = _drop(60, 6)
+    same = _cases(*[["pass"]] * 60)
+    gated = gate_kpis([kpi_stats(KPI_, 1, base, new), kpi_stats(POLITE, 1, same, same)])
+    assert render_gate_table(gated)[-1] == (
+        "**What SHIP and BLOCK guarantee.** SHIP needs every blocking KPI (K_gate = 2) to pass "
+        "its own non-inferiority test: its 95% CI rules out a drop of δ. Since all of them "
+        "must pass, a wrong SHIP is no likelier than one KPI's wrong pass, 2.5% (one side of "
+        "the 95% CI), however many KPIs there are. That makes SHIP an intersection-union "
+        "test, which needs no multiplicity correction. BLOCK is a claim about one KPI, and "
+        "every blocking KPI is another chance of a false alarm, so BLOCK p-values are "
+        "Holm-corrected across all K_gate = 2: the chance of even one false BLOCK stays at "
+        "α = 0.05. A node or slice group never goes further than its KPIs' own verdicts."
+    )
+    looser = render_gate_table(gated, alpha=0.1)[-1]  # the no-drop bound's side is α/2
+    assert "one KPI's wrong pass, 5% (α/2), however" in looser and "α = 0.1." in looser
+    [advisory] = gate_kpis([kpi_stats(KPI_, 1, base, new)], advisory={"grounded"})
+    assert render_gate_table([advisory])[-1] == (
+        "No KPI blocks this PR (K_gate = 0), so the gate makes no SHIP or BLOCK claim."
+    )

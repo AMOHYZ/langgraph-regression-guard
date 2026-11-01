@@ -81,6 +81,7 @@ from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
 from lgcov.lint import lint, routers_of, summary
+from lgcov.lock import Commits, locked_line, moved
 from lgcov.review import ReviewDecision, apply_decision
 from lgcov.sampling import (
     KpiStats,
@@ -880,6 +881,36 @@ def _coverage_baseline(path: str | None) -> tuple[CoverageSnapshot | None, str]:
         return None, f"Could not read main's coverage.json ({exc}); showing no baseline yet."
 
 
+def _git_out(repo: str, *args: str) -> str:
+    """T114: git's stdout in repo; '' when git fails there, times out, or isn't installed."""
+    git = ["git", "-C", repo, *args]
+    try:
+        return subprocess.run(git, check=True, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _head(repo: str) -> str | None:
+    """T114: the commit checked out in repo; None if it isn't a git checkout."""
+    return _git_out(repo, "rev-parse", "--verify", "-q", "HEAD").strip() or None
+
+
+def _commits(base_dir: str | None) -> Commits:
+    """T114: HEAD of the base checkout and of the working directory, and whether a locked
+    one has uncommitted changes (untracked files too), which the lock can't see."""
+    base, candidate = _head(base_dir) if base_dir else None, _head(".")
+    locked = [repo for repo, sha in ((base_dir, base), (".", candidate)) if repo and sha]
+    return Commits(base, candidate, any(_git_out(r, "status", "--porcelain") for r in locked))
+
+
+def _locked(result: CiResult, start: Commits, base_dir: str | None) -> CiResult:
+    """T114: a run whose base or candidate commit moved gives no verdict: INFRA_ERROR."""
+    refused = moved(start, _commits(base_dir))
+    if refused:
+        return CiResult(result.fail_on, EXIT_ERROR, harness_error=refused)
+    return replace(result, locked=locked_line(start))
+
+
 def _ci(argv: list[str]) -> int:
     """T078: one run for the GitHub Action: report file, step outputs, exit code."""
     ap = argparse.ArgumentParser(prog="lgcov ci")
@@ -916,7 +947,8 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--timing-out", help="write this run's timing here as JSON (T105 benchmark)")
     ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
     args = ap.parse_args(argv)
-    result = _ci_result(args)
+    start = _commits(args.base_dir)  # T114: before anything is loaded
+    result = _locked(_ci_result(args), start, args.base_dir)
     report = Path(args.report).resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
     body = render_ci_report(result)
@@ -1088,6 +1120,7 @@ def _judge_cmd(argv: list[str]) -> int:
     ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
     ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
     args = ap.parse_args(argv)
+    start = _commits(None)  # T114: the candidate; its base is the cassette in that checkout
     overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
     try:
         cfg = load_config(args.config, overrides)
@@ -1138,6 +1171,7 @@ def _judge_cmd(argv: list[str]) -> int:
     total, model = _l2_calls(plan, k)
     total += sum(len(c) for c in saved.values())  # T102: each saved case, judged once more
     model += sum(len(saved.get(s.name, [])) for s in specs if s.judge != "code")
+    print(locked_line(start))
     print(f"Planned: {total} judge calls, {model} to model judges (--max-calls {args.max_calls})")
     if model > args.max_calls:
         print(
@@ -1147,10 +1181,14 @@ def _judge_cmd(argv: list[str]) -> int:
         )
         return EXIT_ERROR
     stats = _l2_gate(plan, judges, k, gate, runs, replays, advisory, flagged)
+    rechecked = _rejudge(saved, specs, judges)
+    refused = moved(start, _commits(None))  # T114: no verdict from two versions of the code
+    if refused:
+        print(f"lgcov judge: {refused}", file=sys.stderr)
+        return EXIT_ERROR
     groups = _groups(stats, specs, cfg, gate)
     print("\n".join([*calibration, *([""] if calibration else [])]), end="")
     print("\n".join(_l2_tables(stats, groups, gate)))
-    rechecked = _rejudge(saved, specs, judges)
     if rechecked:
         print("\n".join(["", *rechecked]))
     code = groups_exit(

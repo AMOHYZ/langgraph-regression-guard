@@ -200,6 +200,16 @@ jobs:
   most 200 model judge calls per run. `judge: jev` KPIs read `JEV_API_URL` and
   `JEV_API_KEY`: set them in the job's `env:` from secrets.
 - Outcomes and exit codes are in the table below.
+- The run locks the commits it compares. It records the base checkout's HEAD and the PR's
+  at the start, and the report prints both:
+  "🔒 Locked for this run: base `88a0be8`, candidate `fec0c00`."
+  - If either moves before the run ends, the run gives no verdict: INFRA_ERROR.
+  - The lock sees commits only. Uncommitted changes at the start add "⚠️ uncommitted
+    changes, not covered by the lock", a warning that never fails the run.
+  - A move and a move back between the two reads goes unseen.
+  - Outside a git checkout the run isn't locked, and the report says so.
+  - `lgcov judge` locks the candidate the same way. Its base is the cassette in that
+    checkout.
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
   `cassette-dir`, `taxonomy` (turns on the KPI gate; `taxonomy_path` isn't read here),
   `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `tier`,
@@ -214,7 +224,7 @@ jobs:
 | PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI is SHIP. |
 | AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, node coverage under `thresholds.min_node_coverage`, or a node in the PR's graph raised; the report names the node (a router by its function name, a node inside subgraph `sub` as `sub.inner`). A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
 | INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK (shown as ⚠️ `needs_human`, with the cases it still needs), or replay left nodes not checked: a divergence with `on-divergence: fail`, or a budget hit. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1, never 2. |
-| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, or a blocking KPI left with no valid judgment on a side. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
+| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, a blocking KPI left with no valid judgment on a side, or the base or candidate commit moved during the run (then no verdict at all, even a BLOCK). Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
 
 A regression found in the same run wins over a judge's infra error: exit 1.
 
@@ -305,6 +315,9 @@ a case's k samples averaged first. Per KPI, against a non-inferiority margin δ:
   says how many more cases it needs: N* is the number needed to detect Δ at α and the set
   power (Kotawala 2026, Eq. 6, for paired binary outcomes), or the 74 identical cases.
 
+What SHIP and BLOCK guarantee, in one paragraph: [docs/gate.md](docs/gate.md). The PR
+comment prints it under the gate table.
+
 How it's computed:
 
 - A binary KPI with k = 1 gets an exact McNemar test; graded scores or k > 1 get a paired
@@ -319,6 +332,9 @@ How it's computed:
   never varies, and then it drops out of σ_d.
 - p is adjusted with Holm across the blocking KPIs and Benjamini–Hochberg across the
   advisory ones, so adding KPIs doesn't add false alarms. Advisory KPIs never fail a PR.
+  Holm's family is K_gate: every KPI the run judges that `gate` and the bands leave
+  blocking, counted before any judging, so one with no paired case still counts, as p = 1.
+  The table's footnote prints it.
 - The old outcome names stay as aliases: `pass` = SHIP, `fail` = BLOCK, `needs_human` =
   INCONCLUSIVE; `infra_error` stays its own path.
 
@@ -337,7 +353,10 @@ per node, a row per slice (the KPIs' failure mode) and the node's total when it 
 one, each pooling its blocking judges' paired cases into one test. The overall verdict is the
 worst group's. A group is thin, "⚠️ thin (n=6, need 93)", when it has fewer cases than it needs
 to detect a drop of its margin at power 0.8 (with no discordant pair, the identical cases that
-rule one out), and a thin group can't block on its own: its BLOCK is INCONCLUSIVE. A KPI's own BLOCK still blocks. `report.group_by: [node, slice]` in
+rule one out), and a thin group can't block on its own: its BLOCK is INCONCLUSIVE. Nor does a
+group go further than its KPIs: its BLOCK stands only when one of them blocks on its own,
+Holm-corrected ("⚠️ pooled drop, no KPI blocks on its own" otherwise), and its SHIP only when
+every one of them SHIPs. A KPI's own BLOCK still blocks. `report.group_by: [node, slice]` in
 `lgcov.yaml` chooses the grouping; `[]` turns it off. Graph-structural coverage criteria are
 future work.
 

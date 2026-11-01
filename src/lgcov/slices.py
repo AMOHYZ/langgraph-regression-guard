@@ -1,7 +1,9 @@
 """T090: KPI results per node and per slice (the KPI's failure mode), each group's paired
 cases pooled into one paired test. The overall verdict is the worst group's, never a mean,
 and a thin group, with fewer cases than it needs to see a drop of its margin at power 0.8,
-can't block on its own: its BLOCK becomes INCONCLUSIVE.
+can't block on its own: its BLOCK becomes INCONCLUSIVE. T114: nor does a group go further
+than its KPIs: it BLOCKs only if one of them blocks on its own (Holm-corrected), and SHIPs
+only if every one of them SHIPs.
 """
 
 from __future__ import annotations
@@ -28,6 +30,10 @@ _ICONS: dict[GateOutcome, str] = {
     "needs_human": "⚠️",
     "infra_error": "⚠️",
 }
+_UNBACKED: dict[Decision, str] = {
+    "BLOCK": "⚠️ pooled drop, no KPI blocks on its own",
+    "SHIP": "⚠️ pooled SHIP, a KPI isn't SHIP on its own",
+}
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,7 @@ class Group:
     decision: Decision | None
     outcome: GateOutcome
     left_out: tuple[str, ...] = ()  # the group's flag or advisory KPIs, beside blocking ones
+    unbacked: Decision | None = None  # T114: the pooled SHIP or BLOCK its KPIs don't back
 
     @property
     def thin(self) -> bool:
@@ -85,10 +92,19 @@ def _group(
     )
     if decision == "BLOCK" and needed is not None and r.n < needed:
         decision = "INCONCLUSIVE"  # thin: too few cases to block on its own
+    backed = {  # T114: what the pooled KPIs say on their own, Holm-corrected
+        "BLOCK": any(m.outcome == "fail" for m in pool),
+        "SHIP": all(m.outcome == "pass" for m in pool),
+    }
+    unbacked = decision if blocking and not backed.get(decision, True) else None
+    if unbacked:
+        decision = "INCONCLUSIVE"
     outcome = OUTCOMES[decision]
     if not blocking and outcome == "fail":
         outcome = "needs_human"  # advisory or flag judges only: they can't fail the gate
-    return Group(node, slice_, kpis, bool(blocking), r, margin, needed, decision, outcome, left_out)
+    return Group(
+        node, slice_, kpis, bool(blocking), r, margin, needed, decision, outcome, left_out, unbacked
+    )
 
 
 def group_kpis(
@@ -131,6 +147,8 @@ def _verdict(g: Group) -> str:
     shown = f"{_ICONS[g.outcome]} {g.decision}"
     if g.thin:
         shown += f" · ⚠️ thin (n={g.result.n}, need {g.needed})"
+    if g.unbacked:
+        shown += f" · {_UNBACKED[g.unbacked]}"
     return shown
 
 

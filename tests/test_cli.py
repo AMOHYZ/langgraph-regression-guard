@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1650,3 +1651,82 @@ def test_cli_taxonomy_draft_needs_a_client(
     code = main(["taxonomy", "draft", *_draft_args(tmp_path), "--out", str(tmp_path / "d.yaml")])
     assert code == 2
     assert "no drafting client" in capsys.readouterr().err
+
+
+# T114: `lgcov ci` and `lgcov judge` lock the commits they compare from start to end.
+MOVING_GRAPH = FIXTURES / "moving_graph.py"  # respond commits to $LGCOV_MOVE_REPO
+
+
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    return done.stdout.decode().strip()
+
+
+def _repo(path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Commit everything at path to a new repo, away from your own git config; its HEAD."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for who in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{who}_NAME", "lgcov test")
+        monkeypatch.setenv(f"GIT_{who}_EMAIL", "test@example.invalid")
+    _git(path, "init", "-q")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "--allow-empty", "-m", "start")
+    return _git(path, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("side", [None, "base", "candidate"])
+def test_cli_ci_locks_the_base_and_the_candidate_for_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, side: str | None
+) -> None:
+    _ci_project(tmp_path, monkeypatch, MOVING_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / ".gitignore").write_text("base/\nout/\n", encoding="utf-8")
+    (tmp_path / "base").mkdir()
+    (tmp_path / "base" / "graph.py").write_text(DEMO_GRAPH.read_text(encoding="utf-8"))
+    heads = {
+        "candidate": _repo(tmp_path, monkeypatch),
+        "base": _repo(tmp_path / "base", monkeypatch),
+    }
+    if side is not None:  # respond runs live (its code changed) and commits there each time
+        monkeypatch.setenv(
+            "LGCOV_MOVE_REPO", str(tmp_path / "base" if side == "base" else tmp_path)
+        )
+    code, report, outputs = _run_ci(tmp_path, "--base-dir", "base")
+    if side is None:
+        assert (code, outputs["verdict"]) == (0, "pass")
+        base, candidate = heads["base"][:7], heads["candidate"][:7]
+        assert f"🔒 Locked for this run: base `{base}`, candidate `{candidate}`.\n" in report
+    else:
+        assert (code, outputs["verdict"]) == (2, "error")
+        assert f"the {side} was `{heads[side][:7]}` at the start and is `" in report
+        assert "Coverage:" not in report and "🔒" not in report  # no verdict from mixed code
+
+
+def test_cli_judge_refuses_when_the_candidate_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = _judge_args(tmp_path)
+    (tmp_path / "graph.py").write_text(MOVING_GRAPH.read_text(encoding="utf-8"))
+    args[args.index("--graph") + 1] = f"{tmp_path / 'graph.py'}:graph"
+    monkeypatch.chdir(tmp_path)
+    head = _repo(tmp_path, monkeypatch)
+    monkeypatch.setenv("LGCOV_MOVE_REPO", str(tmp_path))
+    assert main([*args, "--taxonomy", DEMO_TAXONOMY]) == 2
+    out, err = capsys.readouterr()
+    assert f"🔒 Locked for this run: candidate `{head[:7]}`." in out
+    assert (
+        f"lgcov judge: Locked commits moved during the run: the candidate was `{head[:7]}`" in err
+    )
+    assert "| KPI |" not in out  # no gate table from two versions of the code
+
+
+def test_cli_ci_warns_of_uncommitted_changes_the_lock_cannot_see(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    head = _repo(tmp_path, monkeypatch)
+    (tmp_path / "notes.txt").write_text("not committed\n", encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path)
+    assert (code, outputs["verdict"]) == (0, "pass")  # a warning only, never a refusal
+    warned = "⚠️ uncommitted changes, not covered by the lock"
+    assert f"🔒 Locked for this run: candidate `{head[:7]}`. {warned}\n" in report

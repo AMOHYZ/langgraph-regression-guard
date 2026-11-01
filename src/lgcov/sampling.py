@@ -223,6 +223,12 @@ def kpi_stats(
     return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence)[0]
 
 
+def k_gate(stats: Sequence[KpiStats]) -> int:
+    """T114: the blocking KPIs the run judges, as lgcov.yaml and the bands leave them; Holm
+    runs across exactly these, so one with no paired case still counts, as p = 1."""
+    return sum(1 for s in stats if s.blocking)
+
+
 def gate_kpis(
     stats: Sequence[KpiStats],
     advisory: Collection[str] = (),
@@ -230,9 +236,10 @@ def gate_kpis(
     min_confidence: float = 0.7,
     flagged: Collection[str] = (),
 ) -> list[KpiStats]:
-    """T091: Holm across the blocking KPIs, Benjamini-Hochberg across the advisory ones,
-    then each KPI's decision against its margin. An advisory KPI never fails the gate, and
-    (T063) a flagged one, a judge whose band is flag, stops it at most as INCONCLUSIVE."""
+    """T091: Holm across the blocking KPIs (T114: all K_gate of them, paired or not),
+    Benjamini-Hochberg across the advisory ones, then each KPI's decision against its margin.
+    An advisory KPI never fails the gate, and (T063) a flagged one, a judge whose band is
+    flag, stops it at most as INCONCLUSIVE."""
 
     def band(kpi: str) -> str:
         return "advisory" if kpi in advisory else "flag" if kpi in flagged else "blocking"
@@ -244,8 +251,10 @@ def gate_kpis(
     ):
         family = [(i, s.paired) for i, s in enumerate(gated) if s.blocking == blocking and s.paired]
         pvalues = [r.p for _, r in family]
-        for (i, r), p_adj, significant in zip(
-            family, adjust(pvalues), reject(pvalues, alpha), strict=True
+        if blocking:  # T114: m = K_gate, fixed before any p is seen; the missing ones are p = 1
+            pvalues += [1.0] * (k_gate(gated) - len(family))
+        for (i, r), p_adj, significant in zip(  # not strict: it stops before the padding
+            family, adjust(pvalues), reject(pvalues, alpha), strict=False
         ):
             s = gated[i]
             decision = decide(
@@ -345,12 +354,34 @@ def render_gate_table(
             lines.append(f"| ⚠️ underpowered: {need} |" + " |" * 10)
     lines += [
         "",
-        "Cases paired base vs PR. p adj.: Holm across blocking KPIs, Benjamini-Hochberg across "
-        "advisory ones. δ: non-inferiority margin. MDE: smallest drop this n detects. N*: "
+        f"Cases paired base vs PR. p adj.: Holm across the K_gate = {k_gate(stats)} blocking "
+        "KPIs, Benjamini-Hochberg across advisory ones. δ: non-inferiority margin. MDE: "
+        "smallest drop this n detects. N*: "
         f"cases needed to detect Δ (α {alpha:g}, power {power:g}); with no discordant pair, "
         "the identical cases that rule out a drop of δ.",
+        "",
+        _guarantee(k_gate(stats), alpha),
     ]
     return lines
+
+
+def _guarantee(k: int, alpha: float) -> str:
+    """T114: what SHIP and BLOCK claim, in plain words; docs/gate.md has it too."""
+    if k == 0:
+        return "No KPI blocks this PR (K_gate = 0), so the gate makes no SHIP or BLOCK claim."
+    # The CI decide() reads is always 95%; with no discordant pair, the no-drop bound's side
+    # is alpha / 2, the larger of the two above alpha = 0.05.
+    side = "2.5% (one side of the 95% CI)" if alpha <= 0.05 else f"{alpha / 2 * 100:g}% (α/2)"
+    return (
+        f"**What SHIP and BLOCK guarantee.** SHIP needs every blocking KPI (K_gate = {k}) to "
+        "pass its own non-inferiority test: its 95% CI rules out a drop of δ. Since all of "
+        f"them must pass, a wrong SHIP is no likelier than one KPI's wrong pass, {side}, "
+        "however many KPIs there are. That makes SHIP an intersection-union test, which "
+        "needs no multiplicity correction. BLOCK is a claim about one KPI, and every blocking "
+        "KPI is another chance of a false alarm, so BLOCK p-values are Holm-corrected across "
+        f"all K_gate = {k}: the chance of even one false BLOCK stays at α = {alpha:g}. A node "
+        "or slice group never goes further than its KPIs' own verdicts."
+    )
 
 
 def render_kpi_table(stats: Sequence[KpiStats]) -> list[str]:
