@@ -80,6 +80,7 @@ from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, ve
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
+from lgcov.langsmith import GetClient, LangSmithError, cases, from_env
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
 from lgcov.review import ReviewDecision, apply_decision
@@ -514,6 +515,45 @@ def _record(argv: list[str]) -> int:
     out = Path(cfg.cassette_dir) / "baseline.json"
     _write_runs(out, runs)
     print(f"recorded {len(runs)} runs to {out}")
+    return 0
+
+
+# T103: the LangSmith client; tests swap in a fake. None: an httpx.Client per request.
+_langsmith_client: GetClient | None = None
+
+
+def _import_langsmith(argv: list[str]) -> int:
+    """T103: a LangSmith dataset's examples as lgcov cases, read-only."""
+    ap = argparse.ArgumentParser(prog="lgcov import langsmith")
+    ap.add_argument("--dataset", required=True, help="the LangSmith dataset's name")
+    ap.add_argument("--out", default="cases.json", help="where the cases go (cases.json)")
+    ap.add_argument("--limit", type=int, help="import at most this many examples")
+    ap.add_argument("--split", help="import only this split of the dataset")
+    args = ap.parse_args(argv)
+    if args.limit is not None and args.limit < 1:
+        ap.error("--limit must be at least 1")
+    ls = from_env(_langsmith_client)
+    if ls is None:
+        print(
+            "lgcov import langsmith: LANGSMITH_API_KEY isn't set; nothing imported",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    try:
+        dataset_id = ls.dataset_id(args.dataset)
+        inputs, sidecar = cases(ls.examples(dataset_id, args.limit, args.split))
+    except LangSmithError as exc:
+        print(f"lgcov import langsmith: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    out = Path(args.out)
+    beside = out.with_suffix(".langsmith.json")  # example ids and outputs, in the same order
+    out.parent.mkdir(parents=True, exist_ok=True)
+    for path, body in ((out, inputs), (beside, sidecar)):
+        path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(
+        f"Imported {len(inputs)} cases from LangSmith dataset `{args.dataset}` to {out} "
+        f"(ids and outputs in {beside}); record them with `lgcov record --inputs {out}`"
+    )
     return 0
 
 
@@ -1719,6 +1759,11 @@ def main(argv: list[str] | None = None) -> int:
         return _ci(argv[1:])
     if argv[:1] == ["record"]:
         return _record(argv[1:])
+    if argv[:2] == ["import", "langsmith"]:
+        return _import_langsmith(argv[2:])
+    if argv[:1] == ["import"]:
+        print("lgcov import: the one source is langsmith (lgcov import langsmith --dataset X)")
+        return EXIT_ERROR
     if argv[:1] == ["cassette"]:
         return _cassette_accept(argv[1:])
     ap = argparse.ArgumentParser(prog="graph-diff")

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from lgcov.cli import main
 from lgcov.judges import KPI, NodeState, Verdict
@@ -1730,3 +1731,71 @@ def test_cli_ci_warns_of_uncommitted_changes_the_lock_cannot_see(
     assert (code, outputs["verdict"]) == (0, "pass")  # a warning only, never a refusal
     warned = "⚠️ uncommitted changes, not covered by the lock"
     assert f"🔒 Locked for this run: candidate `{head[:7]}`. {warned}\n" in report
+
+
+# T103: `lgcov import langsmith`, against a fake LangSmith (tests/fixtures/langsmith_api.py).
+def _langsmith(monkeypatch: pytest.MonkeyPatch, fake: Fake, key: bool = True) -> None:
+    monkeypatch.setattr("lgcov.cli._langsmith_client", fake)
+    monkeypatch.delenv("LANGSMITH_ENDPOINT", raising=False)
+    if key:
+        monkeypatch.setenv("LANGSMITH_API_KEY", KEY)
+    else:
+        monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+
+
+def test_cli_import_langsmith_writes_cases_and_a_sidecar_in_the_same_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = Fake({"/datasets": [Reply(200, [{"id": "d1"}])], "/examples": [Reply(200, EXAMPLES)]})
+    _langsmith(monkeypatch, fake)
+    out = tmp_path / "cases.json"
+    assert main(["import", "langsmith", "--dataset", "support-qa", "--out", str(out)]) == 0
+    assert json.loads(out.read_text("utf-8")) == [
+        {"question": "Where is my order?"},
+        {"question": "What are your hours?"},
+    ]
+    sidecar = json.loads((tmp_path / "cases.langsmith.json").read_text("utf-8"))
+    assert sidecar == [
+        {"example_id": "ex-1", "outputs": {"answer": "order #42: shipped"}},
+        {"example_id": "ex-2", "outputs": None},
+    ]
+    printed = capsys.readouterr()
+    assert f"Imported 2 cases from LangSmith dataset `support-qa` to {out}" in printed.out
+    assert KEY not in printed.out + printed.err
+
+
+def test_cli_import_langsmith_passes_limit_and_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = Fake(
+        {"/datasets": [Reply(200, [{"id": "d1"}])], "/examples": [Reply(200, EXAMPLES[:1])]}
+    )
+    _langsmith(monkeypatch, fake)
+    args = ["import", "langsmith", "--dataset", "support-qa", "--out", str(tmp_path / "c.json")]
+    assert main([*args, "--limit", "1", "--split", "test"]) == 0
+    assert fake.calls[1][:2] == (
+        "/examples",
+        {"dataset": "d1", "splits": "test", "offset": 0, "limit": 1},
+    )
+
+
+@pytest.mark.parametrize(
+    ("routes", "key", "message"),
+    [
+        ({}, False, "LANGSMITH_API_KEY isn't set; nothing imported"),
+        ({"/datasets": [Reply(200, [])]}, True, "no LangSmith dataset named `nope`"),
+    ],
+)
+def test_cli_import_langsmith_exits_2_and_writes_nothing_when_it_cannot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    routes: dict[str, list[Reply | Exception]],
+    key: bool,
+    message: str,
+) -> None:
+    _langsmith(monkeypatch, Fake(routes), key)
+    out = tmp_path / "cases.json"
+    assert main(["import", "langsmith", "--dataset", "nope", "--out", str(out)]) == 2
+    assert message in capsys.readouterr().err
+    assert not out.exists()
