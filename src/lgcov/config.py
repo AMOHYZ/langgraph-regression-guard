@@ -42,6 +42,14 @@ class GateConfig:
         return frozenset(k for k in kpis if k not in self.blocking_kpis)
 
 
+@dataclass(frozen=True)
+class LangSmithConfig:
+    """T103: the LangSmith dataset whose experiment on this commit the PR report links."""
+
+    dataset: str | None = None  # None: `lgcov ci` makes no LangSmith call
+    link: bool = True  # False: no link, and no LangSmith call at all
+
+
 # T089: pr runs on every push, cheap and within a budget; nightly runs everything, live.
 Tier = Literal["pr", "nightly"]
 TIERS: tuple[Tier, ...] = ("pr", "nightly")
@@ -75,6 +83,7 @@ class Config:
     tier: Tier = "pr"
     jev_model: str | None = None  # T063: the Jev model judges use; labels are only good for it
     group_by: tuple[str, ...] = ("node", "slice")  # T090: report.group_by
+    langsmith: LangSmithConfig = field(default_factory=LangSmithConfig)  # T103
 
 
 _KEYS = (
@@ -83,6 +92,7 @@ _KEYS = (
     "graph_entrypoint",
     "ignore_paths",
     "jev_model",
+    "langsmith",
     "report",
     "samples_per_case",
     "taxonomy",  # alias for taxonomy_path
@@ -192,6 +202,17 @@ def _group_by(raw: object) -> tuple[str, ...]:
     return tuple(g for g in ("node", "slice") if g in by)
 
 
+def _langsmith(raw: object) -> LangSmithConfig:
+    if not isinstance(raw, dict):
+        raise ValueError("lgcov.yaml: 'langsmith' must be a mapping")
+    _check_keys(raw, ("dataset", "link"), "lgcov.yaml: langsmith")
+    link = raw.get("link", True)
+    if not isinstance(link, bool):
+        raise ValueError("lgcov.yaml: 'langsmith.link' must be true or false")
+    dataset = raw.get("dataset")
+    return LangSmithConfig(None if dataset is None else _str(dataset, "langsmith.dataset"), link)
+
+
 def _tier(value: object) -> Tier:
     for tier in TIERS:
         if value == tier:
@@ -245,6 +266,7 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         tier=_tier(d.get("tier", "pr")),
         jev_model=None if "jev_model" not in d else _str(d["jev_model"], "jev_model"),
         group_by=_group_by(d.get("report", {})),
+        langsmith=_langsmith(d.get("langsmith", {})),
     )
 
 

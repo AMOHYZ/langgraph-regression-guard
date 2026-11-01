@@ -67,7 +67,15 @@ from lgcov.cassette import (
 from lgcov.ci_report import CiResult, Timing, render_ci_report
 from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
-from lgcov.config import TIERS, Config, GateConfig, Tier, load_config, tier_policy
+from lgcov.config import (
+    TIERS,
+    Config,
+    GateConfig,
+    LangSmithConfig,
+    Tier,
+    load_config,
+    tier_policy,
+)
 from lgcov.coverage import (
     CoverageSnapshot,
     coverage_delta,
@@ -80,6 +88,14 @@ from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, ve
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
+from lgcov.langsmith import (
+    GetClient,
+    LangSmithError,
+    cases,
+    experiment_url,
+    from_env,
+    matching,
+)
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
 from lgcov.review import ReviewDecision, apply_decision
@@ -517,6 +533,81 @@ def _record(argv: list[str]) -> int:
     return 0
 
 
+# T103: the LangSmith client; tests swap in a fake. None: an httpx.Client per request.
+_langsmith_client: GetClient | None = None
+
+
+def _import_langsmith(argv: list[str]) -> int:
+    """T103: a LangSmith dataset's examples as lgcov cases, read-only."""
+    ap = argparse.ArgumentParser(prog="lgcov import langsmith")
+    ap.add_argument("--dataset", required=True, help="the LangSmith dataset's name")
+    ap.add_argument("--out", default="cases.json", help="where the cases go (cases.json)")
+    ap.add_argument("--limit", type=int, help="import at most this many examples")
+    ap.add_argument("--split", help="import only this split of the dataset")
+    args = ap.parse_args(argv)
+    if args.limit is not None and args.limit < 1:
+        ap.error("--limit must be at least 1")
+    ls = from_env(_langsmith_client)
+    if ls is None:
+        print(
+            "lgcov import langsmith: LANGSMITH_API_KEY isn't set; nothing imported",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    try:
+        dataset_id = ls.dataset_id(args.dataset)
+        inputs, sidecar = cases(ls.examples(dataset_id, args.limit, args.split))
+    except LangSmithError as exc:
+        print(f"lgcov import langsmith: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    out = Path(args.out)
+    beside = out.with_suffix(".langsmith.json")  # example ids and outputs, in the same order
+    out.parent.mkdir(parents=True, exist_ok=True)
+    for path, body in ((out, inputs), (beside, sidecar)):
+        path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(
+        f"Imported {len(inputs)} cases from LangSmith dataset `{args.dataset}` to {out} "
+        f"(ids and outputs in {beside}); record them with `lgcov record --inputs {out}`"
+    )
+    return 0
+
+
+def _pr_head() -> str | None:
+    """T103: the PR's head commit, from the pull_request event GitHub hands the job."""
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    try:
+        event: object = json.loads(Path(path).read_text(encoding="utf-8")) if path else None
+    except (OSError, ValueError):
+        return None
+    pr = event.get("pull_request") if isinstance(event, dict) else None
+    head = pr.get("head") if isinstance(pr, dict) else None
+    sha = head.get("sha") if isinstance(head, dict) else None
+    return sha if isinstance(sha, str) else None
+
+
+def _langsmith_notes(cfg: LangSmithConfig, commit: str) -> list[str]:
+    """T103: the link to the experiment on lgcov.yaml's dataset that ran on the commit this
+    run tested or on the PR's head. Nothing without a dataset or with link: false; a
+    missing key or a LangSmith problem is a note, never a failure."""
+    if not cfg.dataset or not cfg.link:
+        return []
+    ls = from_env(_langsmith_client)
+    if ls is None:
+        return [
+            "LangSmith: LANGSMITH_API_KEY isn't set (fork PRs get no secrets); no experiment "
+            f"link for `{cfg.dataset}`."
+        ]
+    commits = {c for c in (commit, _head("."), _pr_head()) if c}
+    try:
+        found = matching(ls.experiments(ls.dataset_id(cfg.dataset)), commits)
+    except LangSmithError as exc:
+        return [f"⚠️ {exc}; no experiment link."]
+    if found is None:
+        return []
+    url = experiment_url(ls.url, found)
+    return [f"🔗 LangSmith experiment for this commit: [{found.get('name')}]({url})"]
+
+
 def _accept_summary(
     path: Path,
     runs: list[Cassette],
@@ -776,6 +867,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
             *llm_notes,
             *([note] if note else []),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
+            *_langsmith_notes(cfg.langsmith, args.commit),
         ),
         tier=tier,
         not_checked=not_checked,
@@ -1719,6 +1811,14 @@ def main(argv: list[str] | None = None) -> int:
         return _ci(argv[1:])
     if argv[:1] == ["record"]:
         return _record(argv[1:])
+    if argv[:2] == ["import", "langsmith"]:
+        return _import_langsmith(argv[2:])
+    if argv[:1] == ["import"]:
+        print(
+            "lgcov import: the one source is langsmith (lgcov import langsmith --dataset X)",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     if argv[:1] == ["cassette"]:
         return _cassette_accept(argv[1:])
     ap = argparse.ArgumentParser(prog="graph-diff")

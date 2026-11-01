@@ -7,6 +7,7 @@ import pytest
 from lgcov.config import (
     Config,
     GateConfig,
+    LangSmithConfig,
     Thresholds,
     TierPolicy,
     load_config,
@@ -110,6 +111,10 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         ({"graph_entrypoint": "a.py:g", "gate": {"inconclusive_blocks": "yes"}}, "inconclusive"),
         ({"graph_entrypoint": "a.py:g", "gate": {"advisory_kpis": "tone"}}, "advisory_kpis"),
         ({"graph_entrypoint": "a.py:g", "gate": {"holm": True}}, "valid keys"),
+        ({"graph_entrypoint": "a.py:g", "langsmith": {"dataset": ""}}, "langsmith.dataset"),
+        ({"graph_entrypoint": "a.py:g", "langsmith": {"link": "no"}}, "langsmith.link"),
+        ({"graph_entrypoint": "a.py:g", "langsmith": {"project": "x"}}, "valid keys"),
+        ({"graph_entrypoint": "a.py:g", "langsmith": "support-qa"}, "'langsmith' must be"),
         (
             {
                 "graph_entrypoint": "a.py:g",
@@ -210,3 +215,12 @@ def test_report_groups_by_node_and_slice_by_default() -> None:
     assert parse_config({"graph_entrypoint": "a.py:g"}).group_by == ("node", "slice")
     raw = {"graph_entrypoint": "a.py:g", "report": {"group_by": ["slice"]}}
     assert parse_config(raw).group_by == ("slice",)
+
+
+# T103: the LangSmith dataset whose experiments the PR report links, read-only.
+def test_langsmith_names_the_dataset_and_links_unless_told_not_to() -> None:
+    cfg = parse_config({"graph_entrypoint": "a.py:g", "langsmith": {"dataset": "support-qa"}})
+    assert cfg.langsmith == LangSmithConfig(dataset="support-qa", link=True)
+    off = {"dataset": "support-qa", "link": False}
+    assert parse_config({"graph_entrypoint": "a.py:g", "langsmith": off}).langsmith.link is False
+    assert parse_config({"graph_entrypoint": "a.py:g"}).langsmith == LangSmithConfig()

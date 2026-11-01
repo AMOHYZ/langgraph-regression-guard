@@ -138,6 +138,47 @@ mutation operators for injecting known regressions into open_deep_research, each
 KPI that should catch it and its root and propagated labels, are in
 [docs/mutations.yaml](docs/mutations.yaml); nothing applies them yet.
 
+### Cases from a LangSmith dataset
+
+`lgcov import langsmith` turns a LangSmith dataset's examples into the cases `lgcov record
+--inputs` takes. It's read-only: it makes GET requests and nothing else.
+
+- **The key:** it comes from `LANGSMITH_API_KEY`.
+- **Region or self-hosting:** set `LANGSMITH_ENDPOINT` for an EU or self-hosted LangSmith.
+
+With the key set:
+
+```bash
+lgcov import langsmith --dataset support-qa --out cases.json
+lgcov record --inputs cases.json
+```
+
+- **`cases.json`** holds each example's inputs, oldest first.
+- **`cases.langsmith.json`**, written beside it, holds each example's id and reference
+  outputs, in the same order.
+- **`--limit N`** imports at most N examples, and **`--split NAME`** imports only that
+  split.
+- **Without the key**, it imports nothing and exits 2.
+
+The PR report links the LangSmith experiment that ran on the commit it checked:
+
+```yaml
+langsmith:          # lgcov.yaml
+  dataset: support-qa
+  link: true        # false: no link, and no LangSmith call at all
+```
+
+- **Which experiment.** It's the newest one on that dataset whose `metadata.git.commit` is
+  the commit lgcov tested or the PR's head commit. LangSmith's `evaluate()` records that
+  field. If no experiment ran on either commit, the report says nothing.
+- **The key.** Put `LANGSMITH_API_KEY` in the job's `env:` from a secret.
+  - Without it, the report says so in one line. Fork PRs get no secrets, so they always
+    hit this case.
+  - A LangSmith outage is a ⚠️ line.
+  - Neither changes the exit code.
+- **In a public repo,** the link in the PR comment reveals your LangSmith workspace id.
+  Opening it needs a LangSmith login.
+
 ## Use in your repo
 
 Record a baseline first (see Quickstart), commit `lgcov.yaml` and your cassettes,
