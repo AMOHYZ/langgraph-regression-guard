@@ -1,0 +1,4 @@
+# Phrases no tracked file in this repo may use (T116, `python -m lgcov.docs_lint`, run by
+# pre-commit and CI). Each matches in any case, with each hyphen or space in it written as
+# a hyphen, a dash, a space, a line break or nothing. This is the one file it exempts.
+self-improving

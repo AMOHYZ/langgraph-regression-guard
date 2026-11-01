@@ -1,7 +1,7 @@
 # langgraph-regression-guard
 
-Catch silent regressions in LangGraph agents on every PR. lgcov tells you which node a
-PR actually changed and which ones only inherited the damage, gates each KPI in your
+Catch silent regressions in LangGraph agents on every PR. lgcov tells you which LangGraph
+node a PR actually changed and which ones only inherited the damage, gates each KPI in your
 taxonomy with a paired test, and lets a judge block only once it has earned that against
 human labels. A GitHub Action; first report in 2 minutes.
 
@@ -440,6 +440,7 @@ cp .env.example .env   # fill in JEV_API_URL / JEV_API_KEY for L2/L3
 uv sync
 uv run pytest          # offline: fake judge, no network calls
 uv run graph-diff old.json new.json   # node/edge diff of two graph snapshots
+uv run python -m lgcov.docs_lint      # docs/banned-phrases.txt and the tagline; CI and pre-commit run it
 ```
 
 ## Roadmap
