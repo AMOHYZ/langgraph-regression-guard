@@ -69,3 +69,15 @@ def test_groups_render_one_table_per_node_in_a_stable_order() -> None:
     assert titles == ["#### Node `alpha`", "#### Node `zeta`"]
     rows = [line.split(" | ")[0] for line in lines if line.startswith("| `")]
     assert rows == ["| `a_mode`", "| `y_mode`", "| `a_mode`", "| `b_mode`"]
+
+
+def test_a_kpi_whose_base_never_varies_renders_without_none() -> None:
+    # T115: rho is undefined when a side never varies; no report shows "None" for it
+    from lgcov.sampling import render_gate_table
+
+    stats = _stats(DROPS, [["pass"]] * 200, [["fail"]] * 20 + [["pass"]] * 180)
+    assert stats.paired is not None and stats.paired.rho is None
+    groups = group_kpis([stats], {"drops": ("respond", "slice_a")}, ("node", "slice"))
+    report = "\n".join([*render_gate_table([stats]), *render_groups(groups)])
+    assert "None" not in report
+    assert "🔴 BLOCK" in report
