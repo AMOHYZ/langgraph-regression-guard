@@ -81,6 +81,7 @@ class CiResult:
     tier: str = ""  # T089: pr or nightly
     lint_summary: str = ""  # T104: "🧹 Lint: 2 warnings"; never changes the exit code
     lint_lines: tuple[str, ...] = ()  # T104: one per finding
+    locked: str = ""  # T114: the commits this run compared, from lock.locked_line
 
 
 def _title(r: CiResult, v: ActionVerdict) -> str:
@@ -138,6 +139,7 @@ def render_ci_report(r: CiResult) -> str:
         lines += ["### Judge calibration", "", *r.calibration_lines, ""]
     lines += [*r.notes, ""] if r.notes else []
     lines += [format_timing(r.timing), ""] if r.timing else []
+    lines += [r.locked, ""] if r.locked else []
     lines.append(
         f"fail-on: `{r.fail_on}`{f' · tier: `{r.tier}`' if r.tier else ''} · "
         f"root drift: {len(r.root_drift)} · "
