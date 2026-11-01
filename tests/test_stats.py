@@ -20,6 +20,8 @@ from lgcov.stats import (
     no_drop_cases,
     paired_test,
     required_n,
+    rho_from_2x2,
+    rho_from_counts,
     sigma_d,
     sign_flip_p,
     wilson,
@@ -202,3 +204,56 @@ def test_a_consistent_significant_drop_still_blocks() -> None:
     r = paired_test([[1.0]] * 20, [[0.0]] * 20)  # every case fails on the PR
     assert r.ci == (-1.0, -1.0) and r.p < 0.05 and r.discordant == 20
     assert decide(r.delta, r.ci, 0.05, True, discordant=r.discordant, n=r.n) == "BLOCK"
+
+
+# T115: rho is the base-vs-candidate correlation from their 2x2 table of per-case pass/fail.
+def _table(n11: int, n10: int, n01: int, n00: int) -> tuple[list[list[float]], list[list[float]]]:
+    """Paired binary cases with these cells: both pass, base only, candidate only, both fail."""
+    base = [[1.0]] * (n11 + n10) + [[0.0]] * (n01 + n00)
+    new = [[1.0]] * n11 + [[0.0]] * n10 + [[1.0]] * n01 + [[0.0]] * n00
+    return base, new
+
+
+def test_rho_comes_from_the_2x2_table() -> None:
+    assert rho_from_2x2(0.80, 0.78, 0.70) == pytest.approx(0.459, abs=0.001)
+    assert rho_from_counts(70, 10, 8, 12) == pytest.approx(rho_from_2x2(0.80, 0.78, 0.70))
+
+
+@pytest.mark.parametrize(
+    ("p_base", "p_cand", "p11"), [(1.0, 0.78, 0.78), (0.80, 0.0, 0.0), (0.0, 1.0, 0.0)]
+)
+def test_rho_is_undefined_not_a_crash_when_a_side_never_varies(
+    p_base: float, p_cand: float, p11: float
+) -> None:
+    assert rho_from_2x2(p_base, p_cand, p11) is None
+
+
+def test_an_empty_table_has_no_rho() -> None:
+    assert rho_from_counts(0, 0, 0, 0) is None
+
+
+def test_an_impossible_table_is_refused_with_a_float_tolerance() -> None:
+    # p11 lies in [max(0, p_base + p_cand - 1), min(p_base, p_cand)] = [0.58, 0.78] here
+    with pytest.raises(ValueError, match="impossible 2x2 table"):
+        rho_from_2x2(0.80, 0.78, 0.79)  # more pass on both sides than pass on the candidate
+    assert rho_from_2x2(0.80, 0.78, 0.78 + 1e-12) is not None  # a float on the boundary
+    assert rho_from_2x2(0.80, 0.78, 0.58 - 1e-12) is not None
+    for p11 in (0.78 + 1e-6, 0.58 - 1e-6):
+        with pytest.raises(ValueError):
+            rho_from_2x2(0.80, 0.78, p11)
+    with pytest.raises(ValueError):
+        rho_from_2x2(1.2, 0.5, 0.5)
+
+
+def test_paired_test_takes_rho_from_the_2x2_table() -> None:
+    r = paired_test(*_table(70, 10, 8, 12))
+    assert r.rho is not None and r.rho == pytest.approx(0.459, abs=0.001)
+    assert r.sd == pytest.approx(sigma_d(0.80, 0.78, r.rho))
+
+
+def test_a_side_that_never_varies_has_no_rho_and_the_gate_still_blocks() -> None:
+    r = paired_test(*_table(180, 20, 0, 0))  # base passes all 200; the PR fails 20
+    assert r.rho is None
+    assert r.sd == pytest.approx(0.3)  # rho drops out of sigma_d
+    assert r.required_n == 71
+    assert decide(r.delta, r.ci, 0.05, r.p <= 0.05, discordant=r.discordant, n=r.n) == "BLOCK"

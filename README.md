@@ -314,6 +314,9 @@ How it's computed:
   α = 0.05 and power 0.8, detecting a true 0.05 drop takes 765 (`required_n`, which sizes
   N*); showing the PR is at most 0.05 worse, when it isn't worse at all, takes 704
   (`ni_required_n`). 765 is a detection number, not a non-inferiority or harm one.
+- ρ, the correlation of base and PR outcomes per case, comes from their 2×2 table of
+  pass/fail (`rho_from_2x2`), never from two baseline runs. It is undefined when a side
+  never varies, and then it drops out of σ_d.
 - p is adjusted with Holm across the blocking KPIs and Benjamini–Hochberg across the
   advisory ones, so adding KPIs doesn't add false alarms. Advisory KPIs never fail a PR.
 - The old outcome names stay as aliases: `pass` = SHIP, `fail` = BLOCK, `needs_human` =
