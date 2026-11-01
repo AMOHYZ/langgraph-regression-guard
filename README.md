@@ -319,6 +319,9 @@ How it's computed:
   never varies, and then it drops out of σ_d.
 - p is adjusted with Holm across the blocking KPIs and Benjamini–Hochberg across the
   advisory ones, so adding KPIs doesn't add false alarms. Advisory KPIs never fail a PR.
+  Holm's family is K_gate: every KPI the run judges that `gate` and the bands leave
+  blocking, counted before any judging, so one with no paired case still counts, as p = 1.
+  The table's footnote prints it.
 - The old outcome names stay as aliases: `pass` = SHIP, `fail` = BLOCK, `needs_human` =
   INCONCLUSIVE; `infra_error` stays its own path.
 
@@ -337,7 +340,10 @@ per node, a row per slice (the KPIs' failure mode) and the node's total when it 
 one, each pooling its blocking judges' paired cases into one test. The overall verdict is the
 worst group's. A group is thin, "⚠️ thin (n=6, need 93)", when it has fewer cases than it needs
 to detect a drop of its margin at power 0.8 (with no discordant pair, the identical cases that
-rule one out), and a thin group can't block on its own: its BLOCK is INCONCLUSIVE. A KPI's own BLOCK still blocks. `report.group_by: [node, slice]` in
+rule one out), and a thin group can't block on its own: its BLOCK is INCONCLUSIVE. Nor does a
+group go further than its KPIs: its BLOCK stands only when one of them blocks on its own,
+Holm-corrected ("⚠️ pooled drop, no KPI blocks on its own" otherwise), and its SHIP only when
+every one of them SHIPs. A KPI's own BLOCK still blocks. `report.group_by: [node, slice]` in
 `lgcov.yaml` chooses the grouping; `[]` turns it off. Graph-structural coverage criteria are
 future work.
 

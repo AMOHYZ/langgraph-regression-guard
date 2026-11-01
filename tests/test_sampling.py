@@ -11,6 +11,7 @@ from lgcov.sampling import (
     gate_exit_code,
     gate_kpis,
     judge_samples,
+    k_gate,
     kpi_stats,
     render_gate_table,
     usage_tokens,
@@ -269,3 +270,28 @@ def test_identical_sides_under_74_cases_say_how_many_they_need() -> None:
     hundred = _cases(*[["pass"]] * 100)
     shipped = kpi_stats(KPI_, 1, hundred, hundred)
     assert (shipped.decision, shipped.outcome) == ("SHIP", "pass")
+
+
+# T114: Holm's m is K_gate, the blocking KPIs the run judges, fixed before any p is seen.
+TONE = KPI.binary("tone", "the answer keeps a calm tone", "Is the tone calm?")
+
+
+def test_k_gate_one_blocks_where_k_gate_three_cannot() -> None:
+    base, new = _drop(60, 6)  # exact McNemar p = 2 / 2**6 = 0.031
+    same = _cases(*[["pass"]] * 60)
+    kpis = [kpi_stats(KPI_, 1, base, new), *(kpi_stats(k, 1, same, same) for k in (POLITE, TONE))]
+    one = gate_kpis(kpis, advisory={"polite", "tone"})  # lgcov.yaml's gate.advisory_kpis
+    three = gate_kpis(kpis)
+    assert (k_gate(one), one[0].decision) == (1, "BLOCK")
+    assert one[0].p_adjusted == pytest.approx(0.03125)
+    assert (k_gate(three), three[0].decision) == (3, "INCONCLUSIVE")
+    assert three[0].p_adjusted == pytest.approx(0.09375)
+    assert "Holm across the K_gate = 3 blocking KPIs" in "\n".join(render_gate_table(three))
+
+
+def test_a_blocking_kpi_with_no_paired_case_still_counts_in_k_gate() -> None:
+    base, new = _drop(60, 6)
+    unpaired = kpi_stats(POLITE, 1, {}, {})  # its node never ran: no case on either side
+    gated = gate_kpis([kpi_stats(KPI_, 1, base, new), unpaired])
+    assert (k_gate(gated), gated[0].decision, gated[1].decision) == (2, "INCONCLUSIVE", None)
+    assert gated[0].p_adjusted == pytest.approx(0.0625)  # Holm with m = 2, not 1
