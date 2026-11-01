@@ -160,6 +160,25 @@ lgcov record --inputs cases.json
   split.
 - **Without the key**, it imports nothing and exits 2.
 
+The PR report links the LangSmith experiment that ran on the commit it checked:
+
+```yaml
+langsmith:          # lgcov.yaml
+  dataset: support-qa
+  link: true        # false: no link, and no LangSmith call at all
+```
+
+- **Which experiment.** It's the newest one on that dataset whose `metadata.git.commit` is
+  the commit lgcov tested or the PR's head commit. LangSmith's `evaluate()` records that
+  field. If no experiment ran on either commit, the report says nothing.
+- **The key.** Put `LANGSMITH_API_KEY` in the job's `env:` from a secret.
+  - Without it, the report says so in one line. Fork PRs get no secrets, so they always
+    hit this case.
+  - A LangSmith outage is a ⚠️ line.
+  - Neither changes the exit code.
+- **In a public repo,** the link in the PR comment reveals your LangSmith workspace id.
+  Opening it needs a LangSmith login.
+
 ## Use in your repo
 
 Record a baseline first (see Quickstart), commit `lgcov.yaml` and your cassettes,

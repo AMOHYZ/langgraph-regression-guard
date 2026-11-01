@@ -2,6 +2,8 @@
 
 `lgcov import langsmith` turns a dataset's examples into lgcov cases, the graph inputs
 `lgcov record --inputs` takes, and a sidecar of each example's id and reference outputs.
+`lgcov ci` links the experiment on lgcov.yaml's dataset that ran on this commit: the
+newest whose metadata.git.commit, which the SDK's evaluate() records, is a commit it names.
 
 Read-only by construction: the client has get() and nothing else, on the paths the
 langsmith SDK (0.14.12) reads. The key comes from LANGSMITH_API_KEY and only ever travels
@@ -11,15 +13,17 @@ as the x-api-key header: no message, log, repr or exception holds it.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 API_URL = "https://api.smith.langchain.com"
 TIMEOUT_S = 10.0
 ATTEMPTS = 2  # one try + one retry; only transport errors, timeouts and 5xx retry
+EXPERIMENTS = 1000  # the most experiments the report reads on a dataset
 Params = Mapping[str, str | int]
 Item = Mapping[str, object]
 
@@ -109,6 +113,10 @@ class LangSmith:
             params["splits"] = split
         return list(self._items("/examples", params, limit))
 
+    def experiments(self, dataset_id: str) -> list[Item]:
+        """The dataset's experiments, LangSmith's sessions against it, up to EXPERIMENTS."""
+        return list(self._items("/sessions", {"reference_dataset": dataset_id}, EXPERIMENTS))
+
 
 def from_env(client: GetClient | None = None) -> LangSmith | None:
     """The API that LANGSMITH_API_KEY and LANGSMITH_ENDPOINT name; None without a key."""
@@ -132,3 +140,36 @@ def cases(examples: Sequence[Item]) -> tuple[list[dict[str, object]], list[dict[
         inputs.append(given)
         sidecar.append({"example_id": example.get("id"), "outputs": example.get("outputs")})
     return inputs, sidecar
+
+
+def _commit(experiment: Item) -> str | None:
+    """The git HEAD that evaluate() recorded in the experiment's metadata, if any."""
+    extra = experiment.get("extra")
+    metadata = extra.get("metadata") if isinstance(extra, dict) else None
+    git = metadata.get("git") if isinstance(metadata, dict) else None
+    commit = git.get("commit") if isinstance(git, dict) else None
+    return commit if isinstance(commit, str) else None
+
+
+def matching(experiments: Sequence[Item], commits: Collection[str]) -> Item | None:
+    """The newest experiment run on one of these commits; None if none was (pure)."""
+    hits = [e for e in experiments if _commit(e) in commits]
+    return max(hits, key=lambda e: str(e.get("start_time", "")), default=None)
+
+
+def web_url(api_url: str) -> str:
+    """The LangSmith app for this API, as the SDK maps it: api.smith... -> smith...,
+    eu.api.smith... -> eu.smith..., a self-hosted .../api -> its root (pure)."""
+    parts = urlsplit(api_url.rstrip("/"))
+    for suffix in ("/api/v1", "/api"):
+        if parts.path.endswith(suffix):
+            return urlunsplit(parts._replace(path=parts.path.removesuffix(suffix)))
+    host = parts.netloc.replace("api.smith.langchain.com", "smith.langchain.com")
+    return f"{parts.scheme}://{host}"
+
+
+def experiment_url(api_url: str, experiment: Item) -> str:
+    """Where the app compares this experiment on its dataset (pure)."""
+    tenant, dataset = experiment.get("tenant_id"), experiment.get("reference_dataset_id")
+    session = experiment.get("id")
+    return f"{web_url(api_url)}/o/{tenant}/datasets/{dataset}/compare?selectedSessions={session}"

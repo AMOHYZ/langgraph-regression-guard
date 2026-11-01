@@ -4,7 +4,16 @@ import httpx
 import pytest
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
-from lgcov.langsmith import API_URL, LangSmith, LangSmithError, cases, from_env
+from lgcov.langsmith import (
+    API_URL,
+    LangSmith,
+    LangSmithError,
+    cases,
+    experiment_url,
+    from_env,
+    matching,
+    web_url,
+)
 
 
 def test_examples_page_through_the_dataset_with_gets_carrying_the_key() -> None:
@@ -82,3 +91,52 @@ def test_from_env_needs_the_key_and_honours_the_endpoint(monkeypatch: pytest.Mon
     monkeypatch.setenv("LANGSMITH_ENDPOINT", "https://eu.api.smith.langchain.com")
     eu = from_env()
     assert eu is not None and eu.url == "https://eu.api.smith.langchain.com"
+
+
+# T103 PR 2: the experiment on the dataset that ran on this commit, for the PR report.
+def _experiment(sid: str, commit: str | None, start: str) -> dict[str, object]:
+    metadata: dict[str, object] = {} if commit is None else {"git": {"commit": commit}}
+    return {
+        "id": sid,
+        "name": f"exp-{sid}",
+        "start_time": start,
+        "tenant_id": "t1",
+        "reference_dataset_id": "d1",
+        "extra": {"metadata": metadata},  # where evaluate() records the git HEAD
+    }
+
+
+def test_experiments_are_the_datasets_sessions() -> None:
+    fake = Fake({"/sessions": [Reply(200, [_experiment("s1", "c1", "2026-10-01T09:00:00")])]})
+    assert [e["id"] for e in LangSmith(KEY, client=fake).experiments("d1")] == ["s1"]
+    assert fake.calls[0][:2] == (
+        "/sessions",
+        {"reference_dataset": "d1", "offset": 0, "limit": 100},
+    )
+
+
+def test_the_match_is_the_newest_experiment_run_on_one_of_the_commits() -> None:
+    old = _experiment("s1", "c1", "2026-10-01T09:00:00")
+    new = _experiment("s2", "c1", "2026-10-03T09:00:00")
+    other = _experiment("s3", "c2", "2026-10-05T09:00:00")
+    bare = _experiment("s4", None, "2026-10-06T09:00:00")  # no git metadata: never a match
+    runs = [old, new, other, bare]
+    assert matching(runs, {"c1"}) == new
+    assert matching(runs, {"c1", "c2"}) == other
+    assert matching(runs, {"c9"}) is None
+
+
+@pytest.mark.parametrize(
+    ("api", "web"),
+    [
+        ("https://api.smith.langchain.com", "https://smith.langchain.com"),
+        ("https://eu.api.smith.langchain.com/", "https://eu.smith.langchain.com"),
+        ("https://langsmith.example.com/api", "https://langsmith.example.com"),
+    ],
+)
+def test_the_link_opens_the_experiment_in_the_app_for_that_api(api: str, web: str) -> None:
+    assert web_url(api) == web
+    experiment = _experiment("s1", "c1", "2026-10-01T09:00:00")
+    assert experiment_url(api, experiment) == (
+        f"{web}/o/t1/datasets/d1/compare?selectedSessions=s1"
+    )

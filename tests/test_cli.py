@@ -1799,3 +1799,105 @@ def test_cli_import_langsmith_exits_2_and_writes_nothing_when_it_cannot(
     assert main(["import", "langsmith", "--dataset", "nope", "--out", str(out)]) == 2
     assert message in capsys.readouterr().err
     assert not out.exists()
+
+
+# T103 PR 2: `lgcov ci` links the experiment on lgcov.yaml's dataset that ran on this commit.
+SESSION: dict[str, object] = {
+    "id": "s1",
+    "name": "exp-s1",
+    "start_time": "2026-10-01T09:00:00",
+    "tenant_id": "t1",
+    "reference_dataset_id": "d1",
+    "extra": {"metadata": {"git": {"commit": "c1"}}},
+}
+LINK = (
+    "🔗 LangSmith experiment for this commit: "
+    "[exp-s1](https://smith.langchain.com/o/t1/datasets/d1/compare?selectedSessions=s1)"
+)
+
+
+def _ci_langsmith(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake: Fake,
+    section: str = "{dataset: support-qa}",
+    key: bool = True,
+    pr_head: str | None = None,
+) -> tuple[int, str]:
+    """`lgcov ci --commit c1` on the demo, with lgcov.yaml's langsmith section and a fake."""
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "lgcov.yaml").write_text(f"langsmith: {section}\n", encoding="utf-8")
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    if pr_head is not None:  # the pull_request event GitHub hands the job
+        event = tmp_path / "event.json"
+        event.write_text(json.dumps({"pull_request": {"head": {"sha": pr_head}}}), "utf-8")
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    _langsmith(monkeypatch, fake, key)
+    code, report, _ = _run_ci(tmp_path, "--commit", "c1")
+    return code, report
+
+
+def _found(*sessions: dict[str, object]) -> Fake:
+    sessions_json = list(sessions)  # JSON arrays decode as lists
+    return Fake(
+        {"/datasets": [Reply(200, [{"id": "d1"}])], "/sessions": [Reply(200, sessions_json)]}
+    )
+
+
+def test_cli_ci_links_the_experiment_run_on_the_commit_it_tested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, report = _ci_langsmith(tmp_path, monkeypatch, _found(SESSION))
+    assert code == 0 and LINK in report
+
+
+def test_cli_ci_links_the_experiment_run_on_the_prs_head_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    on_head = {**SESSION, "extra": {"metadata": {"git": {"commit": "c9"}}}}
+    code, report = _ci_langsmith(tmp_path, monkeypatch, _found(on_head), pr_head="c9")
+    assert code == 0 and LINK in report
+
+
+def test_cli_ci_says_nothing_when_no_experiment_ran_on_this_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elsewhere = {**SESSION, "extra": {"metadata": {"git": {"commit": "c2"}}}}
+    code, report = _ci_langsmith(tmp_path, monkeypatch, _found(elsewhere))
+    assert code == 0 and "LangSmith" not in report
+
+
+@pytest.mark.parametrize(
+    ("routes", "key", "note"),
+    [
+        (
+            {},
+            False,
+            "LangSmith: LANGSMITH_API_KEY isn't set (fork PRs get no secrets); no experiment "
+            "link for `support-qa`.",
+        ),
+        (
+            {"/datasets": [Reply(503), Reply(503)]},
+            True,
+            "⚠️ LangSmith: /datasets unreachable after 2 attempts (HTTP 503); no experiment link.",
+        ),
+    ],
+)
+def test_cli_ci_notes_a_missing_key_or_a_langsmith_outage_and_exits_as_before(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    routes: dict[str, list[Reply | Exception]],
+    key: bool,
+    note: str,
+) -> None:
+    code, report = _ci_langsmith(tmp_path, monkeypatch, Fake(routes), key=key)
+    assert code == 0 and note in report
+
+
+def test_cli_ci_makes_no_langsmith_call_with_link_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = Fake({})  # any request would fail the test
+    section = "{dataset: support-qa, link: false}"
+    code, report = _ci_langsmith(tmp_path, monkeypatch, fake, section=section, key=False)
+    assert (code, fake.calls) == (0, []) and "LangSmith" not in report
