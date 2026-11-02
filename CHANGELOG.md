@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-02)
 
 The first release: what was built from 25 to 31 October 2026, by layer, one line per
 feature, with its PR.

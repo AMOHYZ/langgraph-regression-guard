@@ -49,14 +49,17 @@ pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.1.0
 Or from GitHub, as the quickstart does. Once on PyPI: `pip install lgcov`.
 
 Maintainers: `release.yml` publishes to TestPyPI with trusted publishing (OIDC, no token).
-Before the first tag, on test.pypi.org:
+Set up once, before the first tag (done for 0.1.0), on test.pypi.org:
 
 1. Sign in, then **Your account → Publishing**
-   (https://test.pypi.org/manage/account/publishing/).
-2. Under **Add a new pending publisher**, on the GitHub tab: PyPI project name `lgcov`,
+   (https://test.pypi.org/manage/account/publishing/). The account needs 2FA: without
+   it, TestPyPI shows its 2FA setup page instead, and no publisher can be added.
+2. Under **Add a new pending publisher**, on the GitHub tab: TestPyPI project name `lgcov`,
    owner `AMOHYZ`, repository name `langgraph-regression-guard`, workflow name
    `release.yml`, environment name `testpypi`.
-3. Click **Add**.
+3. Click **Add**. The first publish makes it the project's own publisher, so later tags
+   need nothing more on TestPyPI. A publish that fails with `invalid-publisher` found no
+   publisher there matching the claims its log prints.
 
 Then pushing a `vX.Y.Z` tag builds, makes the GitHub Release and publishes. Run by hand
 (Actions → release → Run workflow), `dry_run` (on by default) only builds the wheel and
@@ -72,6 +75,9 @@ Minutes to first report: 2 (clean venv, steps below pasted as-is; measured 2026-
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install "git+https://github.com/AMOHYZ/langgraph-regression-guard"
+# Or 0.1.0 from TestPyPI; dependencies from PyPI, since anyone can upload to TestPyPI:
+#   pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
+#   pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.1.0
 lgcov --version
 
 # 1. A graph to guard: the demo agent (or point graph_entrypoint at your own).
