@@ -1839,5 +1839,47 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if diff.is_empty else 1
 
 
+_LGCOV_HELP = """\
+usage: lgcov [-h] [--version] COMMAND ...
+
+Catch silent regressions in LangGraph agents on every PR.
+
+commands:
+  record            record a baseline: one cassette run per input in --inputs
+  replay            replay the baseline and report root and propagated drift
+  cassette accept   re-baseline drifted nodes (--nodes A,B or --all-drifted)
+  ci                what the GitHub Action runs: replay, gates and the PR report
+  snapshot          print the graph's nodes and edges as a JSON snapshot
+  coverage          coverage of the recorded runs, and its trend against main
+  lint              check the graph's shape before anything runs
+  judge             run the taxonomy's judges k times per case
+  calibrate         compare each judge with human labels and set its band
+  review override   override a judge's verdict on one case
+  taxonomy check    validate a taxonomy and print its KPIs
+  taxonomy draft    draft failure modes and KPIs from traces, each pending review
+  taxonomy approve  approve one drafted entry
+  import langsmith  turn a LangSmith dataset's examples into lgcov cases
+  bench             score the root / propagated labels against hand-written ones
+  selfcheck         run the harness on fixtures whose outcome is known
+
+options:
+  -h, --help        show this help and exit
+  --version         print lgcov's version and exit
+
+lgcov COMMAND --help shows a command's options.
+graph-diff OLD NEW prints the node and edge changes between two graph snapshots."""
+
+
+def lgcov_main(argv: list[str] | None = None) -> int:
+    """The `lgcov` script: `main`, with lgcov's own help for -h, --help and no command.
+    The `graph-diff` script runs `main` itself, so its --help stays graph-diff's."""
+    argv = sys.argv[1:] if argv is None else argv
+    asked = argv[:1] in (["-h"], ["--help"])
+    if argv and not asked:
+        return main(argv)
+    print(_LGCOV_HELP, file=sys.stdout if asked else sys.stderr)
+    return 0 if asked else EXIT_ERROR
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

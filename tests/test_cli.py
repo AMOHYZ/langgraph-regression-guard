@@ -2,6 +2,9 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
+from collections.abc import Callable
+from importlib.metadata import EntryPoint
 from pathlib import Path
 
 import pytest
@@ -175,6 +178,73 @@ def test_cli_version_matches_package_metadata(capsys: pytest.CaptureFixture[str]
 
     assert main(["--version"]) == 0
     assert capsys.readouterr().out == f"lgcov {version('lgcov')}\n"  # the distribution is lgcov
+
+
+# `lgcov --help`, `lgcov -h` and bare `lgcov` showed graph-diff's usage: both scripts ran
+# `main`. These tests run what pyproject.toml's [project.scripts] gives each script.
+PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
+LGCOV_COMMANDS = (
+    "record",
+    "replay",
+    "cassette accept",
+    "ci",
+    "snapshot",
+    "coverage",
+    "lint",
+    "judge",
+    "calibrate",
+    "review override",
+    "taxonomy check",
+    "taxonomy draft",
+    "taxonomy approve",
+    "import langsmith",
+    "bench",
+    "selfcheck",
+)
+
+
+def _script(name: str) -> Callable[[list[str]], int]:
+    """The function the console script `name` runs, resolved as its installed wrapper does."""
+    scripts = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["scripts"]
+    run: Callable[[list[str]], int] = EntryPoint(name, scripts[name], "console_scripts").load()
+    return run
+
+
+def _listed(command: str, text: str) -> bool:
+    return any(line.lstrip().startswith(f"{command} ") for line in text.splitlines())
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_lgcov_help_lists_every_command(flag: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _script("lgcov")([flag]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("usage: lgcov ")
+    assert [c for c in (*LGCOV_COMMANDS, "--version") if not _listed(c, out)] == []
+
+
+def test_bare_lgcov_prints_its_usage_and_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
+    assert _script("lgcov")([]) == 2  # no command: argparse's exit code for a missing argument
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("usage: lgcov ")
+    assert [c for c in LGCOV_COMMANDS if not _listed(c, captured.err)] == []
+
+
+@pytest.mark.parametrize("command", LGCOV_COMMANDS)
+def test_lgcov_runs_each_command_its_help_lists(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _script("lgcov")([*command.split(), "--help"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.startswith(f"usage: lgcov {command.split()[0]}")
+
+
+def test_graph_diff_help_is_still_graph_diffs(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _script("graph-diff")(["--help"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.startswith("usage: graph-diff [-h] old new\n")
 
 
 # T077: `lgcov record --inputs inputs.json` writes the baseline that `lgcov replay` reads.
