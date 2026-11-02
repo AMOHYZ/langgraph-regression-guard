@@ -1,7 +1,7 @@
 [project]
 name = "lgcov"
 version = "0.1.0"
-description = "Catch silent regressions in LangGraph agents on every PR: cassette replay of node I/O, calibrated LLM judges, and human review."
+description = "Catch silent regressions in LangGraph agents on every PR. lgcov tells you which LangGraph node a PR actually changed and which ones only inherited the damage."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
