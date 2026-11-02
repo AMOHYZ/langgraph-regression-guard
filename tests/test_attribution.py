@@ -1,6 +1,7 @@
 """T101a: the attribution benchmark's scoring and report (pure). T100a: real rows, pending
-human review."""
+human review. T100: rows whose labels a human reviewed but that can't run yet."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -84,7 +85,7 @@ def test_a_benchmark_file_needs_a_graph_base_and_head(raw: dict[str, object], ma
         parse_benchmark("x", raw, Path("."))
 
 
-# T100a: the first real row, langchain-ai/open_deep_research PR #163, labels pending review.
+# T100: the first real row, langchain-ai/open_deep_research PR #163, labels reviewed by a human.
 ROW_163 = Path(__file__).resolve().parents[1] / "docs" / "benchmark" / "open_deep_research-163.yaml"
 _ROW: dict[str, object] = {
     "graph": "g.py:graph",
@@ -97,7 +98,7 @@ _ROW: dict[str, object] = {
 
 def test_the_163_row_validates_against_the_benchmark_schema() -> None:
     b = parse_benchmark(ROW_163.stem, yaml.safe_load(ROW_163.read_text("utf-8")), ROW_163.parent)
-    assert b.status == "labels_pending_human_review"
+    assert b.status == "labels_reviewed"
     assert (b.base_ref, b.head_ref) == (
         "f95d200654b5c4733e87375be15b92822c6c4ff8",  # the merge commit's only parent
         "6532a4176a93cc9bb2102b3d825dcefa560c85d9",
@@ -137,8 +138,11 @@ def test_an_evidence_entry_names_an_expected_label_a_line_and_diff_lines(
         parse_benchmark("b", {**_ROW, "evidence": [entry]}, Path("."))
 
 
-def test_a_status_other_than_pending_review_is_refused() -> None:
-    with pytest.raises(ValueError, match="'status' must be"):
+def test_an_unknown_status_is_refused() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"'status' must be one of \['labels_pending_human_review', 'labels_reviewed'\]",
+    ):
         parse_benchmark("b", {**_ROW, "status": "done"}, Path("."))
 
 
@@ -156,3 +160,35 @@ def test_a_pending_row_is_listed_but_left_out_of_micro_and_macro() -> None:
     assert "Known gaps" not in md  # waiting for labels isn't a gap
     alone = render_markdown([pending], "lgcov bench", "2026-10-31")
     assert "| **micro** | — | — | | | | |" in alone  # nothing scored, so no aggregate
+
+
+def test_pending_reviewed_and_errored_rows_read_differently_and_none_is_scored() -> None:
+    # T100: labels a human confirmed on a row that can't run yet (no clone, no API keys) must
+    # not look like labels nobody checked, nor like a run that crashed.
+    scored = _result("linear", {"b"}, {"b"})
+    pending = pending_result(
+        parse_benchmark("p", {**_ROW, "status": "labels_pending_human_review"}, Path("."))
+    )
+    reviewed = pending_result(
+        parse_benchmark("r", {**_ROW, "status": "labels_reviewed"}, Path("."))
+    )
+    errored = replace(_result("e", set(), {"x"}), error="CalledProcessError: no such ref")
+    rows = [scored, pending, reviewed, errored]
+    assert (reviewed.status, reviewed.root, reviewed.seconds) == (
+        "labels_reviewed",
+        Score(0, 0, 0),
+        0.0,
+    )
+    assert micro(rows, "root") == micro([scored], "root")
+    assert macro(rows, "propagated") == macro([scored], "propagated")
+    md = render_markdown(rows, "lgcov bench", "2026-11-02")
+    assert "| p | — | — | — | `x` | — | ⏳ pending review |" in md
+    assert "| r | — | — | — | `x` | — | 📝 labels reviewed, not run |" in md
+    # An errored row shows no scores: Score(0, 0, 0) would read as a perfect 1.00.
+    assert "| e | — | — | — | `x` | — | ❌ run error: CalledProcessError: no such ref |" in md
+    assert "⏳ 1 pending human review: listed, not run, and left out of micro and macro." in md
+    assert (
+        "📝 1 with labels reviewed, not yet runnable: listed, not run, and left out of micro and"
+        " macro." in md
+    )
+    assert "- `e`: run error: CalledProcessError: no such ref" in md

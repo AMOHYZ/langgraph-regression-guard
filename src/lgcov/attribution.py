@@ -9,9 +9,11 @@ A benchmark file (YAML): `graph: <file.py>:<attr>`; base and head as `base_patch
 `hard_cases` from HARD_CASES.
 
 T100a, for real rows: `status: labels_pending_human_review` (listed, never run or scored,
-left out of micro and macro); `changed_nodes` (each a diff change: `file`, `change`, the
-graph `nodes` it belongs to); and `evidence`, the diff lines behind each label (`node`,
-`label`, `at` = <file>:<line> of the first + line on head, `diff`, an optional `why`).
+left out of micro and macro), or T100's `status: labels_reviewed` (a human confirmed the
+labels, but the row can't run yet: listed the same way, shown apart); `changed_nodes`
+(each a diff change: `file`, `change`, the graph `nodes` it belongs to); and `evidence`,
+the diff lines behind each label (`node`, `label`, `at` = <file>:<line> of the first + line
+on head, `diff`, an optional `why`).
 """
 
 from __future__ import annotations
@@ -26,7 +28,9 @@ from typing import Literal
 
 HARD_CASES = ("send_fanout", "subgraph", "loop")
 Labels = Literal["root", "propagated"]
-STATUSES = ("labels_pending_human_review",)  # T100a; no status: labels confirmed, it runs
+PENDING_REVIEW = "labels_pending_human_review"  # T100a: labels a human hasn't checked
+LABELS_REVIEWED = "labels_reviewed"  # T100: labels confirmed, the row can't run yet
+STATUSES = (PENDING_REVIEW, LABELS_REVIEWED)  # no status: labels confirmed, and it runs
 
 
 @dataclass(frozen=True)
@@ -64,7 +68,7 @@ class Benchmark:
     repo: str = "."
     notes: str = ""
     hard_cases: tuple[str, ...] = ()
-    status: str = ""  # T100a: one of STATUSES, or "" once a human confirmed the labels
+    status: str = ""  # one of STATUSES, or "" once the labels are confirmed and it can run
     changed_nodes: tuple[Changed, ...] = ()
     evidence: tuple[Evidence, ...] = ()
 
@@ -211,10 +215,11 @@ class Result:
     hard_cases: tuple[str, ...] = ()
     notes: str = ""
     error: str = ""  # the benchmark couldn't run: no scores
-    status: str = ""  # T100a: labels pending human review: listed, never run or scored
+    status: str = ""  # one of STATUSES: listed, never run or scored
 
     @property
     def pending(self) -> bool:
+        """Not run because of its `status` (labels pending review, or reviewed but not runnable)."""
         return bool(self.status)
 
     @property
@@ -227,7 +232,7 @@ class Result:
 
 
 def pending_result(b: Benchmark) -> Result:
-    """T100a: the row for a benchmark whose labels wait for a human: never run, no scores."""
+    """T100a: the row for a benchmark with a `status`: never run, no scores."""
     zero = Score(0, 0, 0)
     expected = (tuple(sorted(b.root)), tuple(sorted(b.propagated)))
     return Result(b.name, (), (), zero, zero, 0.0, *expected, b.hard_cases, b.notes, "", b.status)
@@ -264,10 +269,12 @@ def _nodes(names: Sequence[str]) -> str:
 
 
 def _status(r: Result) -> str:
+    if r.status == LABELS_REVIEWED:
+        return "📝 labels reviewed, not run"
     if r.pending:
         return "⏳ pending review"
     if r.error:
-        return f"⚠️ didn't run: {r.error}"
+        return f"❌ run error: {r.error}"
     if r.ok:
         return "✓"
     return f"❌ known gap ({', '.join(r.hard_cases)})" if r.hard_cases else "❌"
@@ -289,7 +296,7 @@ def render_markdown(results: Sequence[Result], command: str, date: str, source: 
         "|---|---|---|---|---|---|---|",
     ]
     for r in results:
-        if r.pending:
+        if r.pending or r.error:  # not scored: an errored row's zero Score would read as 1.00
             lines.append(f"| {r.name} | — | — | — | {_nodes(r.expected_root)} | — | {_status(r)} |")
             continue
         lines.append(
@@ -308,11 +315,18 @@ def render_markdown(results: Sequence[Result], command: str, date: str, source: 
         ]
     else:  # nothing scored: no aggregate to show
         lines += ["| **micro** | — | — | | | | |", "| **macro** | — | — | | | | |"]
-    pending = sum(r.pending for r in results)
+    pending = sum(r.status == PENDING_REVIEW for r in results)
     if pending:
         lines += [
             "",
             f"⏳ {pending} pending human review: listed, not run, and left out of micro and macro.",
+        ]
+    reviewed = sum(r.status == LABELS_REVIEWED for r in results)
+    if reviewed:
+        lines += [
+            "",
+            f"📝 {reviewed} with labels reviewed, not yet runnable: listed, not run, and left out"
+            " of micro and macro.",
         ]
     gaps = [r for r in results if not r.ok and not r.pending]
     if gaps:
@@ -320,7 +334,7 @@ def render_markdown(results: Sequence[Result], command: str, date: str, source: 
         for r in gaps:
             kinds = f" ({', '.join(r.hard_cases)})" if r.hard_cases else ""
             if r.error:
-                lines.append(f"- `{r.name}`{kinds}: didn't run: {r.error}")
+                lines.append(f"- `{r.name}`{kinds}: run error: {r.error}")
                 continue
             lines.append(
                 f"- `{r.name}`{kinds}: lgcov said root {_nodes(r.found_root)}, expected "

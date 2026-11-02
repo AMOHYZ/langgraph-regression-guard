@@ -2,10 +2,22 @@
 # prompts, add think tool, update defaults", squash-merged 6 Aug 2025 as 6532a41 (one parent,
 # f95d200): https://github.com/langchain-ai/open_deep_research/pull/163
 #
-# Labels are a draft from the diff, waiting for a human: `lgcov bench` lists the row but
-# never runs or scores it, and leaves it out of the micro and macro rows. It can't run here
-# anyway: the agent makes real LLM and search calls. To run it once confirmed, clone the
-# repo, set `repo:` to the clone (relative to this file) and set the API keys.
+# Labels reviewed by a human on 2026-11-02 against the 2026-10-24 audit of #163: all 7 kept
+# as drafted from the diff. `status: labels_reviewed` means confirmed but not runnable here:
+# `lgcov bench` lists the row as "labels reviewed, not run" and leaves it out of the micro
+# and macro rows. It can't run here: the agent makes real LLM and search calls. To run it,
+# clone the repo, set `repo:` to the clone (relative to this file), set the API keys and
+# remove `status`.
+#
+# The rule every real row is labelled by: a node is root when, on the same input, the PR
+# changes what it does (its code, a prompt or tool it binds, or a config default it reads).
+# It is propagated when the PR doesn't, and it drifts only because its input changed. A root
+# node that also gets changed input stays root, as supervisor, supervisor_tools and
+# researcher do here.
+#
+# A multi-root PR: 6 roots, 1 propagated. lgcov's first-drift attribution calls only the
+# first node to drift in each run root, so once this row runs, expect high root precision
+# and low root recall (about 1 of 6). That gap is tracked as T162.
 #
 # Node names: a node inside the research_supervisor subgraph is research_supervisor.<node>.
 # supervisor_tools runs researcher_subgraph once per ConductResearch call, so the
@@ -14,7 +26,7 @@
 # Evidence: `at` is the first + line of the quote on head_ref (6532a41); - lines are the
 # base_ref (f95d200) lines they replace. The diff checked is whitespace-blind (`-w`), so
 # Ruff's reformatting doesn't count as a change.
-status: labels_pending_human_review
+status: labels_reviewed
 graph: src/open_deep_research/deep_researcher.py:deep_researcher
 base_ref: f95d200654b5c4733e87375be15b92822c6c4ff8
 head_ref: 6532a4176a93cc9bb2102b3d825dcefa560c85d9

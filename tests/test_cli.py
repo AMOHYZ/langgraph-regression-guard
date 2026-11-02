@@ -1569,14 +1569,14 @@ def test_cli_ci_shows_the_lint_line_and_never_blocks_on_it(
     assert "- warn `orphan`: unreachable from START." in report
 
 
-def test_cli_bench_lists_the_163_row_as_pending_review(tmp_path: Path) -> None:
-    # T100a: docs/benchmark/, `lgcov bench`'s default folder; the row is never run.
+def test_cli_bench_lists_the_163_row_as_labels_reviewed(tmp_path: Path) -> None:
+    # T100: docs/benchmark/, `lgcov bench`'s default folder; reviewed, but never run here.
     rows = Path(__file__).resolve().parents[1] / "docs" / "benchmark"
     code, results, md = _bench(tmp_path, str(rows))
     assert code == 0
     row = _rows(results)["open_deep_research-163"]
-    assert (row["status"], row["error"], row["seconds"]) == ("labels_pending_human_review", "", 0)
-    assert "| open_deep_research-163 | — | — | — |" in md and "⏳ pending review |" in md
+    assert (row["status"], row["error"], row["seconds"]) == ("labels_reviewed", "", 0)
+    assert "| open_deep_research-163 | — | — | — |" in md and "📝 labels reviewed, not run |" in md
 
 
 # T106: `lgcov taxonomy draft` proposes, `lgcov taxonomy approve` is the human's yes.
