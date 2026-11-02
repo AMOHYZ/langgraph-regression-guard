@@ -240,6 +240,29 @@ def test_lgcov_runs_each_command_its_help_lists(
     assert capsys.readouterr().out.startswith(f"usage: lgcov {command.split()[0]}")
 
 
+def test_lgcov_version_still_runs(capsys: pytest.CaptureFixture[str]) -> None:
+    from importlib.metadata import version
+
+    assert _script("lgcov")(["--version"]) == 0
+    assert capsys.readouterr().out == f"lgcov {version('lgcov')}\n"
+
+
+# Anything else is lgcov's error too, not graph-diff's. Two snapshot files are no lgcov
+# command either: `graph-diff OLD NEW` diffs them.
+@pytest.mark.parametrize(
+    "argv",
+    [["repaly"], ["--frobnicate"], [str(GOLDEN), str(GOLDEN)]],
+    ids=["typo", "unknown option", "two snapshots"],
+)
+def test_lgcov_rejects_an_unknown_command(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _script("lgcov")(argv) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"lgcov: unknown command {argv[0]!r} (lgcov --help lists the commands)\n"
+
+
 def test_graph_diff_help_is_still_graph_diffs(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         _script("graph-diff")(["--help"])
