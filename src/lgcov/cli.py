@@ -1778,8 +1778,8 @@ def _selfcheck_cmd(argv: list[str]) -> int:
     return 0 if all_ok else 1
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
+def _command(argv: list[str]) -> int | None:
+    """Run the lgcov command argv names and return its exit code; None if it names none."""
     if argv[:1] == ["--version"]:
         print(f"lgcov {version('lgcov')}")
         return 0
@@ -1821,6 +1821,10 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
     if argv[:1] == ["cassette"]:
         return _cassette_accept(argv[1:])
+    return None
+
+
+def _graph_diff(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="graph-diff")
     ap.add_argument("old")
     ap.add_argument("new")
@@ -1837,6 +1841,62 @@ def main(argv: list[str] | None = None) -> int:
     diff = diff_graphs(old, new)
     print("\n".join(_graph_diff_lines(diff)))
     return 0 if diff.is_empty else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The `graph-diff` script: an lgcov command, else the diff of two graph snapshots."""
+    argv = sys.argv[1:] if argv is None else argv
+    code = _command(argv)
+    return _graph_diff(argv) if code is None else code
+
+
+_LGCOV_HELP = """\
+usage: lgcov [-h] [--version] COMMAND ...
+
+Catch silent regressions in LangGraph agents on every PR.
+
+commands:
+  record            record a baseline: one cassette run per input in --inputs
+  replay            replay the baseline and report root and propagated drift
+  cassette accept   re-baseline drifted nodes (--nodes A,B or --all-drifted)
+  ci                what the GitHub Action runs: replay, gates and the PR report
+  snapshot          print the graph's nodes and edges as a JSON snapshot
+  coverage          coverage of the recorded runs, and its trend against main
+  lint              check the graph's shape before anything runs
+  judge             run the taxonomy's judges k times per case
+  calibrate         compare each judge with human labels and set its band
+  review override   override a judge's verdict on one case
+  taxonomy check    validate a taxonomy and print its KPIs
+  taxonomy draft    draft failure modes and KPIs from traces, each pending review
+  taxonomy approve  approve one drafted entry
+  import langsmith  turn a LangSmith dataset's examples into lgcov cases
+  bench             score the root / propagated labels against hand-written ones
+  selfcheck         run the harness on fixtures whose outcome is known
+
+options:
+  -h, --help        show this help and exit
+  --version         print lgcov's version and exit
+
+lgcov COMMAND --help shows a command's options.
+graph-diff OLD NEW prints the node and edge changes between two graph snapshots."""
+
+
+def lgcov_main(argv: list[str] | None = None) -> int:
+    """The `lgcov` script: lgcov's commands, its own help for -h, --help and no command,
+    and an error for anything else. `graph-diff` runs `main`, which diffs two snapshots."""
+    argv = sys.argv[1:] if argv is None else argv
+    asked = argv[:1] in (["-h"], ["--help"])
+    if not argv or asked:
+        print(_LGCOV_HELP, file=sys.stdout if asked else sys.stderr)
+        return 0 if asked else EXIT_ERROR
+    code = _command(argv)
+    if code is None:
+        print(
+            f"lgcov: unknown command {argv[0]!r} (lgcov --help lists the commands)",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    return code
 
 
 if __name__ == "__main__":

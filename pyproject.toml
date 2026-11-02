@@ -28,7 +28,7 @@ Issues = "https://github.com/AMOHYZ/langgraph-regression-guard/issues"
 
 [project.scripts]
 graph-diff = "lgcov.cli:main"
-lgcov = "lgcov.cli:main"
+lgcov = "lgcov.cli:lgcov_main"
 
 [build-system]
 requires = ["uv_build>=0.8.13,<1.0.0"]
