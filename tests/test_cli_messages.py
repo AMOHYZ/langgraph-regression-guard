@@ -1,10 +1,17 @@
 """T165: lgcov's own commands on a graph whose state holds LangChain messages."""
 
+import json
+import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
-from lgcov.cli import _load_runs, _write_runs, main
+from lgcov.cassette import Step
+from lgcov.cli import _l2_cases, _load_runs, _write_runs, main
+from lgcov.jev_judge import JevJudge
+from lgcov.taxonomy import KPISpec
 
 ROOT = Path(__file__).resolve().parents[1]
 GRAPH = """\
@@ -136,3 +143,111 @@ def test_a_cassette_from_before_messages_re_saves_byte_identical(
     out = tmp_path / "baseline.json"
     _write_runs(out, _load_runs(str(ROOT / baseline)))
     assert out.read_text(encoding="utf-8") == (ROOT / baseline).read_text(encoding="utf-8")
+
+
+def test_lgcov_cassette_accept_finds_no_drift_from_new_ids(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = _record(tmp_path)
+    assert main(["cassette", "accept", "--all-drifted", "--config", str(cfg)]) == 1
+    assert "no drifted nodes" in capsys.readouterr().err
+
+
+def test_lgcov_cassette_accept_uses_the_config_s_ignore_paths(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = _record(tmp_path)
+    with cfg.open("a", encoding="utf-8") as f:
+        f.write('ignore_paths: ["/messages/*/tool_calls/*/args/q"]\n')
+    (tmp_path / "graph.py").write_text(
+        GRAPH.replace('QUERY = "x"', 'QUERY = "y"'), encoding="utf-8"
+    )
+    assert main(["cassette", "accept", "--all-drifted", "--config", str(cfg)]) == 1
+    assert "no drifted nodes" in capsys.readouterr().err
+
+
+def test_lgcov_cassette_accept_re_baselines_a_changed_message_node(tmp_path: Path) -> None:
+    cfg = _record(tmp_path)
+    (tmp_path / "graph.py").write_text(
+        GRAPH.replace('QUERY = "x"', 'QUERY = "y"'), encoding="utf-8"
+    )
+    assert main(["replay", "--config", str(cfg)]) == 1
+    assert main(["cassette", "accept", "--nodes", "model", "--config", str(cfg)]) == 0
+    assert main(["replay", "--config", str(cfg)]) == 0
+
+
+class _Jev:
+    """A JEV stand-in that sends each request through json.dumps, as httpx does."""
+
+    status_code = 200
+
+    def __init__(self, kpi: str) -> None:
+        self.kpi = kpi
+        self.sent: dict[str, Any] = {}
+
+    def post(
+        self, url: str, *, json: dict[str, Any], timeout: float, headers: dict[str, str]
+    ) -> "_Jev":
+        self.sent = _through_json(json)
+        return self
+
+    def json(self) -> dict[str, Any]:
+        return {"answers": {self.kpi: {"choice": "pass", "confidence": 0.9}}}
+
+
+def _through_json(value: dict[str, Any]) -> dict[str, Any]:
+    body: dict[str, Any] = json.loads(json.dumps(value))
+    return body
+
+
+def test_a_model_judge_is_sent_plain_json_not_message_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JEV_API_URL", "http://jev.test")
+    monkeypatch.setenv("JEV_API_KEY", "not-a-real-key")
+    spec = KPISpec("k", "f", "n", "jev", "a description", "a rubric")
+    step = Step(
+        "n",
+        {"messages": [AIMessage("out", id="run-1")]},
+        {"messages": [HumanMessage("in", id="u1")]},
+        "code",
+    )
+    client = _Jev("k")
+    node_input, node_output = _l2_cases(spec, [[step]])["run-0/n"]
+    JevJudge(spec.to_kpi(), client=client).judge(node_input, node_output)
+    assert client.sent["state"] == {
+        "input": {"messages": [{"type": "human", "content": "in"}]},
+        "output": {"messages": [{"type": "ai", "content": "out"}]},
+    }
+
+
+def test_lgcov_review_override_saves_messages_as_plain_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "graph.py").write_text(GRAPH, encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(INPUTS, encoding="utf-8")
+    (tmp_path / "lgcov.yaml").write_text(
+        "graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n", encoding="utf-8"
+    )
+    assert main(["record", "--inputs", "inputs.json"]) == 0
+    shutil.copy(ROOT / "tests" / "fixtures" / "demo_taxonomy.yaml", "taxonomy.yaml")
+    (tmp_path / "calibration" / "labels").mkdir(parents=True)
+    shutil.copy(ROOT / "calibration" / "labels" / "demo.csv", "calibration/labels/demo.csv")
+    assert main(["calibrate", "--taxonomy", "taxonomy.yaml"]) == 0
+    assert (
+        main(
+            [
+                *("review", "override", "--kpi", "answer_states_order_status"),
+                *("--case-id", "run-0/respond", "--judge-label", "pass", "--human-label", "fail"),
+                *("--reviewer", "ahmed", "--note", "wrong", "--graph", "graph.py:graph"),
+                *("--cassette-dir", "cassettes", "--taxonomy", "taxonomy.yaml"),
+            ]
+        )
+        == 0
+    )
+    said = {"messages": [{"type": "ai", "content": "final: found"}]}
+    overrides = (tmp_path / "calibration" / "overrides.jsonl").read_text(encoding="utf-8")
+    assert json.loads(overrides.splitlines()[-1])["output"] == said
+    cases = tmp_path / "calibration" / "cases" / "answer_states_order_status.jsonl"
+    assert json.loads(cases.read_text(encoding="utf-8").splitlines()[-1])["node_output"] == said

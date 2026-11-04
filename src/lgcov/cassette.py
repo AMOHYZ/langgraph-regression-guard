@@ -568,11 +568,13 @@ def replay_run(
     return Replay(drifts, tuple(fresh), tuple(calls), halt, not_checked)
 
 
-def accept_nodes(baseline: Cassette, fresh: Cassette, nodes: set[str]) -> tuple[Cassette, set[str]]:
+def accept_nodes(
+    baseline: Cassette, fresh: Cassette, nodes: set[str], ignore_paths: Sequence[str] = ()
+) -> tuple[Cassette, set[str]]:
     """T082: copy `fresh` steps into `baseline` for `nodes` only; every other step is kept.
 
-    Returns the new baseline and the subset of `nodes` whose output actually changed.
-    A node must have run the same number of times in both, since steps are matched by
+    Returns the new baseline and the subset of `nodes` whose output changed, masked as replay
+    compares it. A node must have run the same number of times in both, since steps are matched by
     occurrence. Note a fresh output already reflects any upstream drift not accepted.
     """
     by_node: dict[str, list[Step]] = {}
@@ -597,7 +599,8 @@ def accept_nodes(baseline: Cassette, fresh: Cassette, nodes: set[str]) -> tuple[
         i = used.get(step.node, 0)
         used[step.node] = i + 1
         new = by_node[step.node][i]
-        if new.output != step.output:  # a new input or code alone is no drift
+        # a new input or code alone is no drift, and nor is what replay masks
+        if normalize(new.output, ignore_paths) != normalize(step.output, ignore_paths):
             changed.add(step.node)
         steps.append(new)
     return Cassette(inputs=baseline.inputs, steps=steps), changed

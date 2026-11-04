@@ -8,6 +8,7 @@ values in, values out.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langchain_core.messages import (
@@ -44,10 +45,27 @@ def fields(message: BaseMessage) -> dict[str, object]:
     return out
 
 
+def plain(value: Any) -> Any:
+    """`value` as JSON a judge can read: each message replaced by its fields."""
+    if isinstance(value, BaseMessage):
+        return fields(value)
+    if isinstance(value, dict):
+        return {k: plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [plain(v) for v in value]
+    return value
+
+
 def encode(value: object) -> object:
     # json.dumps calls this for each value it can't write itself
     if isinstance(value, BaseMessage):
-        return {_SAVED: message_to_dict(value)}
+        saved = message_to_dict(value)
+        # include_response_headers=True puts them here; they can hold cookies, and cassettes
+        # get committed.
+        saved["data"]["response_metadata"].pop("headers", None)
+        # What JSON can't hold, like a tool's artifact, isn't compared and must not cost the
+        # recording, so it's saved as its repr.
+        return {_SAVED: json.loads(json.dumps(saved, default=repr))}
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 

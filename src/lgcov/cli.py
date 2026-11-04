@@ -100,6 +100,7 @@ from lgcov.langsmith import (
 )
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
+from lgcov.messages import plain
 from lgcov.review import ReviewDecision, apply_decision
 from lgcov.sampling import (
     KpiStats,
@@ -670,7 +671,9 @@ def _cassette_accept(argv: list[str]) -> int:
             nodes = {
                 node
                 for base, neu in zip(runs, fresh, strict=True)
-                for node in accept_nodes(base, neu, {s.node for s in base.steps})[1]
+                for node in accept_nodes(base, neu, {s.node for s in base.steps}, cfg.ignore_paths)[
+                    1
+                ]
             }
             if not nodes:
                 print("lgcov cassette accept: no drifted nodes", file=sys.stderr)
@@ -681,7 +684,9 @@ def _cassette_accept(argv: list[str]) -> int:
             unknown = sorted(nodes - known)
             if unknown:
                 raise ValueError(f"unknown node {unknown[0]!r}; known: {sorted(known)}")
-        results = [accept_nodes(b, f, nodes) for b, f in zip(runs, fresh, strict=True)]
+        results = [
+            accept_nodes(b, f, nodes, cfg.ignore_paths) for b, f in zip(runs, fresh, strict=True)
+        ]
     except (OSError, ImportError, SyntaxError, ValueError, KeyError, TypeError) as exc:
         print(f"lgcov cassette accept: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -1145,8 +1150,10 @@ def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> _Cases:
         else:
             step = next((s for s in steps if s.node == spec.node), None)
         if step is not None:
-            node_in = step.input if isinstance(step.input, dict) else {}
-            node_out = step.output if isinstance(step.output, dict) else {"output": step.output}
+            # T165: plain, since judges send it as JSON and reviews save it as JSON
+            node_in = plain(step.input) if isinstance(step.input, dict) else {}
+            output = step.output if isinstance(step.output, dict) else {"output": step.output}
+            node_out = plain(output)
             cases[case_id] = (node_in, node_out)
     return cases
 

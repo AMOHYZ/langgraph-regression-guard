@@ -1,6 +1,7 @@
 """T165: how a LangChain message is saved, loaded and shown to a judge."""
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 from langchain_core.messages import (
@@ -13,7 +14,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from lgcov.messages import decode, encode
+from lgcov.messages import decode, encode, plain
 
 
 def _round_trip(value: object) -> object:
@@ -82,3 +83,48 @@ def test_a_dict_that_only_looks_saved_stays_a_dict(lookalike: dict[str, object])
 def test_a_saved_message_of_an_unknown_type_is_an_error_not_a_guess() -> None:
     with pytest.raises(ValueError, match="unexpected message type"):
         _round_trip({"langchain_message": {"type": "os.system", "data": {"content": "x"}}})
+
+
+def test_what_json_can_t_hold_inside_a_message_is_saved_as_its_repr() -> None:
+    when = datetime(2026, 11, 4, tzinfo=UTC)
+    back = _round_trip(ToolMessage("r", tool_call_id="c", artifact=object()))
+    assert isinstance(back, ToolMessage) and "object object at" in back.artifact
+    back = _round_trip(AIMessage("r", additional_kwargs={"when": when}))
+    assert isinstance(back, AIMessage) and back.additional_kwargs == {"when": repr(when)}
+
+
+def test_response_headers_are_left_out_of_a_saved_message() -> None:
+    metadata = {"model_name": "fake", "headers": {"set-cookie": "a-session-cookie"}}
+    message = AIMessage("hi", response_metadata=metadata)
+    assert "a-session-cookie" not in json.dumps(message, default=encode)
+    assert message.response_metadata == metadata  # the live message keeps them
+    back = _round_trip(message)
+    assert isinstance(back, AIMessage) and back.response_metadata == {"model_name": "fake"}
+
+
+def test_plain_shows_a_judge_what_each_message_says() -> None:
+    value = {
+        "messages": [
+            HumanMessage("q", id="u1"),
+            AIMessage(
+                "a",
+                id="run-1",
+                tool_calls=[{"name": "s", "args": {"id": 7}, "id": "call_1", "type": "tool_call"}],
+                usage_metadata={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+            ),
+            ToolMessage("r", tool_call_id="call_1"),
+        ],
+        "nested": {"m": [SystemMessage("s")]},
+        "x": 1,
+    }
+    shown = plain(value)
+    assert shown == {
+        "messages": [
+            {"type": "human", "content": "q"},
+            {"type": "ai", "content": "a", "tool_calls": [{"name": "s", "args": {"id": 7}}]},
+            {"type": "tool", "content": "r", "tool_call_id": "call_1", "status": "success"},
+        ],
+        "nested": {"m": [{"type": "system", "content": "s"}]},
+        "x": 1,
+    }
+    assert json.loads(json.dumps(shown)) == shown

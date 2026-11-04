@@ -3,7 +3,7 @@ do, are compared, served and saved like any other state."""
 
 import time
 from collections.abc import Callable
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict, cast
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -13,15 +13,20 @@ from langchain_core.messages import (
     AIMessageChunk,
     BaseMessage,
     HumanMessage,
+    SystemMessage,
     ToolCall,
     ToolMessage,
 )
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command, Send
 
 from lgcov.cassette import (
     Cassette,
+    Halt,
     Step,
+    accept_nodes,
     record,
     replay_run,
     unservable,
@@ -324,3 +329,157 @@ def test_ignore_paths_reach_into_a_message() -> None:
 def test_to_json_still_refuses_any_other_object() -> None:
     with pytest.raises(TypeError, match="not JSON serializable"):
         Cassette({}, [Step("a", object())]).to_json()
+
+
+def test_accept_nodes_ignores_what_replay_masks() -> None:
+    spy = Mock()
+    nodes = {"model", "tools", "answer"}
+    base, same = record(_agent(spy), PROMPT), record(_agent(spy), PROMPT)
+    assert accept_nodes(base, same, nodes)[1] == set()
+    other = record(_agent(spy, _answers(text="other")), PROMPT)
+    assert accept_nodes(base, other, nodes)[1] == {"model"}
+    assert accept_nodes(base, other, nodes, ["/messages/*/content"])[1] == set()
+
+
+def test_accept_nodes_still_sees_a_real_change_in_plain_state() -> None:
+    base = Cassette({}, [Step("a", {"id": "1", "x": 1})])
+    assert accept_nodes(base, Cassette({}, [Step("a", {"id": "2", "x": 1})]), {"a"})[1] == set()
+    assert accept_nodes(base, Cassette({}, [Step("a", {"id": "1", "x": 2})]), {"a"})[1] == {"a"}
+
+
+def test_an_artifact_json_can_t_hold_is_saved_as_its_repr() -> None:
+    # A paid recording must not be lost to a value replay never compares.
+    tools = _returns(artifact=object())
+    spy = Mock()
+    loaded = Cassette.from_json(record(_agent(spy, tools=tools), PROMPT).to_json())
+    assert "object object at" in loaded.steps[1].output["messages"][0].artifact
+    spy.reset_mock()
+    fresh = replay_run(_agent(spy, tools=tools), loaded, serve=True)
+    assert (fresh.drifts, _ran(spy)) == ((), [])
+
+
+def test_response_headers_never_reach_a_saved_cassette() -> None:
+    # langchain-openai's include_response_headers=True puts them in response_metadata.
+    metadata = {"model_name": "fake", "headers": {"set-cookie": "a-session-cookie"}}
+    saved = record(_agent(Mock(), _answers(response_metadata=metadata)), PROMPT).to_json()
+    assert "a-session-cookie" not in saved
+    loaded = Cassette.from_json(saved)
+    assert loaded.steps[0].output["messages"][0].response_metadata == {"model_name": "fake"}
+
+
+def test_a_command_s_update_holding_messages_is_saved_and_compared() -> None:
+    # open_deep_research's nodes all return Command. Serving them is T168; comparing is here.
+    def graph(text: str) -> Agent:
+        def node(state: MessagesState) -> Command[Any]:
+            return Command(goto=END, update={"messages": [_reply(text)]})
+
+        return _one(node)
+
+    cassette = Cassette.from_json(record(graph("hi"), PROMPT).to_json())
+    assert replay_run(graph("hi"), cassette, serve=True).drifts == ()
+    assert [d.node for d in replay_run(graph("bye"), cassette, serve=True).drifts] == ["n"]
+
+
+def _override(current: list[BaseMessage], new: Any) -> list[BaseMessage]:
+    # open_deep_research's override_reducer: messages nested in a dict in a node's output.
+    if isinstance(new, dict) and new.get("type") == "override":
+        return list(new["value"])
+    return cast(list[BaseMessage], add_messages(cast(Any, current), new))
+
+
+class _Supervised(TypedDict, total=False):
+    supervisor_messages: Annotated[list[BaseMessage], _override]
+
+
+def _supervised(spy: Mock, brief: str) -> CompiledStateGraph[_Supervised]:
+    def write_brief(state: _Supervised) -> dict[str, Any]:
+        spy("write_brief")
+        value = [SystemMessage("be brief", id=str(uuid4())), HumanMessage(brief, id=str(uuid4()))]
+        return {"supervisor_messages": {"type": "override", "value": value}}
+
+    def supervisor(state: _Supervised) -> dict[str, Any]:
+        spy("supervisor")
+        return {"supervisor_messages": [_reply(str(state["supervisor_messages"][-1].content))]}
+
+    g = StateGraph(_Supervised)
+    g.add_node("write_brief", write_brief)
+    g.add_node("supervisor", supervisor)
+    g.add_edge(START, "write_brief")
+    g.add_edge("write_brief", "supervisor")
+    g.add_edge("supervisor", END)
+    return g.compile()
+
+
+def test_messages_nested_in_a_dict_are_compared_saved_and_served() -> None:
+    spy = Mock()
+    cassette = Cassette.from_json(record(_supervised(spy, "a brief"), {}).to_json())
+    assert replay_run(_supervised(spy, "a brief"), cassette).drifts == ()  # all new ids
+    spy.reset_mock()
+    fresh = replay_run(_supervised(spy, "a brief"), cassette, serve=True)
+    assert (fresh.drifts, _ran(spy)) == ((), [])
+    changed = replay_run(_supervised(spy, "a new brief"), cassette, serve=True)
+    assert [d.node for d in changed.drifts] == ["supervisor", "write_brief"]
+
+
+def test_a_single_message_without_a_list_is_compared_and_saved() -> None:
+    def graph(text: str) -> Agent:
+        def node(state: MessagesState) -> dict[str, BaseMessage]:
+            return {"messages": _reply(text)}
+
+        return _one(node)
+
+    cassette = Cassette.from_json(record(graph("hi"), PROMPT).to_json())
+    assert replay_run(graph("hi"), cassette, serve=True).drifts == ()
+    assert [d.node for d in replay_run(graph("bye"), cassette, serve=True).drifts] == ["n"]
+
+
+def test_parallel_workers_with_message_payloads_are_served_by_their_payload() -> None:
+    spy = Mock()
+
+    def graph() -> Agent:
+        def fan(state: MessagesState) -> list[Send]:
+            tasks = [HumanMessage(f"task {i}", id=str(uuid4())) for i in range(3)]
+            return [Send("worker", {"messages": [t]}) for t in tasks]
+
+        def worker(state: MessagesState) -> MessagesState:
+            spy("worker")
+            return {"messages": [_reply(f"did {state['messages'][-1].content}")]}
+
+        g = StateGraph(MessagesState)
+        g.add_node("worker", worker)
+        g.add_conditional_edges(START, fan, ["worker"])
+        g.add_edge("worker", END)
+        return g.compile()
+
+    cassette = Cassette.from_json(record(graph(), PROMPT).to_json())
+    spy.reset_mock()
+    fresh = replay_run(graph(), cassette, serve=True)
+    assert (fresh.drifts, _ran(spy)) == ((), [])
+    done = sorted(s.output["messages"][0].content for s in fresh.steps)
+    assert done == ["did task 0", "did task 1", "did task 2"]
+
+
+def test_a_subgraph_holding_messages_is_saved_and_compared() -> None:
+    def graph(text: str) -> Agent:
+        def inner(state: MessagesState) -> MessagesState:
+            return {"messages": [_reply(text)]}
+
+        g = StateGraph(MessagesState)
+        g.add_node("sub", _one(inner))
+        g.add_edge(START, "sub")
+        g.add_edge("sub", END)
+        return g.compile()
+
+    cassette = Cassette.from_json(record(graph("hi"), PROMPT).to_json())
+    assert replay_run(graph("hi"), cassette, serve=True).drifts == ()
+    assert [d.node for d in replay_run(graph("bye"), cassette, serve=True).drifts] == ["sub"]
+
+
+def test_a_changed_message_input_is_a_divergence() -> None:
+    # T089 needs a node's input kept: with messages in it, main kept none and never diverged.
+    spy = Mock()
+    cassette = record(_agent(spy), PROMPT)
+    changed = _agent(spy, _answers(text="other"))
+    fresh = replay_run(changed, cassette, serve=True, on_divergence="fail")
+    assert fresh.halt == Halt("tools", "diverged")
+    assert fresh.not_checked == ("tools", "answer")
