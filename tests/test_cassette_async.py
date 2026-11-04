@@ -1,6 +1,12 @@
 import asyncio
 import operator
+import os
+import subprocess
+import sys
+import threading
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from functools import partial
 from typing import Annotated, Any, Literal, TypedDict, cast
 from unittest.mock import Mock
@@ -407,10 +413,10 @@ def test_record_streams_an_object_with_only_astream() -> None:
 
 
 def test_a_sync_graph_never_starts_an_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    def no_loop(main: object) -> None:
+    def no_loop() -> None:
         pytest.fail("a sync graph must stay on .stream")
 
-    monkeypatch.setattr(asyncio, "run", no_loop)
+    monkeypatch.setattr("lgcov.cassette._thread_loop", no_loop)
     assert [s.node for s in record(linear(), {"x": 1}).steps] == ["a", "b"]
 
 
@@ -526,6 +532,133 @@ def test_a_sync_graph_still_records_in_a_running_loop() -> None:
         return [s.node for s in record(linear(), {"x": 1}).steps]
 
     assert asyncio.run(inside()) == ["a", "b"]
+
+
+# Async runs share one event loop per thread, open between runs. A client kept across runs,
+# like a cached model client, holds connections that belong to the loop that opened them.
+class _PooledClient:
+    def __init__(self) -> None:
+        self.loop: asyncio.AbstractEventLoop | None = None
+
+    async def get(self) -> int:
+        loop = asyncio.get_running_loop()
+        if self.loop is not None and self.loop is not loop:
+            raise RuntimeError("Event loop is closed")
+        self.loop = loop
+        return 200
+
+
+def test_a_client_kept_across_runs_works_on_every_run() -> None:
+    client = _PooledClient()
+
+    async def call(state: S) -> S:
+        return {"x": await client.get()}
+
+    graph = _pair(call, _anoop)
+    cassette = record(graph, {"x": 1})
+    assert replay(graph, cassette) == []
+    assert [s.output for s in record(graph, {"x": 1}).steps] == [{"x": 200}, {"x": 200}]
+
+
+def test_work_a_failed_node_left_running_does_not_carry_into_the_next_run() -> None:
+    spy = Mock()  # a real call, still running and billing after its node failed
+
+    async def slow() -> None:
+        await asyncio.sleep(0.05)
+        spy()
+
+    async def fail() -> None:
+        raise ValueError("bad draft")
+
+    async def fans_out(state: S) -> S:
+        await asyncio.gather(slow(), fail())  # open_deep_research fans out this way
+        return state
+
+    async def next_run(state: S) -> S:
+        await asyncio.sleep(0.1)  # time for `slow` to finish, if it were still there
+        return state
+
+    with pytest.raises(NodeError):
+        record(_pair(fans_out, _anoop), {"x": 1})
+    record(_pair(next_run, _anoop), {"x": 1})
+    assert spy.call_count == 0
+
+
+_CALLER: ContextVar[int] = ContextVar("caller")
+
+
+def test_each_run_sees_the_callers_context() -> None:
+    seen = Mock()
+
+    async def a(state: S) -> S:
+        seen(_CALLER.get())
+        return state
+
+    for value in (1, 2):
+        token = _CALLER.set(value)
+        record(_pair(a, _anoop), {"x": 1})
+        _CALLER.reset(token)
+    assert [c.args[0] for c in seen.call_args_list] == [1, 2]
+
+
+def test_async_runs_in_two_threads_at_once_each_get_a_loop() -> None:
+    barrier = threading.Barrier(2, timeout=5)
+
+    async def a(state: S) -> S:
+        barrier.wait()  # both runs are inside their loops here
+        return state
+
+    graph = _pair(a, _anoop)
+    with ThreadPoolExecutor(2) as pool:
+        runs = list(pool.map(lambda x: record(graph, {"x": x}), [1, 2]))
+    assert [r.steps[0].output for r in runs] == [{"x": 1}, {"x": 2}]
+
+
+_RUNS_THEN_EXITS = """
+import asyncio
+import atexit
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+from lgcov.cassette import record
+
+loops = []
+atexit.register(lambda: print(loops[0].is_closed()))  # registered first, so it runs last
+
+
+class S(TypedDict, total=False):
+    x: int
+
+
+def first(state: S) -> S:  # a sync node: the loop's default executor runs it
+    return {"x": 2}
+
+
+async def second(state: S) -> S:
+    loops.append(asyncio.get_running_loop())
+    return state
+
+
+g = StateGraph(S)
+g.add_node("first", first)
+g.add_node("second", second)
+g.add_edge(START, "first")
+g.add_edge("first", "second")
+g.add_edge("second", END)
+record(g.compile(), {"x": 1})
+"""
+
+
+def test_the_event_loop_closes_cleanly_at_exit() -> None:
+    done = subprocess.run(
+        [sys.executable, "-W", "error::ResourceWarning", "-c", _RUNS_THEN_EXITS],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    assert (done.returncode, done.stdout, done.stderr) == (0, "True\n", "")
 
 
 @pytest.mark.xfail(strict=True, reason="T168: Command returns not served")

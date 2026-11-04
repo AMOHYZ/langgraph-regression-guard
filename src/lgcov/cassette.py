@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import inspect
 import json
 import threading
@@ -6,6 +7,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import copy_context
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field
 from functools import partial, wraps
@@ -205,6 +207,28 @@ def _loop_running() -> bool:
     return True
 
 
+_loops = threading.local()
+
+
+def _thread_loop() -> asyncio.Runner:
+    """T164: this thread's event loop for async runs. It stays open between runs: a client
+    kept across them, like a cached model client, holds connections that belong to the loop
+    that opened them, and fails with `Event loop is closed` on a new one."""
+    runner: asyncio.Runner | None = getattr(_loops, "runner", None)
+    if runner is None:
+        runner = _loops.runner = asyncio.Runner()
+        atexit.register(runner.close)
+    return runner
+
+
+async def _cancel_the_rest() -> None:
+    # As closing a loop would: work a node left running can't carry on into the next run.
+    rest = asyncio.all_tasks() - {asyncio.current_task()}
+    for task in rest:
+        task.cancel()
+    await asyncio.gather(*rest, return_exceptions=True)
+
+
 def _router_code(path: Any) -> Any:
     # T164: `func`, or `afunc` on an async router.
     return getattr(getattr(path, "func", None) or getattr(path, "afunc", None), "__code__", None)
@@ -328,9 +352,8 @@ def _run(
     Each plain-function node is wrapped: a call whose fingerprint and masked input match an
     unused step of `served` returns that step's output instead of running the node.
 
-    T164: a graph `.stream` can't drive runs under `.astream` with the same stream mode, in
-    its own `asyncio.run()`; inside a running event loop that's a RunningLoopError. Each run
-    gets a new loop, so an async client kept across runs can fail with `Event loop is closed`.
+    T164: a graph `.stream` can't drive runs under `.astream` with the same stream mode, on
+    this thread's event loop (`_thread_loop`); inside a running one that's a RunningLoopError.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     unused = [(s, _key(s.input, ignore_paths)) for s in served if s.code is not None]
@@ -428,15 +451,18 @@ def _run(
             )
 
     async def drain() -> None:
-        async for chunk in runner.astream(inputs, stream_mode="updates"):
-            take(chunk)
+        try:
+            async for chunk in runner.astream(inputs, stream_mode="updates"):
+                take(chunk)
+        finally:
+            await _cancel_the_rest()
 
     driven_async = _needs_async(graph)
     if driven_async and _loop_running():
         raise RunningLoopError()
     try:
         if driven_async:
-            asyncio.run(drain())
+            _thread_loop().run(drain(), context=copy_context())  # the caller's, new each run
         else:
             for chunk in runner.stream(inputs, stream_mode="updates"):
                 take(chunk)

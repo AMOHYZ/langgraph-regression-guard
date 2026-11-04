@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Graphs with `async def` nodes or routers record and replay; served nodes make no real call.
+- Graphs with `async def` nodes or routers record and replay; served nodes make no real call (#54).
 
 ## 0.1.0 (2026-11-02)
 
