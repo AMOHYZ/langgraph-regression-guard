@@ -30,6 +30,7 @@ status: labels_reviewed
 graph: src/open_deep_research/deep_researcher.py:deep_researcher
 base_ref: f95d200654b5c4733e87375be15b92822c6c4ff8
 head_ref: 6532a4176a93cc9bb2102b3d825dcefa560c85d9
+pythonpath: [src]
 cases:
   - messages:
       - {role: user, content: "Compare the context window sizes and per-token prices of the current flagship models from OpenAI, Anthropic and Google, with sources."}

@@ -117,6 +117,8 @@ from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
 # 2 = bad input (missing/unreadable/invalid).
 EXIT_ERROR = 2
 EXIT_NOT_DRIFTED = 1
+# T166: a side of `lgcov bench` couldn't load its graph (lgcov.bench_side).
+CANT_IMPORT = 3
 
 
 def _output_hash(output: object) -> str:
@@ -1594,9 +1596,63 @@ def _bench_sides(b: Benchmark, tmp: Path) -> tuple[str, str, list[Path]]:
     return f"{tmp / 'base' / file}:{attr}", f"{tmp / 'head' / file}:{attr}", worktrees
 
 
+class _SideFailed(Exception):
+    """T166: one side of a benchmark failed in its own process."""
+
+
+class _CantImport(_SideFailed):
+    """T166: one side of a benchmark couldn't load its graph, so nothing was run for it."""
+
+
+def _run_side(b: Benchmark, side: str, root: Path, *args: str) -> None:
+    """T166: one step of one side, in its own process (lgcov.bench_side). The side's root and
+    `pythonpath` come first on its path, ahead of anything installed, and it inherits the
+    environment, where an agent's API keys live."""
+    path = [str(root), *(str(root / p) for p in b.pythonpath)]
+    if inherited := os.environ.get("PYTHONPATH"):
+        path.append(inherited)
+    done = subprocess.run(
+        [sys.executable, "-m", "lgcov.bench_side", *args],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(path)},
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    lines = done.stderr.splitlines()
+    if done.returncode == 0:
+        sys.stderr.write(done.stderr)  # what it had to say, like rebind_skipped
+        return
+    why = lines.pop() if lines else f"exit code {done.returncode}"
+    print("\n".join(lines), file=sys.stderr, end="\n" if lines else "")
+    if done.returncode == CANT_IMPORT:
+        raise _CantImport(f"cannot import the {side} side: {why}")
+    raise _SideFailed(f"{side} side: {why}")
+
+
+def _error_row(b: Benchmark, error: str, seconds: float) -> Result:
+    return Result(
+        b.name,
+        (),
+        (),
+        Score(0, 0, 0),
+        Score(0, 0, 0),
+        seconds,
+        tuple(sorted(b.root)),
+        tuple(sorted(b.propagated)),
+        b.hard_cases,
+        b.notes,
+        error=error,
+    )
+
+
 def _bench_one(b: Benchmark) -> Result:
     """Record the cases on base, replay head (unchanged nodes served, as `lgcov ci` does),
-    and score lgcov's root / propagated labels. A benchmark that can't run says why."""
+    and score lgcov's root / propagated labels. A benchmark that can't run says why.
+
+    T166: each side runs in its own process. Head's import is checked first, and base's is the
+    first thing its recording does, so a bad import costs no real call on either side."""
     start = perf_counter()
     worktrees: list[Path] = []
     expected = (tuple(sorted(b.root)), tuple(sorted(b.propagated)))
@@ -1604,30 +1660,27 @@ def _bench_one(b: Benchmark) -> Result:
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 base_target, head_target, worktrees = _bench_sides(b, Path(tmp))
-                base = _load_graph(base_target)
-                runs = [record(base, dict(inputs)) for inputs in b.cases]
-                head = _load_graph(head_target)
-                done = [replay_run(head, run, (), serve=True) for run in runs]
-                drifts = [list(r.drifts) for r in done]
-                _say_rebind_skipped(done)
+                base_root, head_root = Path(tmp) / "base", Path(tmp) / "head"
+                cases, saved, drifted = (Path(tmp) / f for f in ("cases", "runs", "drifted"))
+                cases.write_text(json.dumps(list(b.cases)), encoding="utf-8")
+                _run_side(b, "head", head_root, "check", head_target)
+                _run_side(b, "base", base_root, "record", base_target, str(cases), str(saved))
+                _run_side(b, "head", head_root, "replay", head_target, str(saved), str(drifted))
+                runs = _load_runs(str(saved))
+                nodes: list[list[str]] = json.loads(drifted.read_text(encoding="utf-8"))
+                drifts = [[Drift(n, None, None) for n in names] for names in nodes]
             finally:
                 for worktree in worktrees:
                     remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]
                     subprocess.run(remove, check=False, capture_output=True)
-    except Exception as exc:  # user graph code and git can raise anything: a row, not a crash
+    except _CantImport:
+        raise  # the command's to report: it changes the exit code
+    except _SideFailed as exc:  # a node crashed, say: a row, not a crash
+        return _error_row(b, str(exc)[:200], perf_counter() - start)
+    except Exception as exc:  # git can raise anything too
         failed = getattr(exc, "stderr", "") or str(exc)
-        return Result(
-            b.name,
-            (),
-            (),
-            Score(0, 0, 0),
-            Score(0, 0, 0),
-            perf_counter() - start,
-            *expected,
-            b.hard_cases,
-            b.notes,
-            error=f"{type(exc).__name__}: {str(failed).strip()[:200]}",
-        )
+        error = f"{type(exc).__name__}: {str(failed).strip()[:200]}"
+        return _error_row(b, error, perf_counter() - start)
     counts, roots = _drift_kinds(runs, drifts)
     found = (tuple(sorted(roots)), tuple(sorted(counts.keys() - roots)))
     return Result(
@@ -1644,7 +1697,8 @@ def _bench_one(b: Benchmark) -> Result:
 
 def _bench_cmd(argv: list[str]) -> int:
     """T101a: lgcov's root / propagated labels against hand-written ones, one benchmark file
-    each. A report, not a gate: it exits 0 whatever the scores."""
+    each. A report, not a gate: it exits 0 whatever the scores. T166: it exits 2 if a side's
+    graph can't be imported, after the other benchmarks have run and the report is written."""
     ap = argparse.ArgumentParser(prog="lgcov bench")
     ap.add_argument("dir", nargs="?", default="docs/benchmark", help="benchmark files (*.yaml)")
     ap.add_argument("--only", action="append", default=[], help="run this one (file name)")
@@ -1664,7 +1718,15 @@ def _bench_cmd(argv: list[str]) -> int:
         except (OSError, ValueError, yaml.YAMLError) as exc:
             print(f"lgcov bench: {f}: {exc}", file=sys.stderr)
             return EXIT_ERROR
-    results = [pending_result(b) if b.status else _bench_one(b) for b in benchmarks]
+    results: list[Result] = []
+    code = 0
+    for b in benchmarks:
+        try:
+            results.append(pending_result(b) if b.status else _bench_one(b))
+        except _CantImport as exc:
+            print(f"lgcov bench: {b.name}: {exc}", file=sys.stderr)
+            results.append(_error_row(b, str(exc)[:200], 0.0))
+            code = EXIT_ERROR
     command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only)])
     source = f"the {len(results)} benchmark file{'' if len(results) == 1 else 's'} in `{folder}`"
     md = render_markdown(results, command, datetime.now(UTC).date().isoformat(), source)
@@ -1672,7 +1734,7 @@ def _bench_cmd(argv: list[str]) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     print(md, end="")
-    return 0
+    return code
 
 
 @dataclass(frozen=True)
