@@ -59,9 +59,7 @@ from lgcov.cassette import (
     Step,
     accept_nodes,
     record,
-    replay,
     replay_run,
-    replay_steps,
     runs_from_json,
     runs_to_json,
     unservable,
@@ -346,6 +344,21 @@ def _divergence_lines(replays: list[Replay], on_divergence: OnDivergence) -> lis
     return lines
 
 
+def _rebind_lines(replays: list[Replay]) -> list[str]:
+    """T165: the steps that ran live because their recorded ids couldn't be fitted to this run's."""
+    return [
+        f"rebind_skipped: {node} (run {i}): its recorded ids don't map one-to-one onto this "
+        "run's, so it ran live."
+        for i, r in enumerate(replays, 1)
+        for node in r.rebind_skipped
+    ]
+
+
+def _say_rebind_skipped(replays: list[Replay]) -> None:
+    for line in _rebind_lines(replays):
+        print(line, file=sys.stderr)
+
+
 def _harness_message(what: str, exc: BaseException) -> str:
     return f"{what}: {type(exc).__name__}: {exc}"
 
@@ -418,12 +431,14 @@ def _replay(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return _harness_error("lgcov replay", "cannot read baseline", exc)
     try:
-        drifts = [replay(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
+        replays = [replay_run(graph, run, cfg.ignore_paths, serve=not args.live) for run in runs]
     except NodeError as exc:
         return _node_failure("lgcov replay", exc)
     except Exception as exc:  # replay itself: no node or router raised it
         return _harness_error("lgcov replay", "replay failed outside node code", exc)
-    print("\n".join(_replay_markdown(runs, drifts)))
+    drifts = [list(r.drifts) for r in replays]
+    skipped = _rebind_lines(replays)
+    print("\n".join([*_replay_markdown(runs, drifts), *([""] if skipped else []), *skipped]))
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
     code = drift_exit_code(args.fail_on, len(root), len(downstream))
@@ -438,6 +453,8 @@ def _replay(argv: list[str]) -> int:
             "runs": len(runs),
             "verdict": verdict(code),
         }
+        if skipped:
+            summary["rebind_skipped"] = sorted({n for r in replays for n in r.rebind_skipped})
         Path(args.summary_json).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return code
 
@@ -843,7 +860,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     under_floor = node_floor_miss(cov, cfg.thresholds.min_node_coverage)
     floor_code = Outcome.AGENT_FAIL if under_floor else 0  # a floor miss is 1, never 2
     l1_code = max(drift_code, int(blocks and bool(not_checked)), floor_code)
-    diverged = _divergence_lines(replays, args.on_divergence)
+    diverged = [*_divergence_lines(replays, args.on_divergence), *_rebind_lines(replays)]
     calls = [c for r in replays for c in r.calls]
     timing = Timing(
         0.0,
@@ -1258,7 +1275,9 @@ def _judge_cmd(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return _harness_error("lgcov judge", "cannot read baseline", exc)
     try:
-        replays = [replay_steps(graph, r, cfg.ignore_paths, serve=not args.live) for r in runs]
+        done = [replay_run(graph, r, cfg.ignore_paths, serve=not args.live) for r in runs]
+        replays = [(list(r.drifts), list(r.steps)) for r in done]
+        _say_rebind_skipped(done)
     except NodeError as exc:
         return _node_failure("lgcov judge", exc)
     except Exception as exc:  # replay itself: no node or router raised it
@@ -1442,9 +1461,11 @@ def _review_cmd(argv: list[str]) -> int:
     try:
         # Exception: importing and running user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
-        fresh = [replay_steps(graph, run, cfg.ignore_paths, serve=True)[1] for run in runs]
+        done = [replay_run(graph, run, cfg.ignore_paths, serve=True) for run in runs]
     except Exception as exc:
         return _harness_error("lgcov review", "cannot replay the graph", exc)
+    _say_rebind_skipped(done)
+    fresh = [list(r.steps) for r in done]
     cases = _l2_cases(spec, fresh)
     if args.case_id not in cases:
         print(f"lgcov review: no case '{args.case_id}'; there are {sorted(cases)}", file=sys.stderr)
@@ -1586,7 +1607,9 @@ def _bench_one(b: Benchmark) -> Result:
                 base = _load_graph(base_target)
                 runs = [record(base, dict(inputs)) for inputs in b.cases]
                 head = _load_graph(head_target)
-                drifts = [replay_steps(head, run, (), serve=True)[0] for run in runs]
+                done = [replay_run(head, run, (), serve=True) for run in runs]
+                drifts = [list(r.drifts) for r in done]
+                _say_rebind_skipped(done)
             finally:
                 for worktree in worktrees:
                     remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]

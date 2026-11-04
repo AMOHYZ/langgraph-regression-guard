@@ -4,6 +4,7 @@
 
 - Graphs with `async def` nodes or routers record and replay; served nodes make no real call (#54).
 - State holding LangChain messages records, replays and compares; new ids and metadata aren't drift (#55).
+- A served step's ids are fitted to the run's own; if they can't be, it runs live and reports `rebind_skipped` (#56).
 
 ## 0.1.0 (2026-11-02)
 

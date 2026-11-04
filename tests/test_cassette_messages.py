@@ -2,7 +2,7 @@
 do, are compared, served and saved like any other state."""
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Annotated, Any, TypedDict, cast
 from unittest.mock import Mock
 from uuid import uuid4
@@ -13,6 +13,7 @@ from langchain_core.messages import (
     AIMessageChunk,
     BaseMessage,
     HumanMessage,
+    RemoveMessage,
     SystemMessage,
     ToolCall,
     ToolMessage,
@@ -23,6 +24,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, Send
 
 from lgcov.cassette import (
+    Budget,
     Cassette,
     Halt,
     Step,
@@ -483,3 +485,215 @@ def test_a_changed_message_input_is_a_divergence() -> None:
     fresh = replay_run(changed, cassette, serve=True, on_divergence="fail")
     assert fresh.halt == Halt("tools", "diverged")
     assert fresh.not_checked == ("tools", "answer")
+
+
+# A served output fits the ids this run made (lgcov.rebind).
+def _provider_check(messages: Sequence[BaseMessage]) -> None:
+    # What a chat API does with the history it's sent: a tool result must answer an earlier call.
+    asked: set[str | None] = set()
+    for m in messages:
+        if isinstance(m, AIMessage):
+            asked.update(c["id"] for c in m.tool_calls)
+        if isinstance(m, ToolMessage) and m.tool_call_id not in asked:
+            raise ValueError(f"400: tool_call_id {m.tool_call_id} answers no call")
+
+
+def _respond(state: MessagesState) -> MessagesState:
+    _provider_check(state["messages"])
+    if isinstance(state["messages"][-1], ToolMessage):
+        return {"messages": [_reply("done")]}
+    return {"messages": [_reply("", _call({"q": "x"}))]}
+
+
+def _respond_reworded(state: MessagesState) -> MessagesState:
+    reply = _respond(state)  # a new prompt: new code, the same answer, new ids
+    return reply
+
+
+def _route(state: MessagesState) -> str:
+    last = state["messages"][-1]
+    return "tools" if isinstance(last, AIMessage) and last.tool_calls else END
+
+
+def _loop(spy: Mock, model: Node = _respond) -> Agent:
+    """model -> tools -> model, the shape of open_deep_research's supervisor and researcher."""
+    g = StateGraph(MessagesState)
+    g.add_node("model", _counted("model", model, spy))
+    g.add_node("tools", _counted("tools", _tools, spy))
+    g.add_edge(START, "model")
+    g.add_conditional_edges("model", _route, ["tools", END])
+    g.add_edge("tools", "model")
+    return g.compile()
+
+
+def test_a_served_tool_result_answers_the_call_this_run_made() -> None:
+    spy = Mock()
+    cassette = Cassette.from_json(record(_loop(spy), PROMPT).to_json())
+    fresh = replay_run(_loop(spy, _respond_reworded), cassette, serve=True)
+    assert [(c.node, c.how) for c in fresh.calls] == [
+        ("model", "live"),
+        ("tools", "served"),
+        ("model", "live"),  # its check passed: the history it was sent is valid
+    ]
+    assert fresh.drifts == ()
+    asked = fresh.steps[0].output["messages"][0].tool_calls[0]["id"]
+    assert fresh.steps[1].output["messages"][0].tool_call_id == asked
+    assert asked != cassette.steps[0].output["messages"][0].tool_calls[0]["id"]
+
+
+def test_an_unchanged_loop_is_served_with_its_recorded_ids() -> None:
+    spy = Mock()
+    cassette = Cassette.from_json(record(_loop(spy), PROMPT).to_json())
+    spy.reset_mock()
+    fresh = replay_run(_loop(spy), cassette, serve=True)
+    assert (fresh.drifts, _ran(spy), fresh.rebind_skipped) == ((), [], ())
+    assert [s.output for s in fresh.steps] == [s.output for s in cassette.steps]
+
+
+def _trimming(spy: Mock) -> Agent:
+    def seed(state: MessagesState) -> MessagesState:
+        spy("seed")
+        return {"messages": [AIMessage("a"), AIMessage("b")]}
+
+    def trim(state: MessagesState) -> dict[str, list[RemoveMessage]]:
+        # LangGraph's documented way to shorten history. The ids here are this run's.
+        spy("trim")
+        return {"messages": [RemoveMessage(id=m.id) for m in state["messages"][:-1] if m.id]}
+
+    def after(state: MessagesState) -> MessagesState:
+        spy("after")
+        return {"messages": [AIMessage(f"saw {len(state['messages'])}")]}
+
+    g = StateGraph(MessagesState)
+    g.add_node("seed", seed)
+    g.add_node("trim", trim)
+    g.add_node("after", after)
+    g.add_edge(START, "seed")
+    g.add_edge("seed", "trim")
+    g.add_edge("trim", "after")
+    g.add_edge("after", END)
+    return g.compile()
+
+
+def test_an_agent_that_trims_its_history_replays_with_no_real_call() -> None:
+    spy = Mock()
+    cassette = Cassette.from_json(record(_trimming(spy), PROMPT).to_json())
+    spy.reset_mock()
+    fresh = replay_run(_trimming(spy), cassette, serve=True)
+    assert (fresh.drifts, _ran(spy)) == ((), [])
+    assert fresh.steps[-1].output["messages"][0].content == "saw 1"
+
+
+def test_a_worker_given_a_plain_tool_call_answers_this_run_s_id() -> None:
+    def graph(spy: Mock, model: Node) -> Agent:
+        def fan(state: MessagesState) -> list[Send] | str:
+            last = state["messages"][-1]
+            if not (isinstance(last, AIMessage) and last.tool_calls):
+                return END
+            return [Send("worker", {"call": c}) for c in last.tool_calls]
+
+        def worker(state: dict[str, ToolCall]) -> MessagesState:
+            spy("worker")
+            call = state["call"]
+            return {"messages": [ToolMessage("found", tool_call_id=call["id"], name=call["name"])]}
+
+        g = StateGraph(MessagesState)
+        g.add_node("model", model)
+        g.add_node("worker", worker)
+        g.add_edge(START, "model")
+        g.add_conditional_edges("model", fan, ["worker", END])
+        g.add_edge("worker", "model")
+        return g.compile()
+
+    spy = Mock()
+    cassette = Cassette.from_json(record(graph(spy, _respond), PROMPT).to_json())
+    spy.reset_mock()
+    fresh = replay_run(graph(spy, _respond_reworded), cassette, serve=True)
+    assert (fresh.drifts, _ran(spy)) == ((), [])  # served, and model's check on it passed
+
+
+def _two_calls(state: MessagesState) -> MessagesState:
+    return {"messages": [_reply("", _call({"q": "x"}), _call({"q": "x"}))]}
+
+
+def _two_calls_reworded(state: MessagesState) -> MessagesState:
+    reply = _reply("", _call({"q": "x"}), _call({"q": "x"}))  # new code, the same answer
+    return {"messages": [reply]}
+
+
+def _answers_in_order(state: MessagesState) -> MessagesState:
+    last = state["messages"][-1]
+    assert isinstance(last, AIMessage)
+    return {
+        "messages": [
+            ToolMessage("found", tool_call_id=c["id"], name=c["name"]) for c in last.tool_calls
+        ]
+    }
+
+
+def _answers_in_the_other_order(state: MessagesState) -> MessagesState:
+    last = state["messages"][-1]
+    assert isinstance(last, AIMessage)
+    return {
+        "messages": [
+            ToolMessage("found", tool_call_id=c["id"], name=c["name"])
+            for c in reversed(last.tool_calls)
+        ]
+    }
+
+
+def _late(state: MessagesState) -> MessagesState:
+    # Its output names a recorded call, which is what makes its fit matter.
+    first = state["messages"][-2]
+    assert isinstance(first, ToolMessage)
+    return {"messages": [ToolMessage("late", tool_call_id=first.tool_call_id, name="search")]}
+
+
+def _ambiguous(spy: Mock, model: Node, tools: Node) -> Agent:
+    g = StateGraph(MessagesState)
+    g.add_node("model", _counted("model", model, spy))
+    g.add_node("tools", _counted("tools", tools, spy))
+    g.add_node("late", _counted("late", _late, spy))
+    g.add_edge(START, "model")
+    g.add_edge("model", "tools")
+    g.add_edge("tools", "late")
+    g.add_edge("late", END)
+    return g.compile()
+
+
+def test_an_ambiguous_fit_runs_the_step_live_and_says_so() -> None:
+    spy = Mock()
+    built = _ambiguous(spy, _two_calls, _answers_in_order)
+    cassette = Cassette.from_json(record(built, PROMPT).to_json())
+    spy.reset_mock()
+    budget = Budget(None)
+    # This run's tools answer in the other order, and the inputs still match once masked, so
+    # the recorded first call pairs with both of this run's: `late` can't be fitted.
+    changed = _ambiguous(spy, _two_calls_reworded, _answers_in_the_other_order)
+    fresh = replay_run(changed, cassette, serve=True, budget=budget)
+    assert fresh.rebind_skipped == ("late",)
+    assert [(c.node, c.how) for c in fresh.calls] == [
+        ("model", "live"),
+        ("tools", "live"),
+        ("late", "live"),
+    ]
+    assert _ran(spy) == ["model", "tools", "late"]
+    assert len(budget.live) == 3  # a skipped serve is a live call: it counts
+    assert fresh.drifts == ()
+    last = fresh.steps[-1].output["messages"][0]
+    assert last.tool_call_id == fresh.steps[1].output["messages"][0].tool_call_id
+
+
+def test_a_fit_that_can_be_made_is_not_reported_as_skipped() -> None:
+    spy = Mock()
+    built = _ambiguous(spy, _two_calls, _answers_in_order)
+    cassette = Cassette.from_json(record(built, PROMPT).to_json())
+    spy.reset_mock()
+    fresh = replay_run(
+        _ambiguous(spy, _two_calls_reworded, _answers_in_order), cassette, serve=True
+    )
+    assert fresh.rebind_skipped == ()
+    assert _ran(spy) == ["model"]  # tools and late served, fitted to the new ids
+    first = fresh.steps[1].output["messages"][0].tool_call_id
+    assert first == fresh.steps[0].output["messages"][0].tool_calls[0]["id"]
+    assert fresh.steps[2].output["messages"][0].tool_call_id == first

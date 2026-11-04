@@ -251,3 +251,161 @@ def test_lgcov_review_override_saves_messages_as_plain_json(
     assert json.loads(overrides.splitlines()[-1])["output"] == said
     cases = tmp_path / "calibration" / "cases" / "answer_states_order_status.jsonl"
     assert json.loads(cases.read_text(encoding="utf-8").splitlines()[-1])["node_output"] == said
+
+
+# Serving can't fit a step's ids: it runs live, and every command says so.
+AMBIGUOUS = """\
+from pathlib import Path
+from uuid import uuid4
+
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
+
+CALLS = Path("calls.log")  # by name: `lgcov bench` runs each side from its own folder
+PROMPT = "v1"
+ORDER = 1
+
+
+def _called(name: str) -> None:
+    with CALLS.open("a", encoding="utf-8") as f:
+        f.write(name + "\\n")
+
+
+def model(state: MessagesState) -> MessagesState:
+    _called(f"model {PROMPT}")
+    calls = [
+        {"name": "search", "args": {"q": "x"}, "id": f"call_{uuid4().hex}"} for _ in range(2)
+    ]
+    return {"messages": [AIMessage("", id=f"run-{uuid4()}", tool_calls=calls)]}
+
+
+def tools(state: MessagesState) -> MessagesState:
+    _called("tools")
+    calls = state["messages"][-1].tool_calls[::ORDER]
+    results = [ToolMessage("found", tool_call_id=c["id"], name=c["name"]) for c in calls]
+    return {"messages": results}
+
+
+def respond(state: MessagesState) -> MessagesState:
+    _called("respond")
+    first = state["messages"][-2].tool_call_id
+    return {"messages": [ToolMessage("late", tool_call_id=first, name="search")]}
+
+
+g = StateGraph(MessagesState)
+g.add_node("model", model)
+g.add_node("tools", tools)
+g.add_node("respond", respond)
+g.add_edge(START, "model")
+g.add_edge("model", "tools")
+g.add_edge("tools", "respond")
+g.add_edge("respond", END)
+graph = g.compile()
+"""
+AMBIGUOUS_CHANGED = AMBIGUOUS.replace('PROMPT = "v1"', 'PROMPT = "v2"').replace(
+    "ORDER = 1", "ORDER = -1"
+)
+SKIPPED = "rebind_skipped: respond (run 1)"
+
+
+def _ambiguous_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record, then change the graph so that `respond`'s ids can't be fitted."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "graph.py").write_text(AMBIGUOUS, encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(INPUTS, encoding="utf-8")
+    (tmp_path / "lgcov.yaml").write_text(
+        "graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n", encoding="utf-8"
+    )
+    assert main(["record", "--inputs", "inputs.json"]) == 0
+    (tmp_path / "graph.py").write_text(AMBIGUOUS_CHANGED, encoding="utf-8")
+    _calls(tmp_path)
+
+
+def test_lgcov_replay_says_rebind_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _ambiguous_project(tmp_path, monkeypatch)
+    capsys.readouterr()
+    assert main(["replay", "--summary-json", "summary.json"]) == 0  # it ran live, and matched
+    assert SKIPPED in capsys.readouterr().out
+    assert _calls(tmp_path) == ["model v2", "tools", "respond"]
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert summary["rebind_skipped"] == ["respond"]
+
+
+def test_lgcov_replay_says_nothing_when_nothing_was_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = _record(tmp_path)
+    capsys.readouterr()
+    summary = tmp_path / "summary.json"
+    assert main(["replay", "--config", str(cfg), "--summary-json", str(summary)]) == 0
+    assert "rebind_skipped" not in capsys.readouterr().out
+    assert "rebind_skipped" not in json.loads(summary.read_text(encoding="utf-8"))
+
+
+def test_lgcov_ci_puts_rebind_skipped_in_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ambiguous_project(tmp_path, monkeypatch)
+    assert main(["ci", "--report", "report.md"]) == 0
+    assert SKIPPED in (tmp_path / "report.md").read_text(encoding="utf-8")
+
+
+def test_lgcov_review_says_rebind_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _ambiguous_project(tmp_path, monkeypatch)
+    shutil.copy(ROOT / "tests" / "fixtures" / "demo_taxonomy.yaml", "taxonomy.yaml")
+    (tmp_path / "calibration" / "labels").mkdir(parents=True)
+    shutil.copy(ROOT / "calibration" / "labels" / "demo.csv", "calibration/labels/demo.csv")
+    assert main(["calibrate", "--taxonomy", "taxonomy.yaml"]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                *("review", "override", "--kpi", "answer_states_order_status"),
+                *("--case-id", "run-0/respond", "--judge-label", "pass", "--human-label", "fail"),
+                *("--reviewer", "ahmed", "--note", "wrong", "--graph", "graph.py:graph"),
+                *("--cassette-dir", "cassettes", "--taxonomy", "taxonomy.yaml"),
+            ]
+        )
+        == 0
+    )
+    assert SKIPPED in capsys.readouterr().err
+
+
+def test_lgcov_judge_says_rebind_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _ambiguous_project(tmp_path, monkeypatch)
+    shutil.copy(ROOT / "tests" / "fixtures" / "demo_taxonomy.yaml", "taxonomy.yaml")
+    capsys.readouterr()
+    main(
+        [
+            *("judge", "--graph", "graph.py:graph", "--cassette-dir", "cassettes"),
+            *("--taxonomy", "taxonomy.yaml", "--bands", "calibration/bands.json"),
+        ]
+    )
+    assert SKIPPED in capsys.readouterr().err
+
+
+def test_lgcov_bench_says_rebind_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The paid benchmark row goes through here: a skipped serve there is a real call.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "base.py").write_text(AMBIGUOUS, encoding="utf-8")
+    (tmp_path / "head.py").write_text(AMBIGUOUS_CHANGED, encoding="utf-8")
+    (tmp_path / "ambiguous.yaml").write_text(
+        "graph: graph.py:graph\nbase_patch: base.py\nhead_patch: head.py\n"
+        "cases:\n  - {messages: [{role: user, content: hi}]}\n"
+        "expected:\n  root: []\n  propagated: []\n"
+        "notes: Its tools answer in the other order.\nhard_cases: []\n",
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+    main(["bench", str(tmp_path), "--out", "bench.md", "--json", "bench.json"])
+    assert SKIPPED in capsys.readouterr().err
+    rows = json.loads((tmp_path / "bench.json").read_text(encoding="utf-8"))
+    assert "error" not in rows["benchmarks"][0] or not rows["benchmarks"][0]["error"]
