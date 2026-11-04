@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import copy_context
 from copy import copy, deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial, wraps
 from statistics import fmean
 from types import CodeType, FunctionType
@@ -23,6 +23,7 @@ from langgraph.pregel import Pregel
 from lgcov.fingerprint import fingerprint
 from lgcov.messages import decode, encode
 from lgcov.normalize import normalize
+from lgcov.rebind import Ambiguous, rebind
 
 
 @dataclass(frozen=True)
@@ -113,11 +114,13 @@ ON_DIVERGENCE: tuple[OnDivergence, ...] = ("fail", "flag", "live")
 class Call:
     """T089: one node call in a replay. `diverged`: the first call in its run whose code
     matched the recording but whose input didn't, so it ran live; `after_divergence`: a
-    call that ran live after that."""
+    call that ran live after that. T165: `rebind_skipped`: it matched a recorded step, but
+    that step's ids couldn't be fitted to this run's, so it ran live instead of being served."""
 
     node: str
     how: Literal["served", "live", "diverged", "after_divergence"]
     seconds: float = 0.0
+    rebind_skipped: bool = False
 
 
 @dataclass(frozen=True)
@@ -369,6 +372,9 @@ def _run(
 
     T164: a graph `.stream` can't drive runs under `.astream` with the same stream mode, on
     this thread's event loop (`_thread_loop`); inside a running one that's a RunningLoopError.
+
+    T165: a served output is fitted to the ids this run made (`lgcov.rebind`). If it can't be,
+    the call runs live and its `Call` says so.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     unused = [(s, _key(s.input, ignore_paths)) for s in served if s.code is not None]
@@ -394,6 +400,12 @@ def _run(
                     hit = unused.pop(i)[0]
                 diverged = hit is None and not run["diverged"] and (name, code) in recorded
                 run["diverged"] = run["diverged"] or diverged
+        skipped = False
+        if hit is not None:
+            try:
+                hit = replace(hit, output=rebind(hit.output, hit.input, state))
+            except Ambiguous:
+                hit, skipped = None, True
         how: Literal["served", "live", "diverged", "after_divergence"] = "served"
         if hit is None:
             how = "diverged" if diverged else "after_divergence" if run["diverged"] else "live"
@@ -406,7 +418,7 @@ def _run(
 
         def finish(out: Any, seconds: float = 0.0) -> Any:
             with lock:
-                log.append(Call(name, how, seconds))
+                log.append(Call(name, how, seconds, skipped))
                 if budget is not None and hit is None:
                     budget.live.append(seconds)
                 if key is not None:
@@ -535,6 +547,11 @@ class Replay:
     calls: tuple[Call, ...]
     halt: Halt | None = None
     not_checked: tuple[str, ...] = ()  # the halted node first, then the recorded ones after
+
+    @property
+    def rebind_skipped(self) -> tuple[str, ...]:
+        """T165: nodes run live because their recorded ids couldn't be fitted to this run's."""
+        return tuple(c.node for c in self.calls if c.rebind_skipped)
 
 
 def replay_run(
