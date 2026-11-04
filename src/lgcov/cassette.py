@@ -5,7 +5,7 @@ import json
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Container, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import copy_context
 from copy import copy, deepcopy
@@ -19,6 +19,7 @@ import httpx
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import START
 from langgraph.pregel import Pregel
+from langgraph.types import Command, Send
 
 from lgcov.fingerprint import fingerprint
 from lgcov.messages import decode, encode
@@ -35,6 +36,10 @@ class Step:
     # code is None for a node with no fingerprint: such steps always run live.
     input: Any = None
     code: str | None = None
+    # T168: where the node sent the run, if it returned a Command: node names, and {"send":
+    # node, "arg": payload} for a Send. None for any other return, and in cassettes recorded
+    # before this was kept.
+    goto: list[Any] | None = None
 
 
 @dataclass
@@ -42,8 +47,17 @@ class Cassette:
     inputs: dict[str, Any]
     steps: list[Step]
 
+    def body(self) -> dict[str, Any]:
+        """What's saved. A step with no goto has no such key, so a cassette with no Command in
+        it saves byte for byte as it did before goto was kept."""
+        body = asdict(self)
+        for step in body["steps"]:
+            if step["goto"] is None:
+                del step["goto"]
+        return body
+
     def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2, sort_keys=True, default=encode) + "\n"
+        return json.dumps(self.body(), indent=2, sort_keys=True, default=encode) + "\n"
 
     @classmethod
     def from_json(cls, text: str) -> "Cassette":
@@ -53,7 +67,7 @@ class Cassette:
 
 def runs_to_json(runs: Sequence[Cassette]) -> str:
     # Same shape and formatting as examples/demo_agent/record.py, so baselines diff cleanly.
-    body = {"runs": [asdict(r) for r in runs]}
+    body = {"runs": [r.body() for r in runs]}
     return json.dumps(body, indent=2, sort_keys=True, default=encode) + "\n"
 
 
@@ -344,6 +358,33 @@ def _attributed(graph: Any, prefix: str) -> Any:
     return graph.copy({"nodes": nodes}) if original else graph
 
 
+def _goto_saved(goto: Any) -> list[Any]:
+    # T168: a Command's goto as JSON. It's a node, a Send, or a list of them.
+    items = [goto] if isinstance(goto, str | Send) else list(goto)
+    return [{"send": g.node, "arg": deepcopy(g.arg)} if isinstance(g, Send) else g for g in items]
+
+
+def _streamed(returned: Any) -> Any:
+    # What `.stream` shows for what a node returned: a Command streams as its update, given as
+    # a dict or as pairs, and a returned {} streams as None.
+    if isinstance(returned, Command):
+        update: Any = returned.update
+        pairs = isinstance(update, list | tuple) and all(
+            isinstance(p, tuple) and len(p) == 2 for p in update
+        )
+        returned = dict(update) if pairs else update
+    return returned or None
+
+
+def _returned(step: Step) -> Any:
+    # T168: what the node returned when it was recorded, to serve: a Command, if it has a goto.
+    output = deepcopy(step.output)
+    if step.goto is None:
+        return output
+    goto = [Send(g["send"], g["arg"]) if isinstance(g, dict) else g for g in deepcopy(step.goto)]
+    return Command(goto=goto, update=output)
+
+
 def unservable(graph: Any, cassettes: Sequence[Cassette]) -> int:
     """T089: recorded steps replay can't serve, since their node's code changed or they
     have no input or fingerprint: the live calls a budget projects from."""
@@ -375,6 +416,9 @@ def _run(
 
     T165: a served output is fitted to the ids this run made (`lgcov.rebind`). If it can't be,
     the call runs live and its `Call` says so.
+
+    T168: a node that returned a Command gets its Command back when served, update and goto, so
+    the run goes where it went.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     unused = [(s, _key(s.input, ignore_paths)) for s in served if s.code is not None]
@@ -403,7 +447,8 @@ def _run(
         skipped = False
         if hit is not None:
             try:
-                hit = replace(hit, output=rebind(hit.output, hit.input, state))
+                fitted = rebind({"update": hit.output, "goto": hit.goto}, hit.input, state)
+                hit = replace(hit, output=fitted["update"], goto=fitted["goto"])
             except Ambiguous:
                 hit, skipped = None, True
         how: Literal["served", "live", "diverged", "after_divergence"] = "served"
@@ -431,7 +476,7 @@ def _run(
         def call(state: Any, *args: Any, **kwargs: Any) -> Any:
             hit, finish = begin(name, code, state)
             if hit is not None:
-                return finish(deepcopy(hit.output))
+                return finish(_returned(hit))
             start = clock()
             with _named(name):
                 out = fn(state, *args, **kwargs)
@@ -444,7 +489,7 @@ def _run(
         async def call(state: Any, *args: Any, **kwargs: Any) -> Any:
             hit, finish = begin(name, code, state)
             if hit is not None:
-                return finish(deepcopy(hit.output))
+                return finish(_returned(hit))
             start = clock()
             with _named(name):
                 out = await fn(state, *args, **kwargs)
@@ -467,15 +512,17 @@ def _run(
 
     def take(chunk: Mapping[str, Any]) -> None:
         for node, update in chunk.items():
-            with lock:  # the call that made this update (a returned {} streams as None)
+            with lock:  # the call that made this update
                 i = next(
-                    (i for i, c in enumerate(calls) if (c[0], c[2] or None) == (node, update)),
+                    (i for i, c in enumerate(calls) if (c[0], _streamed(c[2])) == (node, update)),
                     None,
                 )
                 call = None if i is None else calls.pop(i)
-            steps.append(
-                Step(node, update) if call is None else Step(node, update, call[1], call[3])
-            )
+            if call is None:
+                steps.append(Step(node, update))
+                continue
+            goto = _goto_saved(call[2].goto) if isinstance(call[2], Command) else None
+            steps.append(Step(node, update, call[1], call[3], goto))
 
     async def drain() -> None:
         try:
@@ -505,11 +552,25 @@ def _run(
     return steps, log, None
 
 
-def _by_node(steps: list[Step], ignore_paths: Sequence[str] = ()) -> dict[str, list[str]]:
-    # sorted per node so parallel Send workers compare stably; T085: volatile fields masked
+def _compared(step: Step, ignore_paths: Sequence[str], routed: Container[str]) -> object:
+    # T085: volatile fields masked. T168: for a node in `routed`, where it sent the run counts
+    # too, in any order, since what it sends to runs in parallel.
+    norm = normalize(step.output, ignore_paths)
+    if step.node not in routed:
+        return norm
+    goto = sorted(
+        (normalize(g) for g in step.goto or ()), key=lambda g: json.dumps(g, sort_keys=True)
+    )
+    return {"goto": goto, "update": norm}
+
+
+def _by_node(
+    steps: list[Step], ignore_paths: Sequence[str] = (), routed: Container[str] = ()
+) -> dict[str, list[str]]:
+    # sorted per node so parallel Send workers compare stably
     out: dict[str, list[str]] = {}
     for s in steps:
-        norm = normalize(s.output, ignore_paths)
+        norm = _compared(s, ignore_paths, routed)
         out.setdefault(s.node, []).append(json.dumps(norm, sort_keys=True))
     return {n: sorted(v) for n, v in out.items()}
 
@@ -576,7 +637,10 @@ def replay_run(
                 seen[s.node] += 1
         later = [n for n in dict.fromkeys(s.node for s in cassette.steps) if n not in reached]
         not_checked = (halt.node, *(n for n in later if n != halt.node))
-    expected, actual = _by_node(recorded, ignore_paths), _by_node(fresh, ignore_paths)
+    # T168: a cassette saved before goto was kept has no route to compare a fresh one with.
+    routed = {s.node for s in cassette.steps if s.goto is not None}
+    expected = _by_node(recorded, ignore_paths, routed)
+    actual = _by_node(fresh, ignore_paths, routed)
     drifts = tuple(
         Drift(node=n, expected=expected.get(n), actual=actual.get(n))
         for n in sorted(expected.keys() | actual.keys())
@@ -617,7 +681,8 @@ def accept_nodes(
         used[step.node] = i + 1
         new = by_node[step.node][i]
         # a new input or code alone is no drift, and nor is what replay masks
-        if normalize(new.output, ignore_paths) != normalize(step.output, ignore_paths):
+        routed = () if step.goto is None else (step.node,)
+        if _compared(new, ignore_paths, routed) != _compared(step, ignore_paths, routed):
             changed.add(step.node)
         steps.append(new)
     return Cassette(inputs=baseline.inputs, steps=steps), changed
