@@ -1,5 +1,6 @@
 """T166: `lgcov bench` runs each side in its own process, so base and head each import their own
-modules. In one process, Python hands head whatever base loaded."""
+modules. In one process, Python hands head whatever base loaded. T169: `--keep-runs` saves each
+side's runs as they finish, so a crash can't lose what was already paid for."""
 
 import contextlib
 import io
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from lgcov.cli import CANT_IMPORT, _load_runs, main
 
@@ -126,6 +128,7 @@ class _Run:
     rows: dict[str, dict[str, Any]]
     err: str
     calls: tuple[str, ...]
+    kept: Path
 
 
 class _Project:
@@ -226,11 +229,29 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> _Run:
         {"graph.py": graph("not_a_graph"), "helper.py": v1},
         graph="graph.py:nothing_here",
     )
-    crashes = graph("crashes").replace('_called("c")\n', 'raise ValueError("bad draft")\n')
+    # Head's `c` crashes on the second case only, so head has a finished run to keep.
+    crashes = graph("crashes").replace(
+        '_called("c")\n',
+        '_called("c")\n'
+        '    if "BOOM" in state["b"].upper():\n'
+        '        raise ValueError("bad draft")\n',
+    )
     project.row(
         "crashes",
         {"graph.py": graph("crashes"), "helper.py": v1},
         {"graph.py": crashes, "helper.py": v1},
+        case="{q: one}\n  - {q: boom}",
+    )
+    # Base's `a` crashes on the second case: one run finished, and the other is lost.
+    crashes_early = graph("base_crashes").replace(
+        '_called("a")\n',
+        '_called("a")\n    if state["q"] == "boom":\n        raise ValueError("bad case")\n',
+    )
+    project.row(
+        "base_crashes",
+        {"graph.py": crashes_early, "helper.py": v1},
+        {"graph.py": crashes_early, "helper.py": v1},
+        case="{q: one}\n  - {q: boom}",
     )
     project.row(
         "messages",
@@ -249,11 +270,13 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> _Run:
         patch.setenv("PYTHONPATH", str(installed))
         patch.setenv("BENCH_TEST_CALLS", str(calls))
         patch.syspath_prepend(str(installed))
+        patch.chdir(root)  # --keep-runs is relative here, and each side runs from its own folder
+        args = ["--out", str(md), "--json", str(results), "--keep-runs", "kept"]
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            code = main(["bench", str(project.bench), "--out", str(md), "--json", str(results)])
+            code = main(["bench", str(project.bench), *args])
     rows = json.loads(results.read_text(encoding="utf-8"))["benchmarks"]
     logged = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
-    return _Run(code, {r["name"]: r for r in rows}, err.getvalue(), tuple(logged))
+    return _Run(code, {r["name"]: r for r in rows}, err.getvalue(), tuple(logged), root / "kept")
 
 
 @pytest.mark.slow
@@ -310,6 +333,7 @@ def test_a_bad_import_exits_2_after_the_other_rows_ran_and_the_report_is_written
             "bad_head",
             "not_a_graph",
             "crashes",
+            "base_crashes",
             "messages",
         ]
     )
@@ -356,7 +380,7 @@ def test_a_run_crosses_from_one_side_to_the_other_as_a_file(tmp_path: Path) -> N
     base, head = f"{LINEAR / 'base.py'}:graph", f"{LINEAR / 'head.py'}:graph"
     assert side_main(["record", base, str(cases), str(runs)]) == 0
     assert [r.inputs["question"] for r in _load_runs(str(runs))] == ["one", "two"]
-    assert side_main(["replay", head, str(runs), str(drifted)]) == 0
+    assert side_main(["replay", head, str(runs), str(drifted), str(tmp_path / "head.json")]) == 0
     assert [sorted(names) for names in json.loads(drifted.read_text(encoding="utf-8"))] == [
         ["b", "c"],
         ["b", "c"],
@@ -375,3 +399,120 @@ def test_a_crash_after_the_import_is_exit_1_and_says_why(
     cases.write_text("not json", encoding="utf-8")
     assert side_main(["record", f"{graph}:graph", str(cases), str(tmp_path / "out")]) == 1
     assert "JSONDecodeError" in capsys.readouterr().err
+
+
+# T169: --keep-runs.
+def _inputs(path: Path) -> list[object]:
+    return [run.inputs["q"] for run in _load_runs(str(path))]
+
+
+@pytest.mark.slow
+def test_each_side_s_runs_are_kept(bench: _Run) -> None:
+    base, head = (
+        _load_runs(str(bench.kept / "own_helper" / "base.json")),
+        _load_runs(str(bench.kept / "own_helper" / "head.json")),
+    )
+    assert [s.node for s in base[0].steps] == ["a", "b", "c"]
+    assert [s.node for s in head[0].steps] == ["a", "b", "c"]
+    assert base[0].steps[1].output == {"b": "v1:hi"}
+    assert head[0].steps[1].output == {"b": "v2:hi"}
+
+
+@pytest.mark.slow
+def test_head_crashing_leaves_base_s_file_intact(bench: _Run) -> None:
+    assert "head side" in bench.rows["crashes"]["error"]
+    assert _inputs(bench.kept / "crashes" / "base.json") == ["one", "boom"]
+    assert _inputs(bench.kept / "crashes" / "head.json") == ["one"]  # the run that finished
+    assert sorted(f.name for f in (bench.kept / "crashes").iterdir()) == ["base.json", "head.json"]
+
+
+@pytest.mark.slow
+def test_base_crashing_keeps_the_runs_that_finished(bench: _Run) -> None:
+    assert "base side" in bench.rows["base_crashes"]["error"]
+    assert _inputs(bench.kept / "base_crashes" / "base.json") == ["one"]
+    assert not (bench.kept / "base_crashes" / "head.json").exists()
+
+
+@pytest.mark.slow
+def test_a_bad_import_keeps_nothing(bench: _Run) -> None:
+    assert not (bench.kept / "bad_head").exists()
+    assert not (bench.kept / "bad_base" / "base.json").exists()
+
+
+@pytest.mark.slow
+def test_kept_messages_load_back_as_messages(bench: _Run) -> None:
+    head = _load_runs(str(bench.kept / "messages" / "head.json"))
+    assert isinstance(head[0].steps[0].output["messages"][0], AIMessage)
+
+
+CRASHES_ON_TWO = """\
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+
+class S(TypedDict, total=False):
+    q: str
+    r: str
+
+
+def a(state: S) -> S:
+    if state["q"] == "two":
+        raise ValueError("bad case")
+    return {"r": state["q"].upper()}
+
+
+g = StateGraph(S)
+g.add_node("a", a)
+g.add_edge(START, "a")
+g.add_edge("a", END)
+graph = g.compile()
+"""
+
+
+def _cases(tmp_path: Path) -> Path:
+    cases = tmp_path / "cases.json"
+    cases.write_text('[{"q": "one"}, {"q": "two"}]', encoding="utf-8")
+    return cases
+
+
+def test_record_saves_each_run_as_it_finishes(tmp_path: Path) -> None:
+    from lgcov.bench_side import side_main
+
+    graph, out = tmp_path / "graph.py", tmp_path / "base.json"
+    graph.write_text(CRASHES_ON_TWO, encoding="utf-8")
+    assert side_main(["record", f"{graph}:graph", str(_cases(tmp_path)), str(out)]) == 1
+    assert _inputs(out) == ["one"]
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["base.json", "cases.json", "graph.py"]
+
+
+def test_replay_saves_each_run_as_it_finishes(tmp_path: Path) -> None:
+    from lgcov.bench_side import side_main
+
+    fine = tmp_path / "fine.py"
+    fine.write_text(CRASHES_ON_TWO.replace('"two"', '"never"'), encoding="utf-8")
+    crashes = tmp_path / "crashes.py"
+    crashes.write_text(CRASHES_ON_TWO, encoding="utf-8")
+    runs, drifted, head = (tmp_path / f for f in ("base.json", "drifted.json", "head.json"))
+    assert side_main(["record", f"{fine}:graph", str(_cases(tmp_path)), str(runs)]) == 0
+    args = [f"{crashes}:graph", str(runs), str(drifted), str(head)]
+    assert side_main(["replay", *args]) == 1
+    assert _inputs(runs) == ["one", "two"]  # base's is untouched
+    assert _inputs(head) == ["one"]
+
+
+def test_a_run_already_kept_is_never_overwritten(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # It was paid for. Refused before anything runs, so this test starts no process.
+    taken = tmp_path / "kept" / "linear" / "base.json"
+    taken.parent.mkdir(parents=True)
+    taken.write_text("a paid recording", encoding="utf-8")
+    md = tmp_path / "bench.md"
+    bench_dir = str(LINEAR.parent)
+    args = ["--only", "linear", "--keep-runs", str(tmp_path / "kept"), "--out", str(md)]
+    code = main(["bench", bench_dir, *args, "--json", str(tmp_path / "r.json")])
+    assert code == 2
+    assert "base.json" in capsys.readouterr().err
+    assert taken.read_text(encoding="utf-8") == "a paid recording"
+    assert not md.exists()

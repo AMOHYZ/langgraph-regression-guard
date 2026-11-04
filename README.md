@@ -139,7 +139,8 @@ Root vs propagated attribution, measured: `lgcov bench DIR` records each benchma
 on base, replays head, and scores lgcov's labels against hand-written ones, precision /
 recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). Each side runs in its
 own process with its own imports, and a bench file can add `pythonpath: [src]` for a src
-layout. For now its rows are
+layout. `--keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid
+recording. For now its rows are
 three synthetic fixtures in `tests/fixtures/bench/`; real PRs come with T100. A miss on a
 hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden. The
 mutation operators for injecting known regressions into open_deep_research, each with the
