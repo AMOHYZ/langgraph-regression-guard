@@ -21,6 +21,7 @@ from langgraph.graph import START
 from langgraph.pregel import Pregel
 
 from lgcov.fingerprint import fingerprint
+from lgcov.messages import decode, encode
 from lgcov.normalize import normalize
 
 
@@ -41,12 +42,26 @@ class Cassette:
     steps: list[Step]
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2, sort_keys=True) + "\n"
+        return json.dumps(asdict(self), indent=2, sort_keys=True, default=encode) + "\n"
 
     @classmethod
     def from_json(cls, text: str) -> "Cassette":
-        data = json.loads(text)
+        data = json.loads(text, object_hook=decode)
         return cls(inputs=data["inputs"], steps=[Step(**s) for s in data["steps"]])
+
+
+def runs_to_json(runs: Sequence[Cassette]) -> str:
+    # Same shape and formatting as examples/demo_agent/record.py, so baselines diff cleanly.
+    body = {"runs": [asdict(r) for r in runs]}
+    return json.dumps(body, indent=2, sort_keys=True, default=encode) + "\n"
+
+
+def runs_from_json(text: str) -> list[Cassette]:
+    # Any: raw JSON before validation
+    data: Any = json.loads(text, object_hook=decode)
+    return [
+        Cassette(inputs=r["inputs"], steps=[Step(**s) for s in r["steps"]]) for r in data["runs"]
+    ]
 
 
 @dataclass(frozen=True)

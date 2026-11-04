@@ -62,6 +62,8 @@ from lgcov.cassette import (
     replay,
     replay_run,
     replay_steps,
+    runs_from_json,
+    runs_to_json,
     unservable,
 )
 from lgcov.ci_report import CiResult, Timing, render_ci_report
@@ -275,9 +277,7 @@ def _load_graph(target: str) -> Any:
 
 
 def _load_runs(path: str) -> list[Cassette]:
-    # Any: raw JSON before validation
-    d: Any = json.loads(Path(path).read_text(encoding="utf-8"))
-    return [Cassette(inputs=r["inputs"], steps=[Step(**s) for s in r["steps"]]) for r in d["runs"]]
+    return runs_from_json(Path(path).read_text(encoding="utf-8"))
 
 
 def _drift_kinds(
@@ -505,9 +505,7 @@ def _coverage_cmd(argv: list[str]) -> int:
 
 def _write_runs(path: Path, runs: list[Cassette]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Same shape and formatting as examples/demo_agent/record.py, so baselines diff cleanly.
-    body = json.dumps({"runs": [asdict(r) for r in runs]}, indent=2, sort_keys=True) + "\n"
-    path.write_text(body, encoding="utf-8")
+    path.write_text(runs_to_json(runs), encoding="utf-8")
 
 
 def _record(argv: list[str]) -> int:

@@ -524,6 +524,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "langchain-core" },
     { name = "langgraph" },
     { name = "pyyaml" },
 ]
@@ -540,6 +541,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "langchain-core", specifier = ">=1.4.7" },
     { name = "langgraph", specifier = ">=1.2.16" },
     { name = "pyyaml", specifier = ">=6.0.3" },
 ]
