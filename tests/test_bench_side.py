@@ -13,7 +13,8 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage
 
-from lgcov.cli import CANT_IMPORT, _load_runs, main
+from lgcov.attribution import Benchmark
+from lgcov.cli import CANT_IMPORT, _load_runs, _run_side, _SideFailed, main
 
 LINEAR = Path(__file__).parent / "fixtures" / "bench" / "linear"
 GRAPH = """\
@@ -32,6 +33,7 @@ class S(TypedDict, total=False):
 
 
 def _called(name: str) -> None:
+    print(f"ROW:{name} ran")
     with open(os.environ["BENCH_TEST_CALLS"], "a", encoding="utf-8") as f:
         f.write(f"ROW:{name}\\n")
 
@@ -129,6 +131,7 @@ class _Run:
     err: str
     calls: tuple[str, ...]
     kept: Path
+    out: str = ""
 
 
 class _Project:
@@ -265,18 +268,19 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> _Run:
     (installed / "helper.py").write_text(_helper("installed"), encoding="utf-8")
     calls = root / "calls.log"
     md, results = root / "bench.md", root / "results.json"
-    err = io.StringIO()
+    out, err = io.StringIO(), io.StringIO()
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("PYTHONPATH", str(installed))
         patch.setenv("BENCH_TEST_CALLS", str(calls))
         patch.syspath_prepend(str(installed))
         patch.chdir(root)  # --keep-runs is relative here, and each side runs from its own folder
         args = ["--out", str(md), "--json", str(results), "--keep-runs", "kept"]
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = main(["bench", str(project.bench), *args])
     rows = json.loads(results.read_text(encoding="utf-8"))["benchmarks"]
     logged = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
-    return _Run(code, {r["name"]: r for r in rows}, err.getvalue(), tuple(logged), root / "kept")
+    rows_by_name = {r["name"]: r for r in rows}
+    return _Run(code, rows_by_name, err.getvalue(), tuple(logged), root / "kept", out.getvalue())
 
 
 @pytest.mark.slow
@@ -516,3 +520,55 @@ def test_a_run_already_kept_is_never_overwritten(
     assert "base.json" in capsys.readouterr().err
     assert taken.read_text(encoding="utf-8") == "a paid recording"
     assert not md.exists()
+
+
+# What a side prints reaches you: open_deep_research's base prints the only text that says why a
+# researcher failed. On stderr, because `lgcov bench`'s stdout is the report.
+@pytest.mark.slow
+def test_what_each_side_prints_reaches_stderr_named_by_side(bench: _Run) -> None:
+    assert "[base] own_helper:a ran" in bench.err
+    assert "[head] own_helper:b ran" in bench.err
+    assert "own_helper:a ran" not in bench.out
+
+
+@pytest.mark.slow
+def test_what_a_side_printed_before_it_crashed_reaches_stderr_too(bench: _Run) -> None:
+    assert "[head] crashes:c ran" in bench.err
+
+
+def _row(tmp_path: Path) -> Benchmark:
+    return Benchmark("x", "g.py:g", ({},), frozenset(), frozenset(), tmp_path)
+
+
+def _side_printing(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str, stderr: str = ""
+) -> None:
+    done = subprocess.CompletedProcess[str]([], returncode, stdout, stderr)
+    monkeypatch.setattr("lgcov.cli.subprocess.run", lambda *_args, **_kwargs: done)
+
+
+def test_each_printed_line_is_named_by_its_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _side_printing(monkeypatch, 0, "Other error in reflection phase: 429\nanother line\n")
+    _run_side(_row(tmp_path), "base", tmp_path, "check", "g.py:g")
+    captured = capsys.readouterr()
+    assert captured.err == "[base] Other error in reflection phase: 429\n[base] another line\n"
+    assert captured.out == ""
+
+
+def test_a_failing_side_still_shows_what_it_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _side_printing(monkeypatch, 1, "printed first\n", "ValueError: bad draft\n")
+    with pytest.raises(_SideFailed, match="head side: ValueError: bad draft"):
+        _run_side(_row(tmp_path), "head", tmp_path, "check", "g.py:g")
+    assert capsys.readouterr().err == "[head] printed first\n"
+
+
+def test_a_side_that_prints_nothing_adds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _side_printing(monkeypatch, 0, "")
+    _run_side(_row(tmp_path), "base", tmp_path, "check", "g.py:g")
+    assert capsys.readouterr().err == ""
