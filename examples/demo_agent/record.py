@@ -3,12 +3,10 @@
 Two inputs so both branches of the conditional edge are covered.
 """
 
-import json
-from dataclasses import asdict
 from pathlib import Path
 
 from examples.demo_agent.graph import graph
-from lgcov.cassette import record
+from lgcov.cassette import record, runs_to_json
 
 INPUTS = [
     {"question": "Where is my order?"},  # goes through lookup_order
@@ -18,8 +16,7 @@ BASELINE = Path(__file__).parent / "cassettes" / "baseline.json"
 
 
 def baseline_json() -> str:
-    runs = [asdict(record(graph, inputs)) for inputs in INPUTS]
-    return json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n"
+    return runs_to_json([record(graph, inputs) for inputs in INPUTS])
 
 
 def main() -> None:

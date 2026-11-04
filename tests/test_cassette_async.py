@@ -661,7 +661,6 @@ def test_the_event_loop_closes_cleanly_at_exit() -> None:
     assert (done.returncode, done.stdout, done.stderr) == (0, "True\n", "")
 
 
-@pytest.mark.xfail(strict=True, reason="T168: Command returns not served")
 def test_replay_serves_an_async_node_that_returns_command() -> None:
     spy = Mock(return_value={"x": 2})
 

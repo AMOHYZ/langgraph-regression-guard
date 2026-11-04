@@ -119,7 +119,9 @@ EXIT_ERROR = 2
 EXIT_NOT_DRIFTED = 1
 
 
-def _output_hash(output: object) -> str:
+def _output_hash(step: Step) -> str:
+    # T168: where a Command sent the run counts as much as its update
+    output = step.output if step.goto is None else {"goto": step.goto, "update": step.output}
     body = json.dumps(output, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(body).hexdigest()[:12]
 
@@ -646,10 +648,10 @@ def _accept_summary(
         for base, neu in zip(runs, fresh, strict=True):
             for step in base.steps:
                 if step.node == node:
-                    old_hashes.append(_output_hash(step.output))
+                    old_hashes.append(_output_hash(step))
             for step in neu.steps:
                 if step.node == node:
-                    new_hashes.append(_output_hash(step.output))
+                    new_hashes.append(_output_hash(step))
         old = ",".join(dict.fromkeys(old_hashes)) or "—"
         new = ",".join(dict.fromkeys(new_hashes)) or "—"
         lines.append(f"| `{node}` | `{old}` | `{new}` | `{path}` |")
