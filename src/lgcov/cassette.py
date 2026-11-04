@@ -1,10 +1,14 @@
+import asyncio
+import inspect
 import json
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field
+from functools import partial, wraps
 from statistics import fmean
 from types import CodeType, FunctionType
 from typing import Any, Literal, TypedDict
@@ -107,6 +111,16 @@ class Halt:
     why: Literal["diverged", "budget"]
 
 
+class RunningLoopError(RuntimeError):
+    """T164: an async graph needs its own event loop, and this thread already runs one."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "lgcov can't run an async graph inside a running event loop (a notebook, an async "
+            "test): use the lgcov CLI, or call this from outside the running loop"
+        )
+
+
 class _Halted(Exception):
     def __init__(self, halt: Halt) -> None:
         super().__init__(f"replay stopped at `{halt.node}` ({halt.why})")
@@ -121,7 +135,8 @@ def over_budget(elapsed: float, live: Sequence[float], remaining: int, budget: f
 @dataclass
 class Budget:
     """T089: one wall-clock budget for a run's live node calls. It is checked before each
-    live call, never during one: a call that has started finishes."""
+    live call, never during one: a call that has started finishes. T164: under `.astream`,
+    stopping the run cancels a parallel call still in flight, which counts as not checked."""
 
     seconds: float | None
     clock: Callable[[], float] = time.perf_counter
@@ -147,14 +162,52 @@ class Budget:
         return True
 
 
+def _plain(bound: Any) -> FunctionType | None:
+    # T164: the function behind a node: `func`, or `afunc` on an `async def` node. An async
+    # generator has no single call to wrap or serve, so it runs untouched, like a subgraph.
+    fn = getattr(bound, "func", None) or getattr(bound, "afunc", None)
+    return fn if isinstance(fn, FunctionType) and not inspect.isasyncgenfunction(fn) else None
+
+
 def _codes(graph: Any) -> dict[str, str | None]:
     # The plain-function nodes replay wraps, by name; subgraphs and the like run untouched.
     codes: dict[str, str | None] = {}
     for name, spec in getattr(graph, "nodes", {}).items():
-        fn = getattr(spec.bound, "func", None)
-        if name != START and isinstance(fn, FunctionType):
+        fn = _plain(spec.bound)
+        if name != START and fn is not None:
             codes[name] = fingerprint(fn)
     return codes
+
+
+def _only_async(runnable: Any) -> bool:
+    # LangGraph's async node or router has func=None; a RunnableLambda's has no func at all.
+    return getattr(runnable, "afunc", None) is not None and getattr(runnable, "func", None) is None
+
+
+def _needs_async(graph: Any) -> bool:
+    """T164: `.stream` can't drive this graph: a node or router, here or in a subgraph, has
+    only an async body, or the object has only `.astream`."""
+    if not hasattr(graph, "stream"):
+        return hasattr(graph, "astream")
+    bounds = [spec.bound for spec in getattr(graph, "nodes", {}).values()]
+    branches = getattr(getattr(graph, "builder", None), "branches", None) or {}
+    paths = [getattr(b, "path", None) for per in branches.values() for b in per.values()]
+    return any(_only_async(r) for r in (*bounds, *paths)) or any(
+        _needs_async(b) for b in bounds if isinstance(b, Pregel)
+    )
+
+
+def _loop_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _router_code(path: Any) -> Any:
+    # T164: `func`, or `afunc` on an async router.
+    return getattr(getattr(path, "func", None) or getattr(path, "afunc", None), "__code__", None)
 
 
 def _routers(graph: Any, prefix: str = "") -> dict[CodeType, str]:
@@ -164,7 +217,7 @@ def _routers(graph: Any, prefix: str = "") -> dict[CodeType, str]:
     branches = getattr(getattr(graph, "builder", None), "branches", None) or {}
     for per_source in branches.values():
         for name, branch in per_source.items():
-            code = getattr(getattr(getattr(branch, "path", None), "func", None), "__code__", None)
+            code = _router_code(getattr(branch, "path", None))
             if isinstance(code, CodeType):
                 named[code] = f"{prefix}{name}"
     for name, spec in getattr(graph, "nodes", {}).items():
@@ -181,8 +234,7 @@ def _raised_in(exc: BaseException, routers: Mapping[CodeType, str]) -> str | Non
     while tb is not None:
         frame = tb.tb_frame
         if frame.f_globals.get("__name__", "").startswith("langgraph."):
-            path = getattr(frame.f_locals.get("self"), "path", None)
-            code = getattr(getattr(path, "func", None), "__code__", None)
+            code = _router_code(getattr(frame.f_locals.get("self"), "path", None))
             if isinstance(code, CodeType):
                 found = routers.get(code, found)
         found = routers.get(frame.f_code, found)
@@ -190,14 +242,48 @@ def _raised_in(exc: BaseException, routers: Mapping[CodeType, str]) -> str | Non
     return found
 
 
+@contextmanager
+def _named(name: str) -> Iterator[None]:
+    # An error from the code inside `with` is a NodeError naming the node.
+    try:
+        yield
+    except (GraphBubbleUp, NodeError):
+        raise  # LangGraph's own control flow, or a node further in, already named
+    except Exception as exc:
+        raise NodeError(name, exc) from exc
+
+
+_Wrap = Callable[[Callable[..., Any]], Callable[..., Any]]
+
+
+def _around(spec: Any, wrap: _Wrap, awrap: _Wrap) -> Any:
+    """T164: a copy of a node with `wrap` on `func`, which `.stream` calls, and `awrap` on
+    `afunc`, which `.astream` calls. A sync node's `afunc` is LangGraph's hand-off of the
+    original function to a thread, so it would skip a wrapper on `func` alone. Any other
+    `afunc` beside a `func` is a second body, which `func`'s fingerprint doesn't cover: left
+    untouched, it runs live under `.astream` and its step is never served."""
+    bound = copy(spec.bound)  # LangGraph's node runnable calls .func on invoke
+    fn, afn = getattr(bound, "func", None), getattr(bound, "afunc", None)
+    if fn is not None:
+        bound.func = wrap(fn)
+    if afn is not None and (fn is None or getattr(afn, "__wrapped__", None) is fn):
+        bound.afunc = awrap(afn)
+    return spec.copy({"bound": bound})
+
+
 def _naming(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
     def call(*args: Any, **kwargs: Any) -> Any:
-        try:
+        with _named(name):
             return fn(*args, **kwargs)
-        except (GraphBubbleUp, NodeError):
-            raise  # LangGraph's own control flow, or a node further in, already named
-        except Exception as exc:
-            raise NodeError(name, exc) from exc
+
+    return call
+
+
+def _anaming(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(fn)  # a RunnableLambda reads the signature to see what to pass, like config
+    async def call(*args: Any, **kwargs: Any) -> Any:
+        with _named(name):
+            return await fn(*args, **kwargs)
 
     return call
 
@@ -208,11 +294,9 @@ def _attributed(graph: Any, prefix: str) -> Any:
     original = getattr(graph, "nodes", {})
     nodes = dict(original)
     for name, spec in original.items():
-        fn = getattr(spec.bound, "func", None)
-        if name != START and isinstance(fn, FunctionType):
-            bound = copy(spec.bound)
-            bound.func = _naming(f"{prefix}{name}", fn)
-            nodes[name] = spec.copy({"bound": bound})
+        if name != START and _plain(spec.bound) is not None:
+            named = f"{prefix}{name}"
+            nodes[name] = _around(spec, partial(_naming, named), partial(_anaming, named))
         elif isinstance(spec.bound, Pregel):
             nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{prefix}{name}.")})
     return graph.copy({"nodes": nodes}) if original else graph
@@ -243,6 +327,10 @@ def _run(
 
     Each plain-function node is wrapped: a call whose fingerprint and masked input match an
     unused step of `served` returns that step's output instead of running the node.
+
+    T164: a graph `.stream` can't drive runs under `.astream` with the same stream mode, in
+    its own `asyncio.run()`; inside a running event loop that's a RunningLoopError. Each run
+    gets a new loop, so an async client kept across runs can fail with `Event loop is closed`.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     unused = [(s, _key(s.input, ignore_paths)) for s in served if s.code is not None]
@@ -252,42 +340,33 @@ def _run(
     run = {"diverged": False, "live": False}  # diverged yet; on_divergence="live" took over
     clock = time.perf_counter if budget is None else budget.clock
 
-    def wrap(name: str, fn: Callable[..., Any], code: str | None) -> Callable[..., Any]:
-        def call(state: Any, *args: Any, **kwargs: Any) -> Any:
-            key = _key(state, ignore_paths)
-            snapshot = deepcopy(state) if key is not None else None  # before fn can mutate it
-            hit: Step | None = None
-            diverged = False
-            if code is not None and key is not None:
-                with lock:
-                    want = (name, code, key)
-                    i = next(
-                        (i for i, (s, k) in enumerate(unused) if (s.node, s.code, k) == want), None
-                    )
-                    if i is not None and not run["live"]:
-                        hit = unused.pop(i)[0]
-                    diverged = hit is None and not run["diverged"] and (name, code) in recorded
-                    run["diverged"] = run["diverged"] or diverged
-            how: Literal["served", "live", "diverged", "after_divergence"] = "served"
-            seconds = 0.0
-            if hit is not None:
-                out = deepcopy(hit.output)
-            else:
-                how = "diverged" if diverged else "after_divergence" if run["diverged"] else "live"
-                if diverged and on_divergence == "fail":
-                    raise _Halted(Halt(name, "diverged"))
-                if diverged and on_divergence == "live":
-                    run["live"] = True
-                if budget is not None and not budget.allows(name):
-                    raise _Halted(Halt(name, "budget"))
-                start = clock()
-                try:
-                    out = fn(state, *args, **kwargs)
-                except GraphBubbleUp:
-                    raise  # LangGraph's own control flow (interrupt, Command), not a crash
-                except Exception as exc:
-                    raise NodeError(name, exc) from exc
-                seconds = clock() - start
+    def begin(name: str, code: str | None, state: Any) -> tuple[Step | None, Callable[..., Any]]:
+        # How this call runs: the step to serve, if any, and what logs the call when it's done.
+        key = _key(state, ignore_paths)
+        snapshot = deepcopy(state) if key is not None else None  # before fn can mutate it
+        hit: Step | None = None
+        diverged = False
+        if code is not None and key is not None:
+            with lock:
+                want = (name, code, key)
+                i = next(
+                    (i for i, (s, k) in enumerate(unused) if (s.node, s.code, k) == want), None
+                )
+                if i is not None and not run["live"]:
+                    hit = unused.pop(i)[0]
+                diverged = hit is None and not run["diverged"] and (name, code) in recorded
+                run["diverged"] = run["diverged"] or diverged
+        how: Literal["served", "live", "diverged", "after_divergence"] = "served"
+        if hit is None:
+            how = "diverged" if diverged else "after_divergence" if run["diverged"] else "live"
+            if diverged and on_divergence == "fail":
+                raise _Halted(Halt(name, "diverged"))
+            if diverged and on_divergence == "live":
+                run["live"] = True
+            if budget is not None and not budget.allows(name):
+                raise _Halted(Halt(name, "budget"))
+
+        def finish(out: Any, seconds: float = 0.0) -> Any:
             with lock:
                 log.append(Call(name, how, seconds))
                 if budget is not None and hit is None:
@@ -296,33 +375,71 @@ def _run(
                     calls.append((name, snapshot, out, code))
             return out
 
+        return hit, finish
+
+    def wrap(name: str, fn: Callable[..., Any], code: str | None) -> Callable[..., Any]:
+        def call(state: Any, *args: Any, **kwargs: Any) -> Any:
+            hit, finish = begin(name, code, state)
+            if hit is not None:
+                return finish(deepcopy(hit.output))
+            start = clock()
+            with _named(name):
+                out = fn(state, *args, **kwargs)
+            return finish(out, clock() - start)
+
+        return call
+
+    def awrap(name: str, fn: Callable[..., Any], code: str | None) -> Callable[..., Any]:
+        @wraps(fn)  # a RunnableLambda reads the signature to see what to pass, like config
+        async def call(state: Any, *args: Any, **kwargs: Any) -> Any:
+            hit, finish = begin(name, code, state)
+            if hit is not None:
+                return finish(deepcopy(hit.output))
+            start = clock()
+            with _named(name):
+                out = await fn(state, *args, **kwargs)
+            return finish(out, clock() - start)
+
         return call
 
     original = getattr(graph, "nodes", {})  # an object with only .stream() runs as it is
     nodes = dict(original)
     for name, code in _codes(graph).items():
-        spec = original[name]
-        bound = copy(spec.bound)  # LangGraph's node runnable calls .func on invoke
-        bound.func = wrap(name, spec.bound.func, code)
-        nodes[name] = spec.copy({"bound": bound})
+        nodes[name] = _around(
+            original[name], partial(wrap, name, code=code), partial(awrap, name, code=code)
+        )
     for name, spec in original.items():  # T109: a subgraph's errors name its own node
         if isinstance(getattr(spec, "bound", None), Pregel):
             nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{name}.")})
     routers = _routers(graph)
     runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
-    try:
-        for chunk in runner.stream(inputs, stream_mode="updates"):
-            for node, update in chunk.items():
-                with lock:  # the call that made this update (a returned {} streams as None)
-                    i = next(
-                        (i for i, c in enumerate(calls) if (c[0], c[2] or None) == (node, update)),
-                        None,
-                    )
-                    call = None if i is None else calls.pop(i)
-                steps.append(
-                    Step(node, update) if call is None else Step(node, update, call[1], call[3])
+
+    def take(chunk: Mapping[str, Any]) -> None:
+        for node, update in chunk.items():
+            with lock:  # the call that made this update (a returned {} streams as None)
+                i = next(
+                    (i for i, c in enumerate(calls) if (c[0], c[2] or None) == (node, update)),
+                    None,
                 )
+                call = None if i is None else calls.pop(i)
+            steps.append(
+                Step(node, update) if call is None else Step(node, update, call[1], call[3])
+            )
+
+    async def drain() -> None:
+        async for chunk in runner.astream(inputs, stream_mode="updates"):
+            take(chunk)
+
+    driven_async = _needs_async(graph)
+    if driven_async and _loop_running():
+        raise RunningLoopError()
+    try:
+        if driven_async:
+            asyncio.run(drain())
+        else:
+            for chunk in runner.stream(inputs, stream_mode="updates"):
+                take(chunk)
     except _Halted as stop:
         return steps, log, stop.halt
     except (NodeError, GraphBubbleUp):
