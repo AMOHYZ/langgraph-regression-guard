@@ -4,6 +4,7 @@
 
 - `lgcov bench` runs each side in its own process, with its own imports; a bad import exits 2 and names the side (#57).
 - `lgcov bench --keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid recording (#58).
+- `lgcov bench` shows what each side prints, named by side, like the reason a researcher failed (#60).
 - Graphs with `async def` nodes or routers record and replay; served nodes make no real call (#54).
 - State holding LangChain messages records, replays and compares; new ids and metadata aren't drift (#55).
 - A served step's ids are fitted to the run's own; if they can't be, it runs live and reports `rebind_skipped` (#56).

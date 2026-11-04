@@ -1612,7 +1612,8 @@ class _CantImport(_SideFailed):
 def _run_side(b: Benchmark, side: str, root: Path, *args: str) -> None:
     """T166: one step of one side, in its own process (lgcov.bench_side). The side's root and
     `pythonpath` come first on its path, ahead of anything installed, and it inherits the
-    environment, where an agent's API keys live."""
+    environment, where an agent's API keys live. What it prints follows on stderr once the step
+    is done, named by side: stdout is the report."""
     path = [str(root), *(str(root / p) for p in b.pythonpath)]
     if inherited := os.environ.get("PYTHONPATH"):
         path.append(inherited)
@@ -1625,6 +1626,8 @@ def _run_side(b: Benchmark, side: str, root: Path, *args: str) -> None:
         errors="replace",
         check=False,
     )
+    for line in done.stdout.splitlines():
+        print(f"[{side}] {line}", file=sys.stderr)
     lines = done.stderr.splitlines()
     if done.returncode == 0:
         sys.stderr.write(done.stderr)  # what it had to say, like rebind_skipped
