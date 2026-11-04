@@ -1596,6 +1596,9 @@ def _bench_sides(b: Benchmark, tmp: Path) -> tuple[str, str, list[Path]]:
     return f"{tmp / 'base' / file}:{attr}", f"{tmp / 'head' / file}:{attr}", worktrees
 
 
+_KEPT = ("base.json", "head.json")  # T169: what --keep-runs saves, per benchmark
+
+
 class _SideFailed(Exception):
     """T166: one side of a benchmark failed in its own process."""
 
@@ -1647,12 +1650,14 @@ def _error_row(b: Benchmark, error: str, seconds: float) -> Result:
     )
 
 
-def _bench_one(b: Benchmark) -> Result:
+def _bench_one(b: Benchmark, keep: Path | None = None) -> Result:
     """Record the cases on base, replay head (unchanged nodes served, as `lgcov ci` does),
     and score lgcov's root / propagated labels. A benchmark that can't run says why.
 
     T166: each side runs in its own process. Head's import is checked first, and base's is the
-    first thing its recording does, so a bad import costs no real call on either side."""
+    first thing its recording does, so a bad import costs no real call on either side.
+
+    T169: with `keep`, each side's runs stay in <keep>/<benchmark>/, saved as each one finishes."""
     start = perf_counter()
     worktrees: list[Path] = []
     expected = (tuple(sorted(b.root)), tuple(sorted(b.propagated)))
@@ -1661,11 +1666,14 @@ def _bench_one(b: Benchmark) -> Result:
             try:
                 base_target, head_target, worktrees = _bench_sides(b, Path(tmp))
                 base_root, head_root = Path(tmp) / "base", Path(tmp) / "head"
-                cases, saved, drifted = (Path(tmp) / f for f in ("cases", "runs", "drifted"))
+                cases, drifted = Path(tmp) / "cases", Path(tmp) / "drifted"
+                here = Path(tmp) if keep is None else keep / b.name
+                saved, fresh = here / "base.json", here / "head.json"
                 cases.write_text(json.dumps(list(b.cases)), encoding="utf-8")
                 _run_side(b, "head", head_root, "check", head_target)
                 _run_side(b, "base", base_root, "record", base_target, str(cases), str(saved))
-                _run_side(b, "head", head_root, "replay", head_target, str(saved), str(drifted))
+                replaying = (head_target, str(saved), str(drifted), str(fresh))
+                _run_side(b, "head", head_root, "replay", *replaying)
                 runs = _load_runs(str(saved))
                 nodes: list[list[str]] = json.loads(drifted.read_text(encoding="utf-8"))
                 drifts = [[Drift(n, None, None) for n in names] for names in nodes]
@@ -1704,6 +1712,11 @@ def _bench_cmd(argv: list[str]) -> int:
     ap.add_argument("--only", action="append", default=[], help="run this one (file name)")
     ap.add_argument("--out", default="docs/benchmark.md", help="write the table here")
     ap.add_argument("--json", default="docs/benchmark-results.json", help="and the numbers")
+    ap.add_argument(
+        "--keep-runs",
+        metavar="DIR",
+        help="save each side's runs in DIR/<benchmark>/{base,head}.json as each one finishes",
+    )
     args = ap.parse_args(argv)
     folder = Path(args.dir)
     files = [f for f in sorted(folder.glob("*.yaml")) if not args.only or f.stem in args.only]
@@ -1718,11 +1731,22 @@ def _bench_cmd(argv: list[str]) -> int:
         except (OSError, ValueError, yaml.YAMLError) as exc:
             print(f"lgcov bench: {f}: {exc}", file=sys.stderr)
             return EXIT_ERROR
+    # T169: resolved here, because each side runs from its own folder.
+    keep = Path(args.keep_runs).resolve() if args.keep_runs else None
+    if keep is not None:
+        names = [keep / b.name / f for b in benchmarks if not b.status for f in _KEPT]
+        for taken in filter(Path.exists, names):
+            print(
+                f"lgcov bench: {taken} already holds a recorded run: "
+                "choose another --keep-runs folder",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
     results: list[Result] = []
     code = 0
     for b in benchmarks:
         try:
-            results.append(pending_result(b) if b.status else _bench_one(b))
+            results.append(pending_result(b) if b.status else _bench_one(b, keep))
         except _CantImport as exc:
             print(f"lgcov bench: {b.name}: {exc}", file=sys.stderr)
             results.append(_error_row(b, str(exc)[:200], 0.0))
@@ -1734,6 +1758,8 @@ def _bench_cmd(argv: list[str]) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     print(md, end="")
+    if keep is not None:
+        print(f"lgcov bench: runs kept in {keep}", file=sys.stderr)
     return code
 
 
