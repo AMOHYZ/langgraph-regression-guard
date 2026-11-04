@@ -5,7 +5,7 @@ every PR. Python 3.12, managed with uv.
 
 ## Commands
 - Install: `uv sync`
-- Test: `uv run pytest -q`
+- Test: `uv run pytest -q`; `-m "not slow"` skips the real per-process cases (CI runs them)
 - Lint and format: `uv run ruff check --fix . && uv run ruff format .`
 - Types: `uv run mypy --strict src tests`
 - Everything before a commit: `uv run pre-commit run --all-files`

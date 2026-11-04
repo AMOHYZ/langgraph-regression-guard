@@ -192,3 +192,18 @@ def test_pending_reviewed_and_errored_rows_read_differently_and_none_is_scored()
         " macro." in md
     )
     assert "- `e`: run error: CalledProcessError: no such ref" in md
+
+
+def test_pythonpath_defaults_to_nothing_and_is_read_when_given() -> None:
+    raw = {**_ROW, "pythonpath": ["src", "lib/python"]}
+    assert parse_benchmark("x", raw, Path(".")).pythonpath == ("src", "lib/python")
+    assert parse_benchmark("x", dict(_ROW), Path(".")).pythonpath == ()
+
+
+@pytest.mark.parametrize(
+    "bad", ["src", [1], ["/abs/src"], ["../other"], ["src/../../other"]], ids=str
+)
+def test_pythonpath_must_be_folders_inside_the_side(bad: object) -> None:
+    # A folder outside the side would give both sides one copy: what this field exists to stop.
+    with pytest.raises(ValueError, match="pythonpath"):
+        parse_benchmark("x", {**_ROW, "pythonpath": bad}, Path("."))

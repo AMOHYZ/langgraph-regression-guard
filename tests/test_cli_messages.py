@@ -390,6 +390,7 @@ def test_lgcov_judge_says_rebind_skipped(
     assert SKIPPED in capsys.readouterr().err
 
 
+@pytest.mark.slow
 def test_lgcov_bench_says_rebind_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -1520,6 +1520,7 @@ def _rows(results: dict[str, object]) -> dict[str, dict[str, object]]:
     return {str(r["name"]): r for r in rows}
 
 
+@pytest.mark.slow
 def test_cli_bench_scores_the_linear_fixture_perfectly(tmp_path: Path) -> None:
     code, results, md = _bench(tmp_path, str(BENCH), "--only", "linear")
     assert code == 0
@@ -1531,6 +1532,7 @@ def test_cli_bench_scores_the_linear_fixture_perfectly(tmp_path: Path) -> None:
     assert "| linear | 1.00 / 1.00 / 1.00 | 1.00 / 1.00 / 1.00 | `b` | `b` |" in md
 
 
+@pytest.mark.slow
 def test_cli_bench_a_wrong_expected_file_gives_the_fp_and_fn_you_would_predict(
     tmp_path: Path,
 ) -> None:
@@ -1549,6 +1551,7 @@ def test_cli_bench_a_wrong_expected_file_gives_the_fp_and_fn_you_would_predict(
         assert row[which] == {"tp": 0, "fp": 1, "fn": 1, "precision": 0.0, "recall": 0.0, "f1": 0.0}
 
 
+@pytest.mark.slow
 def test_cli_bench_reports_the_subgraph_miss_as_a_known_gap(tmp_path: Path) -> None:
     code, results, md = _bench(tmp_path, str(BENCH))
     assert code == 0  # a report, not a gate
@@ -1566,6 +1569,7 @@ def test_cli_bench_reports_the_subgraph_miss_as_a_known_gap(tmp_path: Path) -> N
     assert "❌ known gap (subgraph)" in md and "## Known gaps" in md
 
 
+@pytest.mark.slow
 def test_cli_bench_reads_base_and_head_from_git_refs(tmp_path: Path) -> None:
     import subprocess
 

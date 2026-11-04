@@ -55,6 +55,9 @@ python_version = "3.12"
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
+markers = [
+    "slow: runs real per-side processes; CI runs these, `-m \"not slow\"` skips them locally",
+]
 
 [dependency-groups]
 dev = [

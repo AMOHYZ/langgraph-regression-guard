@@ -66,6 +66,7 @@ class Benchmark:
     base_ref: str | None = None
     head_ref: str | None = None
     repo: str = "."
+    pythonpath: tuple[str, ...] = ()  # T166: folders to import from, inside each side's root
     notes: str = ""
     hard_cases: tuple[str, ...] = ()
     status: str = ""  # one of STATUSES, or "" once the labels are confirmed and it can run
@@ -130,6 +131,18 @@ def _evidence(
     return tuple(found)
 
 
+def _pythonpath(value: object) -> tuple[str, ...]:
+    # T166: a folder outside the side would give both sides one copy of its modules.
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError("'pythonpath' must be a list of folders inside the side's root")
+    for v in value:
+        if Path(v).is_absolute() or ".." in Path(v).parts:
+            raise ValueError(f"'pythonpath' must stay inside the side's root, got {v!r}")
+    return tuple(value)
+
+
 def parse_benchmark(name: str, raw: object, folder: Path) -> Benchmark:
     """One benchmark file, validated (pure)."""
     if not isinstance(raw, dict):
@@ -167,6 +180,7 @@ def parse_benchmark(name: str, raw: object, folder: Path) -> Benchmark:
         base_ref=refs[0],
         head_ref=refs[1],
         repo=_text(raw, "repo") or ".",
+        pythonpath=_pythonpath(raw.get("pythonpath")),
         notes=_text(raw, "notes") or "",
         hard_cases=tuple(str(h) for h in hard),
         status=status,
