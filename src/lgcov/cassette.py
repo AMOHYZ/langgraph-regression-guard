@@ -21,6 +21,7 @@ from langgraph.graph import START
 from langgraph.pregel import Pregel
 
 from lgcov.fingerprint import fingerprint
+from lgcov.messages import decode, encode
 from lgcov.normalize import normalize
 
 
@@ -41,12 +42,26 @@ class Cassette:
     steps: list[Step]
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2, sort_keys=True) + "\n"
+        return json.dumps(asdict(self), indent=2, sort_keys=True, default=encode) + "\n"
 
     @classmethod
     def from_json(cls, text: str) -> "Cassette":
-        data = json.loads(text)
+        data = json.loads(text, object_hook=decode)
         return cls(inputs=data["inputs"], steps=[Step(**s) for s in data["steps"]])
+
+
+def runs_to_json(runs: Sequence[Cassette]) -> str:
+    # Same shape and formatting as examples/demo_agent/record.py, so baselines diff cleanly.
+    body = {"runs": [asdict(r) for r in runs]}
+    return json.dumps(body, indent=2, sort_keys=True, default=encode) + "\n"
+
+
+def runs_from_json(text: str) -> list[Cassette]:
+    # Any: raw JSON before validation
+    data: Any = json.loads(text, object_hook=decode)
+    return [
+        Cassette(inputs=r["inputs"], steps=[Step(**s) for s in r["steps"]]) for r in data["runs"]
+    ]
 
 
 @dataclass(frozen=True)
@@ -553,11 +568,13 @@ def replay_run(
     return Replay(drifts, tuple(fresh), tuple(calls), halt, not_checked)
 
 
-def accept_nodes(baseline: Cassette, fresh: Cassette, nodes: set[str]) -> tuple[Cassette, set[str]]:
+def accept_nodes(
+    baseline: Cassette, fresh: Cassette, nodes: set[str], ignore_paths: Sequence[str] = ()
+) -> tuple[Cassette, set[str]]:
     """T082: copy `fresh` steps into `baseline` for `nodes` only; every other step is kept.
 
-    Returns the new baseline and the subset of `nodes` whose output actually changed.
-    A node must have run the same number of times in both, since steps are matched by
+    Returns the new baseline and the subset of `nodes` whose output changed, masked as replay
+    compares it. A node must have run the same number of times in both, since steps are matched by
     occurrence. Note a fresh output already reflects any upstream drift not accepted.
     """
     by_node: dict[str, list[Step]] = {}
@@ -582,7 +599,8 @@ def accept_nodes(baseline: Cassette, fresh: Cassette, nodes: set[str]) -> tuple[
         i = used.get(step.node, 0)
         used[step.node] = i + 1
         new = by_node[step.node][i]
-        if new.output != step.output:  # a new input or code alone is no drift
+        # a new input or code alone is no drift, and nor is what replay masks
+        if normalize(new.output, ignore_paths) != normalize(step.output, ignore_paths):
             changed.add(step.node)
         steps.append(new)
     return Cassette(inputs=baseline.inputs, steps=steps), changed

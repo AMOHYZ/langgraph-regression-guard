@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Graphs with `async def` nodes or routers record and replay; served nodes make no real call (#54).
+- State holding LangChain messages records, replays and compares; new ids and metadata aren't drift (#55).
 
 ## 0.1.0 (2026-11-02)
 

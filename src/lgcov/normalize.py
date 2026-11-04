@@ -2,13 +2,18 @@
 
 UUIDs and ISO date-times inside strings, values of well-known id keys, and any
 `ignore_paths` (JSON pointers into a node's input/output; `*` matches one key or
-index) are replaced with placeholders. Pure: values in, values out.
+index) are replaced with placeholders. T165: a LangChain message is compared by what it
+says (`lgcov.messages.fields`). Pure: values in, values out.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+
+from langchain_core.messages import BaseMessage
+
+from lgcov.messages import fields
 
 _UUID = re.compile(r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b")
 # Date plus time (a bare date is usually meaningful, so it is kept).
@@ -19,6 +24,8 @@ _TIMESTAMP = re.compile(
 VOLATILE_ID_KEYS = frozenset(
     {"id", "message_id", "request_id", "run_id", "span_id", "tool_call_id", "trace_id"}
 )
+# T165: a message's tool calls. Their args are the tool's own data, so an `id` there is real.
+_TOOL_CALLS = frozenset({"tool_calls", "invalid_tool_calls"})
 
 
 def _segments(pointer: str) -> tuple[str, ...]:
@@ -37,24 +44,32 @@ def _norm(
     path: tuple[str, ...],
     patterns: tuple[tuple[str, ...], ...],
     counts: list[int],
+    keep_ids: bool = False,
 ) -> object:
     if path and _ignored(path, patterns):
         counts[0] += 1
         return "<ignored>"
+    in_message = isinstance(value, BaseMessage)
+    if isinstance(value, BaseMessage):
+        value = fields(value)
     if isinstance(value, dict):
         out: dict[object, object] = {}
         for k, v in value.items():
             volatile = (
-                k in VOLATILE_ID_KEYS and isinstance(v, str | int) and not isinstance(v, bool)
+                not keep_ids
+                and k in VOLATILE_ID_KEYS
+                and isinstance(v, str | int)
+                and not isinstance(v, bool)
             )
             if volatile:
                 counts[0] += 1
                 out[k] = "<id>"
             else:
-                out[k] = _norm(v, (*path, str(k)), patterns, counts)
+                keep = keep_ids or (in_message and k in _TOOL_CALLS)
+                out[k] = _norm(v, (*path, str(k)), patterns, counts, keep)
         return out
     if isinstance(value, list):
-        return [_norm(v, (*path, str(i)), patterns, counts) for i, v in enumerate(value)]
+        return [_norm(v, (*path, str(i)), patterns, counts, keep_ids) for i, v in enumerate(value)]
     if isinstance(value, str):
         no_uuid, n_uuid = _UUID.subn("<uuid>", value)
         masked, n_ts = _TIMESTAMP.subn("<timestamp>", no_uuid)
