@@ -94,7 +94,13 @@ def _function(fn: FunctionType, seen: dict[int, object]) -> str:
     lines = Path(code.co_filename).read_text(encoding="utf-8").splitlines()
     end = max((p[1] for c in _codes(code) for p in c.co_positions() if p[1]), default=0)
     names = frozenset(n for c in _codes(code) for n in c.co_names)
-    cells = tuple(cell.cell_contents for cell in fn.__closure__ or ())
+    # Python 3.14: a class's annotation function closes over the class's own __dict__ as
+    # __classdict__. That's the class again, without _describe's filtering of its members.
+    cells = tuple(
+        cell.cell_contents
+        for name, cell in zip(code.co_freevars, fn.__closure__ or (), strict=True)
+        if name != "__classdict__"
+    )
     values = _describe((fn.__defaults__, fn.__kwdefaults__, cells), names, seen)
     used = [
         f"{n}={_describe(fn.__globals__[n], names, seen)}"
