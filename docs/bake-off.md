@@ -25,6 +25,23 @@ the same rules, and its notes carry its limits.
 
 ## The table
 
+The columns are lgcov's own framing of the problem, so they favour it. A Yes means the mechanism
+exists, not that it is proven: read lgcov's "pilot" and "built" with the notes further down, and
+see [Where others are ahead](#where-others-are-ahead) for what these columns leave out.
+
+| Tool | PR-level | Node-aware | Root vs propagated | Calibrated confidence | Human loop | Per-PR CI time |
+|---|---|---|---|---|---|---|
+| LangSmith | Partial | Partial | Partial | Partial | Yes | Unknown |
+| Opik | Partial | Partial | Partial | Partial | Yes | Unknown |
+| Kitaru | Yes | Partial | Partial | Partial | Yes | Unknown |
+| Langfuse | Partial | Partial | No | Partial | Yes | Unknown |
+| Braintrust | Yes | Partial | Partial | Partial | Yes | Unknown |
+| promptfoo | Partial | Partial | No | Partial | Partial | Unknown |
+| DeepEval | Partial | Partial | No | Partial | Yes, hosted | Unknown |
+| lgcov | Yes | Yes | Yes, pilot | Yes, built | Yes, built | Measured, one PR |
+
+The same table, with the evidence for each cell:
+
 | Tool | PR-level? | Node-aware? | Root vs propagated? | Calibrated confidence? | Human loop? | Per-PR CI time |
 |---|---|---|---|---|---|---|
 | **LangSmith** offline evals + CI gates | **Partial.** The [example workflow][ls-ci] runs evals on each PR. Its [report script][ls-report] compares averages with fixed thresholds, with no base run. | **Partial.** Docs show [scoring one node][ls-node], and the example [does it][ls-node-ex]. The PR comment lists feedback keys, not nodes. | **Partial.** [Engine][ls-engine] diagnoses a root cause for production issues. Nothing found that labels nodes between base and PR. | **Partial.** [Repetitions][ls-rep] and [regression counts][ls-compare] per feedback key. No test or interval found. | **Yes.** [Annotation queues][ls-queues], and [corrections become few-shot examples][ls-fewshot] for the judge. | **Unknown.** The example's eval job has a [30-minute timeout][ls-ci]. |
@@ -34,7 +51,7 @@ the same rules, and its notes carry its limits.
 | **Braintrust** eval-action | **Yes.** The [action][bt-action] comments per-score improvements and regressions [against a baseline experiment][bt-compare]. Failing on a regression needs [a custom reporter][bt-ci]. | **Partial.** LangGraph logs [one span per node][bt-lg], but the comment is per score and [comparisons stay at trace level][bt-traces]. | **Partial.** [Loop][bt-loop] can diagnose a failing trace. The [comment code][bt-main] only has per-score deltas. | **Partial.** [Trials][bt-trials] measure variance, and the comment shows deltas and counts. No test or interval found. | **Yes.** [Human review][bt-review] with [several reviewers][bt-multi], feeding datasets. | **Unknown.** Nothing found. |
 | **promptfoo**-action | **Partial.** Its [README][pf-action] says it evaluates only the current checkout, with no base run. Pass/fail counts and `fail-on-threshold`. | **Partial.** [Trace and trajectory assertions][pf-assert] work when the [provider][pf-lg] emits spans. The comment is aggregate. | **No.** One checkout and aggregate counts leave nothing to attribute. | **Partial.** [`repeat-min-pass`][pf-action] per test, and a [Wilson 95% interval][pf-wilson] on repeat stability, within one version. | **Partial.** The [web viewer][pf-ui] takes pass, fail, score and comment. They reach exports, not a later PR. | **Unknown.** Nothing found. |
 | **DeepEval** in CI | **Partial.** `deepeval test run` [fails the build][de-ci] on a metric threshold. Comparing with an [`--official` run][de-official] needs Confident AI, its hosted side. | **Partial.** [Nodes become spans][de-lg], and you [stage a metric on one][de-node]. You wire each, and it's [single-turn only][de-comp]. | **No.** The CLI reports per-metric pass or fail. Nothing found on Confident AI either. | **Partial.** Thresholds and a [flaky marker][de-flaky] in CI. [Eval Alignment][ca-align] on Confident AI reports agreement and a confusion matrix; you decide what gates. | **Yes, hosted.** [Annotation and verdict validation][ca-hitl] on Confident AI. Nothing in the open-source CLI. | **Unknown.** Nothing found. |
-| **lgcov** | **Yes.** The [Action][lg-action] replays the PR against a committed cassette and comments. Base isn't re-run on the PR. | **Yes.** The comment has a row per node. A [subgraph counts as one node][lg-gaps], so nodes inside it can't be named. | **Yes, pilot.** The [first node to drift][lg-root] in each run is root, later ones downstream. [Root precision 1 of 1 on one PR][lg-real], 95% Wilson interval 0.21 to 1.00. | **Yes, built.** [Paired test per KPI][lg-gate], and a judge's band follows its [TPR and TNR lower bounds][lg-why]. [Not yet judged on a real PR][lg-kpis]. | **Yes, built.** [`lgcov review override`][lg-why] saves a label in the repo, and the next PR re-estimates the judge. [Labels so far are the demo's][lg-labels]. | **216 s and 538 s** for both sides on [one PR][lg-real], capped settings, `lgcov bench`, not the Action. The Action's PR tier has a [90 s budget][lg-action]. [Under 1 s on the demo][lg-speed], with no real model. |
+| **lgcov** | **Yes.** The [Action][lg-action] replays the PR against a committed cassette and comments. Base isn't re-run on the PR. | **Yes.** The comment has a row per node. A [subgraph counts as one node][lg-gaps], so nodes inside it can't be named. | **Yes, pilot.** The [first node to drift][lg-root] in each run is root, later ones downstream. [Root precision 1 of 1 on one PR][lg-real], 95% Wilson interval 0.21 to 1.00. | **Yes, built.** [Paired test per KPI][lg-gate], and a judge's band follows its [TPR and TNR lower bounds][lg-why]. [Not yet judged on a real PR][lg-kpis]. | **Yes, built.** [`lgcov review override`][lg-why] saves a label in the repo, and the next PR re-estimates the judge. [Labels so far are the demo's][lg-labels]. | **216 s and 538 s** on [one PR][lg-real], capped settings. [Under 1 s on the demo][lg-speed], no real model. |
 
 ## Where lgcov is different (evidence-backed)
 
@@ -111,6 +128,8 @@ They do better:
 - promptfoo: a [docs page][pf-docs] still describes a before-and-after run. The table follows the
   action's own [README][pf-action], which says otherwise and matches its [code][pf-main].
 - lgcov: [benchmark.md][lg-real] for the real-PR numbers, and this repo at `f5b313c` for the rest.
+  The 216 s and 538 s cover both sides of `lgcov bench`, not the Action, whose PR tier has a
+  [90 s budget][lg-action].
 
 [ls-ci]: https://github.com/langchain-ai/cicd-pipeline-example/blob/5ab0d0a0f3c90999f786f834d9c05484dfe5f2bf/.github/workflows/test-with-results.yml
 [ls-report]: https://github.com/langchain-ai/cicd-pipeline-example/blob/5ab0d0a0f3c90999f786f834d9c05484dfe5f2bf/.github/scripts/report_eval.py
