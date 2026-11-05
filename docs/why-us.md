@@ -72,6 +72,9 @@ replay recorded calls too. lgcov's unit is the graph node.
 
 ## Related tools
 
+LangSmith, Opik, Kitaru, Langfuse, Braintrust, promptfoo and DeepEval, scored column by
+column against lgcov: [bake-off.md](bake-off.md).
+
 - [Reenact](https://github.com/Manas-33/Reenact) (0.2.0, MIT): records model, tool and
   MCP calls once and replays the current code against them offline. On divergence it
   fails, flags or re-runs live (capped by `--max-live`), with blocking and advisory
