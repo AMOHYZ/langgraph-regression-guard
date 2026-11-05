@@ -141,7 +141,8 @@ recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). Each side
 own process with its own imports, and a bench file can add `pythonpath: [src]` for a src
 layout. `--keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid
 recording. For now its rows are
-three synthetic fixtures in `tests/fixtures/bench/`; real PRs come with T100. A miss on a
+three synthetic fixtures in `tests/fixtures/bench/`; a pilot on one real PR has its own section
+in docs/benchmark.md. A miss on a
 hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden. The
 mutation operators for injecting known regressions into open_deep_research, each with the
 KPI that should catch it and its root and propagated labels, are in

@@ -9,6 +9,7 @@
 - State holding LangChain messages records, replays and compares; new ids and metadata aren't drift (#55).
 - A served step's ids are fitted to the run's own; if they can't be, it runs live and reports `rebind_skipped` (#56).
 - A node that returns `Command` is served, and a change to where it sends the run is drift (#59).
+- The first real PR through `lgcov bench`, open_deep_research #163, scored as a pilot: one PR, one question (#61).
 
 ## 0.1.0 (2026-11-02)
 
