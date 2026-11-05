@@ -1,6 +1,8 @@
 """Code fingerprints: what makes `lgcov replay` re-run a node instead of serving it."""
 
 import importlib.util
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -77,6 +79,79 @@ def test_a_project_class_counts_by_its_members(tmp_path: Path) -> None:
     two = _module(tmp_path / "two.py", src.replace("steps = 3", "steps = 4"))
     assert fingerprint(one.node) is not None
     assert fingerprint(one.node) != fingerprint(two.node)
+
+
+# A node that reaches a pydantic class, as open_deep_research's nodes reach `Configuration`.
+PYDANTIC = """\
+from enum import Enum
+from pydantic import BaseModel, Field
+
+class Color(Enum):
+    RED = "red"
+
+class Inner(BaseModel):
+    size: int = 1
+
+class Config(BaseModel):
+    color: Color = Field(default=Color.RED)
+    name: str = Field(default="old")
+    inner: Inner | None = None
+
+def node(state):
+    return {"a": Config().name}
+"""
+
+FINGERPRINT_A_FILE = """\
+import importlib.util, sys
+from lgcov.fingerprint import fingerprint
+spec = importlib.util.spec_from_file_location("graph", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(fingerprint(module.node))
+"""
+
+
+def test_a_pydantic_class_keeps_its_fingerprint_from_another_checkout(tmp_path: Path) -> None:
+    (tmp_path / "base").mkdir()
+    (tmp_path / "head").mkdir()
+    base = _module(tmp_path / "base" / "graph.py", PYDANTIC)
+    head = _module(tmp_path / "head" / "graph.py", PYDANTIC)
+    assert fingerprint(base.node) == fingerprint(head.node) is not None
+
+
+@pytest.mark.slow
+def test_a_pydantic_class_keeps_its_fingerprint_in_another_process(tmp_path: Path) -> None:
+    path = tmp_path / "graph.py"
+    path.write_text(PYDANTIC, encoding="utf-8")
+    found = {
+        subprocess.run(
+            [sys.executable, "-c", FINGERPRINT_A_FILE, str(path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        for _ in range(2)
+    }
+    assert len(found) == 1
+    assert found != {"None"}
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('default="old"', 'default="new"'),  # a field's default, as a config change is
+        ("size: int = 1", "size: int = 2"),  # a nested model's default
+        ('RED = "red"', 'RED = "crimson"'),  # an enum a field holds
+    ],
+)
+def test_an_edit_to_a_pydantic_class_counts(tmp_path: Path, old: str, new: str) -> None:
+    assert PYDANTIC.replace(old, new) != PYDANTIC
+    (tmp_path / "base").mkdir()
+    (tmp_path / "head").mkdir()
+    base = _module(tmp_path / "base" / "graph.py", PYDANTIC)
+    head = _module(tmp_path / "head" / "graph.py", PYDANTIC.replace(old, new))
+    assert fingerprint(base.node) is not None
+    assert fingerprint(base.node) != fingerprint(head.node)
 
 
 def test_code_it_cannot_vouch_for_has_no_fingerprint(tmp_path: Path) -> None:

@@ -6,7 +6,8 @@ from project files the same way. Library code (under the Python installation, th
 virtualenv or the user site-packages) counts by qualified name; any other object by its
 class, its repr with memory addresses removed, and the project functions it holds. Source
 is read from the file, never from a cache a same-size edit can leave stale, and nothing
-depends on paths or line numbers, so a cassette replays from another checkout.
+depends on paths, line numbers or the process, so a cassette replays from another checkout.
+A pydantic class counts by its members and core schema, without the schema's class ids.
 
 Not seen: what a node reads at run time (files, environment, network), library upgrades,
 and changes an object's repr hides. A node that uses a compiled graph, or code with no
@@ -27,7 +28,9 @@ from langgraph.pregel import Pregel
 _PREFIXES = (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 _LIBRARY = tuple(Path(p).resolve() for p in (*_PREFIXES, site.getusersitepackages()))
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
-# Class attributes that follow the module name or the file layout, not behaviour.
+# Class attributes that follow the module name or the file layout, not behaviour. pydantic's
+# validator and serializer are built from the class's schema, which counts; their reprs print
+# addresses and a map whose order changes with each process.
 _CLASS_NOISE = frozenset(
     {
         "__module__",
@@ -36,8 +39,12 @@ _CLASS_NOISE = frozenset(
         "__static_attributes__",
         "__dict__",
         "__weakref__",
+        "__pydantic_validator__",
+        "__pydantic_serializer__",
     }
 )
+# A ref in a pydantic schema ends in the class's id: "graph.Color:140247150680384".
+_SCHEMA_ID = re.compile(r":\d+$")
 
 
 def fingerprint(fn: object) -> str | None:
@@ -66,6 +73,20 @@ def _codes(code: CodeType) -> Iterator[CodeType]:
     for const in code.co_consts:
         if isinstance(const, CodeType):
             yield from _codes(const)
+
+
+def _schema(value: object) -> object:
+    """A pydantic core schema with the ids taken out of its refs."""
+    if isinstance(value, list):
+        return [_schema(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        k: _SCHEMA_ID.sub("", v)
+        if k in ("ref", "schema_ref") and isinstance(v, str)
+        else _schema(v)
+        for k, v in value.items()
+    }
 
 
 def _function(fn: FunctionType, seen: dict[int, object]) -> str:
@@ -108,6 +129,8 @@ def _describe(value: object, names: frozenset[str], seen: dict[int, object]) -> 
         if module is not None and not _in_project(getattr(module, "__file__", None)):
             return _name(value)
         members = {k: v for k, v in vars(value).items() if k not in _CLASS_NOISE}
+        if "__pydantic_core_schema__" in members:
+            members["__pydantic_core_schema__"] = _schema(members["__pydantic_core_schema__"])
         return _describe((value.__bases__, members), names, seen)
     if isinstance(value, property):
         return _describe((value.fget, value.fset, value.fdel), names, seen)
