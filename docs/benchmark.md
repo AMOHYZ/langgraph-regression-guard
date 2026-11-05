@@ -48,7 +48,7 @@ Measured by `lgcov bench`, apart from the last two rows.
 | Propagated recall | 1.00 (1 of 1) | None |
 | Propagated F1 | 0.67 | None |
 | Time | 216 s, both sides | None |
-| Spend | _To be added from the OpenAI usage page, with any errors it shows_ | At most $0.60; stop and re-plan over $1 |
+| Spend | $0.52 (_any errors on the OpenAI usage page to be added_) | At most $0.60; stop and re-plan over $1 |
 | Requests | _To be added from the OpenAI usage page_ | About 110 |
 
 lgcov said root `write_research_brief`, propagated `final_report_generation` and `research_supervisor`.
