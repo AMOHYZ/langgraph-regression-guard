@@ -44,7 +44,8 @@ The first matching row wins. "The switch" is `fail-on-inconclusive` or
 | 17 | `ship` | SHIP | 🟢 lgcov: SHIP (N blocking KPIs) | Review as usual. SHIP covers these KPIs on the recorded cases, nothing else. | 0 | 0 | `pass` |
 | 18 | `no_drift_no_kpi` | No drift, and no blocking KPI judged | 🟢 lgcov: no drift (no blocking KPI judged) | Review as usual. lgcov compared the recorded runs; it judged no KPI that can block. | 0 | 0 | `pass` |
 
-Rows 4 and 5 block on one case, with no false-alarm bound; [gate.md](gate.md) says why and how to
+A run this PR removes from its cassettes gets a note naming it, and changes no row. Rows 4 and 5
+block on one case, with no false-alarm bound; [gate.md](gate.md) says why and how to
 opt out. Row 16 names what serving can miss, and [the replay audit](validation/replay-audit.md) has
 the detail.
 

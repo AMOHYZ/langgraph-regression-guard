@@ -54,8 +54,8 @@ Two cases work differently:
    could never pass in its own PR. So a clean re-baseline still exits 0. It can't pass unnoticed: the
    report flags it (`CiResult.cassettes_edited`), and it can't read as a SHIP, because its
    headline is "No decision: needs_human". A blocking code check that passes on the base's
-   cassettes and fails on the PR exits 1 all the same. Other KPIs get no such comparison, and a
-   run the PR removes has nothing to compare against.
+   cassettes and fails on the PR exits 1 all the same. Other KPIs get no such comparison. A run
+   the PR removes has nothing to compare against, so the report names it, and it doesn't block.
 4. **Secrets in the job.** The README's `JEV_API_KEY` and `LANGSMITH_API_KEY` go in the job that
    runs the PR's code, which can read them. Until T179, only put them there if PR authors are
    trusted: no fork PRs, no outside contributors. A changed node that calls a model needs its key

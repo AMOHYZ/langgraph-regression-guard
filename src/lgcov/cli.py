@@ -109,6 +109,7 @@ from lgcov.sampling import (
     gate_kpis,
     judge_samples,
     kpi_stats,
+    named_cases,
     render_gate_table,
     render_kpi_table,
 )
@@ -974,6 +975,8 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         budget=budget.seconds,
         budget_hit=budget.hit,
     )
+    base_runs, base_notes = _base_runs(args, cfg) if edited else (list[Cassette](), list[str]())
+    paired, removed = _pair_with_base(runs, base_runs, cfg.ignore_paths)
     result = replace(
         partial,
         inconclusive_blocks=args.fail_on_inconclusive or cfg.gate.inconclusive_blocks,
@@ -989,6 +992,8 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         under_floor=under_floor,
         notes=(
             *_policy_notes(args, cfg, edited),
+            *base_notes,
+            *_removed_note(removed, cfg.cassette_dir),
             *llm_notes,
             *([note] if note else []),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
@@ -1025,14 +1030,10 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     )
     groups = _groups(stats, l2[0], cfg, gate)
     findings = gate_findings(stats, groups)
-    base_runs, base_notes = _base_runs(args, cfg) if edited else (list[Cassette](), list[str]())
-    hidden = _hidden_failures(
-        *l2, stats, runs, [steps for _, steps in pairs], base_runs, stopped, cfg.ignore_paths
-    )
+    hidden = _hidden_failures(*l2, stats, [steps for _, steps in pairs], paired, stopped)
     return replace(
         result,
         gate=replace(findings, infra=findings.infra or bool(llm_code), hidden_failures=hidden),
-        notes=(*result.notes, *base_notes),
         l2_lines=(
             *calibration,
             *([""] if calibration and stats else []),
@@ -1378,28 +1379,47 @@ def _base_runs(args: argparse.Namespace, cfg: Config) -> tuple[list[Cassette], l
         return [], [f"⚠️ Could not read the base's cassettes, so they weren't compared: {why}"]
 
 
-def _hidden_failures(
-    specs: list[KPISpec],
-    judges: list[Judge],
-    stats: list[KpiStats],
-    runs: list[Cassette],
-    fresh: list[list[Step]],
-    base_runs: list[Cassette],
-    stopped: Collection[int],
-    ignore_paths: Sequence[str],
-) -> tuple[CodeFailure, ...]:
-    """Blocking code checks that pass on the base's recorded runs and fail on this PR's, though
-    its own cassettes show nothing new: a re-baseline moved what they're compared with. Runs
-    pair by masked input, each used once, since a re-recording can reorder them. A run with no
-    partner, or one replay stopped, isn't compared. Code judges cost no model calls."""
+def _pair_with_base(
+    runs: list[Cassette], base_runs: list[Cassette], ignore_paths: Sequence[str]
+) -> tuple[list[list[Step] | None], list[str]]:
+    """Each run's steps on the base, by masked input, each used once, since a re-recording can
+    reorder runs; then the base runs nothing here pairs with, as `run-0: {its masked input}`."""
 
     def key(run: Cassette) -> str:
         return json.dumps(normalize(run.inputs, ignore_paths), sort_keys=True, default=str)
 
-    waiting: dict[str, list[list[Step]]] = {}
-    for run in base_runs:
-        waiting.setdefault(key(run), []).append(run.steps)
-    paired = [waiting[key(run)].pop(0) if waiting.get(key(run)) else None for run in runs]
+    waiting: dict[str, list[int]] = {}
+    for i, run in enumerate(base_runs):
+        waiting.setdefault(key(run), []).append(i)
+    paired = [
+        base_runs[waiting[key(run)].pop(0)].steps if waiting.get(key(run)) else None for run in runs
+    ]
+    left = sorted((i, key(base_runs[i])) for unpaired in waiting.values() for i in unpaired)
+    cut = [(i, k[:60] + "…" if len(k) > 60 else k) for i, k in left]
+    return paired, [f"run-{i}: " + k.replace("`", "'") for i, k in cut]
+
+
+def _removed_note(removed: Sequence[str], cassette_dir: str) -> list[str]:
+    """The base's runs this PR dropped. They block nothing, but nothing checked them either."""
+    if not removed:
+        return []
+    what = "1 run" if len(removed) == 1 else f"{len(removed)} runs"
+    verb, it = ("isn't", "it wasn't") if len(removed) == 1 else ("aren't", "they weren't")
+    where = f"recorded on the base {verb} in this PR's `{cassette_dir}`"
+    return [f"⚠️ {what} {where}, so {it} checked: {named_cases(removed)}."]
+
+
+def _hidden_failures(
+    specs: list[KPISpec],
+    judges: list[Judge],
+    stats: list[KpiStats],
+    fresh: list[list[Step]],
+    paired: list[list[Step] | None],
+    stopped: Collection[int],
+) -> tuple[CodeFailure, ...]:
+    """Blocking code checks that pass on the base's recorded runs and fail on this PR's, though
+    its own cassettes show nothing new: a re-baseline moved what they're compared with. A run
+    with no partner, or one replay stopped, isn't compared. Code judges cost no model calls."""
     skipped = {*stopped, *(i for i, steps in enumerate(paired) if steps is None)}
     recorded = [steps or [] for steps in paired]
     found = []
