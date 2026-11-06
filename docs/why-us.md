@@ -29,6 +29,8 @@ labelled roots and is scored as one node.
 *Status: built, and a pilot on real PRs.* Root precision is 1 of 1 on that one PR, with a 95%
 Wilson interval of 0.21 to 1.00, so it proves no precision claim. Recall is capped at about
 1/5 to 1/6, because a second root in the same run reads as downstream (T162).
+The [replay audit](validation/replay-audit.md) checks the replay this rests on, not these
+labels, and a change replay can't see can give no drift, so no root.
 `diff_cassettes` classifies by each node's recorded input, but only tests call it so far. A
 noise check, base against base on a real model, is planned (T173). Reenact records each
 LangGraph node boundary in its trajectory and shows them to its judges, but it gates per
@@ -67,10 +69,12 @@ verdicts. What lgcov adds: one test per taxonomy KPI, each tied to the graph nod
 reads, with the root drift node next to its verdict, and Holm across the blocking KPIs
 with Benjamini–Hochberg across the advisory ones. Per-slice scores are planned (T090).
 
-**Node-level memoization.** A node whose code fingerprint and input both match the
-recording is served from the cassette, so only changed nodes, and nodes whose input
-changed because of them, run live. A comment or docstring edit counts as a change for now,
-so that node runs live too.
+**Node-level memoization.** A node whose code fingerprint and masked input both match the
+recording is served from the cassette, so changed nodes run live, and so do nodes whose input
+changed in a part the mask leaves in. A change only to a masked value, such as an `id` or a
+date-time, doesn't re-run the nodes below it, so they can be served stale
+([known replay limits](../README.md#known-replay-limits)). A comment or docstring edit counts
+as a change for now, so that node runs live too.
 *Status: built ([PR #18](https://github.com/AMOHYZ/langgraph-regression-guard/pull/18));
 measured on the demo in [benchmark-speed.md](benchmark-speed.md).* Not novel: Reenact, graphtrace,
 [docker-agent](https://github.com/docker/docker-agent) and LangSmith's pytest cache
@@ -125,6 +129,8 @@ column against lgcov: [bake-off.md](bake-off.md).
   there does name the inner node (`sub.inner`).
 - Name a second root in the same run: only the first node to drift is called root, so a
   later independent change reads as downstream (T162).
+- See a change that reaches a node only through a masked value or a `Store` read, or replay a
+  graph with a checkpointer or an `interrupt`: [known replay limits](../README.md#known-replay-limits).
 
 ## How this was checked
 
