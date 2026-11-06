@@ -426,18 +426,80 @@ def test_a_base_baseline_that_cannot_be_read_says_so(gated: Path, tmp_path: Path
     assert "⚠️ Could not read the base's cassettes, so they weren't compared" in report
 
 
-def test_a_run_the_pr_removed_has_nothing_to_compare(gated: Path) -> None:
-    # A known limit: the row still says to read the cassette diff, but this doesn't block.
-    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+def _keep_runs(*keep: int) -> None:
     path = Path("cassettes/baseline.json")
     runs = json.loads(path.read_text(encoding="utf-8"))["runs"]
-    path.write_text(
-        json.dumps({"runs": [r for r in runs if "order" not in str(r["inputs"])]}), "utf-8"
-    )
+    path.write_text(json.dumps({"runs": [runs[i] for i in keep]}), "utf-8")
+
+
+ORDER_RUN = 'run-{}: {{"question": "Where is my order?"}}'
+
+
+def test_runs_the_pr_removed_are_named_and_do_not_block(gated: Path) -> None:
+    # The failing runs are gone, so nothing compares them; the comment says which they were.
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _keep_runs(1, 3)
     code, report, _ = _ci("--fail-on", "never", switch=False)
     assert code == 0
     assert report.splitlines()[1] == NO_DECISION
-    assert "Read the KPI table" in report or "Read the cassette diff" in report
+    assert (
+        "⚠️ 2 runs recorded on the base aren't in this PR's `cassettes`, so they weren't checked: "
+        f"`{ORDER_RUN.format(0)}`, `{ORDER_RUN.format(2)}`."
+    ) in report
+
+
+def test_one_removed_run_is_named_alongside_a_hidden_failure(gated: Path) -> None:
+    # Runs 0 and 2 share an input, so the one left pairs with run 0 and run 2 is the one removed.
+    _keep_runs(0, 1, 3)
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _re_record()
+    code, report, _ = _ci()
+    assert code == 1
+    assert report.splitlines()[1] == HIDDEN
+    assert "on 1 of 3 cases (`run-0/lookup_order`)" in report
+    assert (
+        "⚠️ 1 run recorded on the base isn't in this PR's `cassettes`, so it wasn't checked: "
+        f"`{ORDER_RUN.format(2)}`."
+    ) in report
+
+
+def test_a_removed_run_is_named_with_no_taxonomy_too(gated: Path) -> None:
+    _keep_runs(0)
+    _, report, _ = _ci(taxonomy=False)
+    assert "⚠️ 3 runs recorded on the base aren't in this PR's `cassettes`" in report
+    assert report.index("`run-1:") < report.index("`run-2:") < report.index("`run-3:")
+
+
+def test_many_removed_runs_are_counted_and_a_long_input_is_cut_safely(
+    gated: Path, tmp_path: Path
+) -> None:
+    long = "a`b" + "x" * 100
+    extra = [{"inputs": {"question": f"{long} {i}"}, "steps": []} for i in range(4)]
+    runs = json.loads(BASELINE)["runs"] * 2
+    _write(tmp_path / "base", {"cassettes/baseline.json": json.dumps({"runs": [*extra, *runs]})})
+    _, report, _ = _ci(taxonomy=False)
+    line = next(x for x in report.splitlines() if "recorded on the base" in x)
+    assert line.startswith("⚠️ 4 runs recorded on the base aren't")
+    assert line.endswith(" and 1 more.")
+    assert '`run-0: {"question": "a\'b' in line  # a backtick can't close the code span
+    assert "x" * 100 not in line and "…`" in line
+
+
+def test_nothing_is_named_when_no_run_was_removed(gated: Path) -> None:
+    _write(gated, {"graph.py": DRIFTED_GRAPH})
+    _re_record(reverse=True)  # another order and new outputs, the same inputs
+    _, report, _ = _ci(switch=False)
+    assert "⚠️ This PR changes `cassettes`" in report
+    assert "recorded on the base" not in report
+
+
+def test_a_run_the_pr_added_is_not_named_as_removed(gated: Path) -> None:
+    runs = json.loads(Path("cassettes/baseline.json").read_text(encoding="utf-8"))["runs"]
+    inputs = [*(r["inputs"] for r in runs), {"question": "Do you ship abroad?"}]
+    Path("../inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
+    assert main(["record", "--inputs", "../inputs.json"]) == 0
+    _, report, _ = _ci(switch=False)
+    assert "recorded on the base" not in report
 
 
 def test_a_run_the_pr_added_has_nothing_to_compare(gated: Path, tmp_path: Path) -> None:

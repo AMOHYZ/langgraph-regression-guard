@@ -28,7 +28,7 @@ or slice group never goes further than its KPIs' own verdicts.
     also run against the runs recorded on the base, paired by input. One that passes there and
     fails on the PR exits 1, named as hidden by the re-baseline. Otherwise the comment says no
     decision and it exits 0, so an intended change can land. A run the PR removes from its
-    cassettes has nothing to compare against, so check that diff.
+    cassettes has nothing to compare against, so the comment names it, and it doesn't block.
   - `tool_called` and `tool_not_called` can't fire this way yet: `lgcov ci` doesn't pass them the
     run's tools, so the first always fails and the second always passes.
 - **The 2.5%** is at the default α = 0.05. With no discordant pair, SHIP reads the no-drop
