@@ -76,7 +76,9 @@ Against these seven, as documented. Each has a limit next to it.
   do it too. On the one real PR, with one case and one run per side, the results
   [aren't gate verdicts][lg-kpis].
 - **Serving by node.** lgcov serves an unchanged node from the cassette, by its code fingerprint
-  and input. LangSmith's [pytest cache][ls-cache] replays HTTP calls. Kitaru re-runs the agent
+  and masked input, so a change only to a masked value can be served stale
+  ([known limits](../README.md#known-replay-limits)). LangSmith's [pytest cache][ls-cache]
+  replays HTTP calls. Kitaru re-runs the agent
   [from the top][ki-concept], and on LangGraph it answers tool calls from recordings only for
   [factory-built agents][ki-lg]. Limits: a node holding a compiled subgraph always runs live,
   so a live model's new answer can read as drift. A comment or docstring edit currently changes

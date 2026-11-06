@@ -23,7 +23,7 @@ Three layers, one per level of confidence:
 - **L1 — Cassettes.** Record each node's input and output once. On every PR,
   nodes the change left alone are served from the recording and the rest re-run
   and are compared with it. The diff tells you whether a change breaks a node at
-  its root or only propagates from upstream.
+  its root or only propagates from upstream. [Known limits](#known-replay-limits).
 - **L2 — Judge gate.** Typed LLM judges and deterministic code checks score
   KPIs, each verdict with a confidence, and a paired test per KPI decides SHIP,
   BLOCK or INCONCLUSIVE: an unclear or low-confidence result goes to a human
@@ -121,7 +121,12 @@ Precedence: CLI flag > file > default.
 its recorded output without running it, when two things match the recording:
 
 - **Its input**, with volatile fields and `ignore_paths` masked as in the
-  comparison. A node downstream of a change gets a new input, so it re-runs.
+  comparison. By default the mask hides the values of `id`, `message_id`, `request_id`,
+  `run_id`, `span_id`, `tool_call_id` and `trace_id` at any depth, UUIDs and date-times
+  inside text, and everything in a message except its type, content, name, status, and tool
+  call names and args. A node downstream of a change re-runs if the change reaches what
+  the mask leaves in. A change only to a masked value still matches, so that node can be
+  served from the cassette.
 - **Its code fingerprint**: the node function's source, defaults and closure
   values, plus the values of the module-level names it uses, following the
   functions, classes and modules of your project the same way. Library code
@@ -132,6 +137,22 @@ Everything else runs live: changed nodes, nodes that are not plain functions
 inputs. What a node reads at run time (files, environment variables, network) and
 dependency upgrades are not part of the fingerprint: pass `--live` to either
 command to re-run every node.
+
+#### Known replay limits
+
+From the [replay audit](docs/validation/replay-audit.md#matrix). With `--live` nothing is
+served, which rules out the first two.
+
+- **Masked changes can be served stale.** After a change only to an `id`, a UUID or date-time
+  in text, or a message's id, metadata or artifact, the nodes below it are served and show no
+  drift. A fix is in progress. Rows [1a, 3a and 5a](docs/validation/replay-audit.md#matrix).
+- **Reads from a LangGraph `Store`, `config` or `runtime` aren't in the key**, so a changed
+  `Store` value can be served stale. A documented limit. Replay passes no `config` or runtime
+  context of its own. [Row 7d](docs/validation/replay-audit.md#matrix) and
+  [how a step is matched](docs/validation/replay-audit.md#how-a-step-is-matched).
+- **A parent graph with a checkpointer, or a run that hits an `interrupt`, ends in an error**
+  (`ValueError` or `TypeError`, exit 2). Planned: an `unsupported` result. Rows
+  [4a, 6a and 6b](docs/validation/replay-audit.md#matrix).
 
 Served vs `--live` on the demo, measured: [docs/benchmark-speed.md](docs/benchmark-speed.md) (`make bench-speed`).
 
