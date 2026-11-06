@@ -85,6 +85,7 @@ from lgcov.coverage import (
 )
 from lgcov.draft import Drafter, approve, as_doc, draft, parse_traces, to_yaml
 from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
+from lgcov.gate_result import GateResult, file_hash, parse_result, result_to_json, verify_result
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
@@ -830,16 +831,24 @@ def _cassettes_edited(args: argparse.Namespace, cfg: Config) -> bool:
     return bool(args.policy_dir) and _tree(Path(cfg.cassette_dir)) != _tree(Path(base))
 
 
+def _policy_files(args: argparse.Namespace) -> list[str]:
+    return [args.config, *([args.taxonomy] if args.taxonomy else []), args.bands]
+
+
+def _bytes(path: str) -> bytes | None:
+    return Path(path).read_bytes() if Path(path).is_file() else None
+
+
+def _policy_hashes(args: argparse.Namespace) -> dict[str, str]:
+    """T154: each policy file's hash, from where the gate reads it."""
+    return {f: file_hash(_bytes(_policy_path(args, f))) for f in _policy_files(args)}
+
+
 def _policy_notes(args: argparse.Namespace, cfg: Config, cassettes_edited: bool) -> list[str]:
     """T154: what this PR edited of the gate's own inputs, for the report."""
-
-    def text(path: str) -> bytes | None:
-        return Path(path).read_bytes() if Path(path).is_file() else None
-
     if not args.policy_dir:
         return []
-    files = [args.config, *([args.taxonomy] if args.taxonomy else []), args.bands]
-    edited = [f for f in files if text(f) != text(_policy_path(args, f))]
+    edited = [f for f in _policy_files(args) if _bytes(f) != _bytes(_policy_path(args, f))]
     notes = []
     if edited:
         notes.append(
@@ -1153,7 +1162,9 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--timing-out", help="write this run's timing here as JSON (T105 benchmark)")
     ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
     ap.add_argument("--policy-dir", help="checkout of the PR's base: lgcov.yaml, taxonomy, bands")
+    ap.add_argument("--result-out", help="write the result here, bound to commits and policy")
     args = ap.parse_args(argv)
+    policy = _policy_hashes(args)  # T154: the base's, before the PR's code can touch them
     bootstrap = _first_adoption(args)
     if bootstrap:
         args.policy_dir = None  # T154: the PR's policy is all there is, so nothing is enforced
@@ -1168,6 +1179,18 @@ def _ci(argv: list[str]) -> int:
     body = _advisory_report(body) if advisory else body
     report.write_text(body, encoding="utf-8")
     print(body, end="")
+    shown = "advisory" if advisory else verdict(result.exit_code)
+    if args.result_out:
+        bound = GateResult(
+            start.base or "",
+            _pr_head() or start.candidate or "",
+            policy,
+            int(result.exit_code),
+            shown,
+            file_hash(body.encode("utf-8")),
+        )
+        Path(args.result_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.result_out).write_text(result_to_json(bound), encoding="utf-8")
     if args.timing_out and result.timing:
         timing = Path(args.timing_out)
         timing.parent.mkdir(parents=True, exist_ok=True)
@@ -1179,11 +1202,50 @@ def _ci(argv: list[str]) -> int:
             "report-path": report,
             "root-drift-count": len(result.root_drift),
             "tier": result.tier,
-            "verdict": "advisory" if advisory else verdict(result.exit_code),
+            "verdict": shown,
         }
         with open(args.github_output, "a", encoding="utf-8") as f:
             f.writelines(f"{k}={v}\n" for k, v in outputs.items())
     return result.exit_code
+
+
+def _verify_result_cmd(argv: list[str]) -> int:
+    """T154: check `lgcov ci`'s result before its verdict is posted. One that doesn't bind gives
+    no verdict: the report becomes a harness error, and the outputs and the exit code say 2."""
+    ap = argparse.ArgumentParser(prog="lgcov verify-result")
+    ap.add_argument("--result", required=True, help="the file `lgcov ci --result-out` wrote")
+    ap.add_argument("--report", required=True, help="the PR comment; replaced on a mismatch")
+    ap.add_argument("--base-sha", required=True, help="the PR's base commit, from the event")
+    ap.add_argument("--head-sha", required=True, help="the PR's head commit, from the event")
+    ap.add_argument("--policy-dir", required=True, help="checkout of that base commit")
+    ap.add_argument("--github-output", help="append step outputs here ($GITHUB_OUTPUT)")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml, as `lgcov ci` read it")
+    ap.add_argument("--taxonomy", help="the taxonomy, as `lgcov ci` read it")
+    ap.add_argument("--bands", default=_BANDS, help="the bands, as `lgcov ci` read them")
+    ap.add_argument("--fail-on", type=_fail_on_arg, default="root-drift", help="for the report")
+    args = ap.parse_args(argv)
+    report = Path(args.report)
+    result = None
+    try:
+        result = parse_result(Path(args.result).read_text(encoding="utf-8"))
+        hashes = _policy_hashes(args)
+        why = verify_result(result, args.base_sha, args.head_sha, hashes, report.read_bytes())
+    except (OSError, ValueError) as exc:
+        result, why = None, str(exc)
+    if result is None or why:
+        msg = f"The result failed verification, so this PR has no verdict: {why}"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        body = render_ci_report(CiResult(args.fail_on, EXIT_ERROR, harness_error=msg))
+        report.write_text(body, encoding="utf-8")
+        print(msg, file=sys.stderr)
+        code, shown = EXIT_ERROR, str(verdict(EXIT_ERROR))
+    else:
+        print(f"lgcov: result verified for base {args.base_sha} and head {args.head_sha}")
+        code, shown = result.exit_code, result.verdict
+    if args.github_output:
+        with open(args.github_output, "a", encoding="utf-8") as f:
+            f.write(f"exit-code={code}\nverdict={shown}\n")
+    return code
 
 
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
@@ -2029,6 +2091,8 @@ def _command(argv: list[str]) -> int | None:
         return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:
         return _ci(argv[1:])
+    if argv[:1] == ["verify-result"]:
+        return _verify_result_cmd(argv[1:])
     if argv[:1] == ["record"]:
         return _record(argv[1:])
     if argv[:2] == ["import", "langsmith"]:
@@ -2080,6 +2144,7 @@ commands:
   replay            replay the baseline and report root and propagated drift
   cassette accept   re-baseline drifted nodes (--nodes A,B or --all-drifted)
   ci                what the GitHub Action runs: replay, gates and the PR report
+  verify-result     check a result from `lgcov ci` before its verdict is posted
   snapshot          print the graph's nodes and edges as a JSON snapshot
   coverage          coverage of the recorded runs, and its trend against main
   lint              check the graph's shape before anything runs

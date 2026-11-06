@@ -188,6 +188,7 @@ LGCOV_COMMANDS = (
     "replay",
     "cassette accept",
     "ci",
+    "verify-result",
     "snapshot",
     "coverage",
     "lint",

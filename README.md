@@ -221,8 +221,10 @@ jobs:
   a read-only token, so there the report goes to the job summary instead.
 - On a PR, `lgcov.yaml`, the taxonomy and the bands are read from the base commit, so a PR
   can't change what grades it. Its edits apply after it merges. The first PR that adds
-  `lgcov.yaml` is advisory: it uses its own policy, exits 0 and claims no SHIP. What this does
-  and doesn't stop: [docs/trust-boundary.md](docs/trust-boundary.md).
+  `lgcov.yaml` is advisory: it uses its own policy, exits 0 and claims no SHIP. Before the
+  comment is posted, `lgcov verify-result` checks the result against the commits and that
+  policy. On a mismatch no verdict is posted and the run exits 2. What this does and doesn't
+  stop: [docs/trust-boundary.md](docs/trust-boundary.md).
 - `root-drift` and `any-drift` fail the same PRs for now: until replay classifies
   drift by the node inputs it records, the first node to drift in each run counts
   as root.
