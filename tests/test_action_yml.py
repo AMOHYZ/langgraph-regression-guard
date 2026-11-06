@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from lgcov.drift_gate import FAIL_ON_VALUES
+from lgcov.verdict_actions import CI_STATUSES, MODES, Evidence, decide_action
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,6 +44,9 @@ def test_action_is_composite_with_the_documented_inputs_and_outputs() -> None:
         "on-divergence": "flag",
         "budget-seconds": "",
         "tier": "",  # T089: empty is lgcov.yaml's tier, else pr
+        "mode": "enforcing",  # T153
+        "approved-by": "",
+        "ci-status": "",
     }
     assert set(_dict(action["outputs"])) == {
         "report-path",
@@ -93,7 +97,7 @@ def test_live_input_reaches_lgcov_ci() -> None:
 
 
 def test_fail_on_inconclusive_is_checked_first_and_reaches_lgcov_ci() -> None:
-    # T091: INCONCLUSIVE exits 0 unless this is true; then 1, never 2.
+    # T091: INCONCLUSIVE exits 0 unless this is true; then 1. T153: an infra error still exits 2.
     assert "fail-on-inconclusive must be true or false" in str(_steps()[0].get("run", ""))
     run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
     assert _dict(run["env"])["FAIL_ON_INCONCLUSIVE"] == "${{ inputs.fail-on-inconclusive }}"
@@ -110,6 +114,41 @@ def test_divergence_and_budget_inputs_are_checked_first_and_reach_lgcov_ci() -> 
     assert env["ON_DIVERGENCE"] == "${{ inputs.on-divergence }}"
     assert env["BUDGET_SECONDS"] == "${{ inputs.budget-seconds }}"
     assert "--on-divergence" in str(run["run"]) and "--budget-seconds" in str(run["run"])
+
+
+def test_mode_and_ci_status_are_checked_first_with_the_same_values_as_python() -> None:
+    first = str(_steps()[0].get("run", ""))
+    assert "|".join(MODES) in first
+    assert f"mode must be one of {', '.join(MODES)}" in first
+    assert "|".join(CI_STATUSES) in first
+    assert f"ci-status must be one of {', '.join(CI_STATUSES)}, or empty" in first
+
+
+def test_mode_approval_and_ci_status_reach_lgcov_ci() -> None:
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    env = _dict(run["env"])
+    assert env["MODE"] == "${{ inputs.mode }}"
+    assert env["APPROVED_BY"] == "${{ inputs.approved-by }}"
+    assert env["CI_STATUS"] == "${{ inputs.ci-status }}"
+    for flag in ("--mode", "--approved-by", "--ci-status"):
+        assert flag in str(run["run"])
+
+
+def test_the_fallback_report_uses_the_infra_headline() -> None:
+    # When lgcov can't even start, the Action writes this one comment itself.
+    headline = decide_action(Evidence(infra=True)).headline
+    assert f'"## {headline}"' in _step("Run lgcov")
+
+
+def test_no_decision_adds_a_warning_because_the_tick_can_still_be_green(tmp_path: Path) -> None:
+    script = _step("Exit with the verdict")
+    for verdict, code, warned in (("needs_human", "0", True), ("pass", "0", False)):
+        env = {**os.environ, "CODE": code, "VERDICT": verdict, "FAIL_ON": "root-drift"}
+        result = subprocess.run(
+            [*GITHUB_BASH, script], cwd=tmp_path, env=env, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+        assert ("::warning title=lgcov::No decision: needs_human" in result.stdout) == warned
 
 
 def test_release_ignores_the_floating_v0_tag() -> None:
@@ -171,6 +210,9 @@ def test_run_step_survives_drift_under_github_bash_flags(tmp_path: Path) -> None
         "TIER": "pr",
         "NIGHTLY_URL": "",
         "COVERAGE_BASELINE": "",
+        "MODE": "enforcing",
+        "APPROVED_BY": "",
+        "CI_STATUS": "",
     }
     script = _step("Run lgcov")
     result = subprocess.run(
@@ -301,7 +343,8 @@ def _run_step_calls(tmp_path: Path, event: str, base_dir: str) -> list[str]:
         "ON_DIVERGENCE": "flag",
         "FAIL_ON": "root-drift",
         **dict.fromkeys(("GRAPH", "CASSETTE_DIR", "TAXONOMY", "BUDGET_SECONDS", "TIER"), ""),
-        **dict.fromkeys(("NIGHTLY_URL", "COVERAGE_BASELINE"), ""),
+        **dict.fromkeys(("NIGHTLY_URL", "COVERAGE_BASELINE", "APPROVED_BY", "CI_STATUS"), ""),
+        "MODE": "enforcing",
     }
     result = subprocess.run(
         [*GITHUB_BASH, _step("Run lgcov")], cwd=tmp_path, env=env, capture_output=True, text=True

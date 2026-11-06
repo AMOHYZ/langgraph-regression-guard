@@ -38,7 +38,8 @@ kpis:
   the rule in `check`: `node_visited`, `tool_called` or `tool_not_called`. A `jev` judge
   calls the Jev service (`JEV_API_URL`, `JEV_API_KEY`); `fake` is the offline stand-in;
   `llm`, a general LLM judge, runs in the nightly tier only (T089).
-- Bands (T063): code judges always block. A model judge's band (blocking, flag or
+- Bands (T063): code judges always block: a check that passed on the base and fails on the PR
+  exits 1, whatever the paired test says ([gate.md](gate.md)). A model judge's band (blocking, flag or
   advisory) comes from `lgcov calibrate` against human labels; with no labels it is
   advisory (`gate.uncalibrated: flag` makes it a flag).
 - Malformed YAML, or a top level that is not a mapping, is a `ValueError`

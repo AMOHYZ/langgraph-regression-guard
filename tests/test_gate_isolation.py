@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from lgcov.ci_report import CiResult, render_ci_report
-from lgcov.cli import BOOTSTRAP_HEADLINE, main
+from lgcov.cli import main
+from lgcov.verdict_actions import BOOTSTRAP_HEADLINE
 
 FIXTURES = Path(__file__).parent / "fixtures"
 DEMO_GRAPH = (FIXTURES / "demo_graph.py").read_text(encoding="utf-8")
@@ -97,7 +98,7 @@ def test_a_pr_edit_to_the_policy_no_longer_gets_it_past_the_gate(
     _write(pr, edits)
     assert _ci(policy=False)[0] == 0  # the attack works when the gate reads the PR's policy
     code, report, outputs = _ci()
-    assert (code, outputs["verdict"]) == (1, "fail")
+    assert (code, outputs["verdict"]) == (1, "needs_human")
     assert f"| {KPI} | 2 |" in report and "pr_kpi" not in report
 
 
@@ -155,11 +156,13 @@ def test_cassettes_a_pr_edits_are_honoured_and_flagged(
     seen = _results(monkeypatch)
     _ci(taxonomy=False)
     assert not seen[-1].cassettes_edited
-    # T153's rule reads this flag: until then, re-baselining in the PR still turns the gate green.
+    # T153: a re-baseline can still land in its own PR, even with the switch on, but it can't
+    # read as a pass.
     _write(pr, {"graph.py": DRIFTED_GRAPH})
     assert main(["cassette", "accept", "--all-drifted"]) == 0
-    code, report, _ = _ci(taxonomy=False)
-    assert code == 0
+    code, report, outputs = _ci(taxonomy=False)
+    assert (code, outputs["verdict"]) == (0, "needs_human")
+    assert report.splitlines()[1] == "## ⚠️ No decision: needs_human"
     assert seen[-1].cassettes_edited
     assert "⚠️ This PR changes `cassettes`, the expected outputs" in report
 

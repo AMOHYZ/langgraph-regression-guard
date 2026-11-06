@@ -139,6 +139,7 @@ class KpiStats:
     band: str = "blocking"  # T063: blocking, flag (BLOCK capped at INCONCLUSIVE) or advisory
     cases: tuple[tuple[tuple[float, ...], tuple[float, ...]], ...] = ()  # T090: paired scores
     score_range: float = 1.0  # T150: the KPI's highest score minus its lowest
+    new_failures: tuple[str, ...] = ()  # code judges: cases that passed on base, fail here
 
     @property
     def flakiness(self) -> float:
@@ -183,6 +184,7 @@ def kpi_stats(
             [b_scores[c] for c in pairs], [n_scores[c] for c in pairs], alpha, power
         )
     changed = [c for c in pairs if fmean(b_scores[c]) != fmean(n_scores[c])]
+    new_failures = [c for c in changed if code and fmean(n_scores[c]) < fmean(b_scores[c])]
     roots = sorted({case_roots[c] for c in changed if c in case_roots}) if case_roots else []
     confidence = {c.case_id: c.confidence for c in new_cases}
     outcome: GateOutcome = "infra_error" if infra else "needs_human"  # unless pairs decide
@@ -218,6 +220,7 @@ def kpi_stats(
         confidence=fmean(confidence[c] for c in pairs) if pairs else 0.0,
         margin=margin,
         roots=tuple(roots),
+        new_failures=tuple(new_failures),
         score_range=max(kpi.score_map.values()) - min(kpi.score_map.values()),
     )
     return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence)[0]
@@ -275,8 +278,11 @@ def gate_kpis(
 
 def gate_exit_code(stats: Sequence[KpiStats], inconclusive_blocks: bool = False) -> Outcome:
     """T091: AGENT_FAIL when a blocking KPI is BLOCK (or INCONCLUSIVE, with
-    inconclusive_blocks); else INFRA_ERROR when one had no paired case for infra errors."""
+    inconclusive_blocks) or has a code check that newly fails, whatever its verdict; else
+    INFRA_ERROR when one had no paired case for infra errors."""
     outcomes = {s.outcome for s in stats if s.blocking}
+    if any(s.blocking and s.new_failures for s in stats):
+        return Outcome.AGENT_FAIL
     if "fail" in outcomes or (inconclusive_blocks and "needs_human" in outcomes):
         return Outcome.AGENT_FAIL
     return Outcome.INFRA_ERROR if "infra_error" in outcomes else Outcome.PASS
@@ -307,6 +313,12 @@ def _tokens(s: KpiStats) -> str:
     if s.tokens_total == 0:
         return "0"
     return f"{_num(s.tokens_mean)} ({s.tokens_total:,} total)"
+
+
+def named_cases(cases: Sequence[str], shown: int = 3) -> str:
+    """The first few of these cases, in code spans: `a`, `b`, `c` and 2 more."""
+    named = ", ".join(f"`{c}`" for c in cases[:shown])
+    return f"{named} and {len(cases) - shown} more" if len(cases) > shown else named
 
 
 def _verdict(s: KpiStats) -> str:
@@ -352,6 +364,11 @@ def render_gate_table(
         if s.decision == "INCONCLUSIVE" and needed is not None and r.n < needed:
             need = f"need {needed - r.n} more cases for {s.kpi} (N*={needed})"
             lines.append(f"| ⚠️ underpowered: {need} |" + " |" * 10)
+        if s.new_failures:  # the rates above can round this away
+            icon = "🔴" if s.blocking else "⚠️"
+            many = f"{len(s.new_failures)} of {r.n} cases"
+            what = f"{s.kpi} on {many}: {named_cases(s.new_failures)}"
+            lines.append(f"| {icon} new failure: {what} |" + " |" * 10)
     lines += [
         "",
         f"Cases paired base vs PR. p adj.: Holm across the K_gate = {k_gate(stats)} blocking "

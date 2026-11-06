@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
@@ -110,9 +110,10 @@ from lgcov.sampling import (
     render_gate_table,
     render_kpi_table,
 )
-from lgcov.slices import Group, failing_groups, group_kpis, groups_exit, render_groups
+from lgcov.slices import Group, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
+from lgcov.verdict_actions import CI_STATUSES, MODES, gate_findings
 
 # 0 = no change / accepted, 1 = graph/replay changed or named node not drifted,
 # 2 = bad input (missing/unreadable/invalid).
@@ -120,10 +121,6 @@ EXIT_ERROR = 2
 EXIT_NOT_DRIFTED = 1
 # T166: a side of `lgcov bench` couldn't load its graph (lgcov.bench_side).
 CANT_IMPORT = 3
-# T154: the report's headline on a first adoption PR, whose policy is all its own.
-BOOTSTRAP_HEADLINE = (
-    "Advisory: policy comes from this PR and is not trusted yet; enforcement starts after merge"
-)
 
 
 def _output_hash(step: Step) -> str:
@@ -394,6 +391,9 @@ def _node_failure(prog: str, exc: NodeError) -> int:
 
 _LIVE_HELP = "re-run every node; by default a node whose code and input match is served"
 _INCONCLUSIVE_HELP = "exit 1 on an INCONCLUSIVE blocking KPI; overrides gate.inconclusive_blocks"
+_MODE_HELP = "advisory: report only; only a harness error fails the check"  # T153
+_APPROVED_BY_HELP = "who approved this PR, comma-separated; recorded, it changes no verdict"
+_CI_STATUS_HELP = "the result of your other CI jobs; shown, it changes no verdict"
 
 
 def _budget_arg(value: str) -> float:
@@ -801,18 +801,6 @@ def _first_adoption(args: argparse.Namespace) -> bool:
     return not (args.graph and baseline.is_file())
 
 
-def _advisory_report(body: str) -> str:
-    """T154: a first adoption PR's report: its headline, and no claim to read as a SHIP."""
-    lines = [
-        line.replace("🟢 SHIP", "would SHIP")
-        for line in body.splitlines()
-        if not line.startswith("**What SHIP and BLOCK guarantee.**")
-    ]
-    lines[1] = f"## ⚠️ {BOOTSTRAP_HEADLINE}"
-    lines[-1] = lines[-1].replace("verdict: **pass**", "verdict: **advisory**")
-    return "\n".join(lines) + "\n"
-
-
 def _moved_graph(args: argparse.Namespace, cfg: Config) -> str:
     """T154: why a graph this PR moved won't load: the base's lgcov.yaml names the old path."""
     if not args.policy_dir or args.graph or Path(cfg.graph_entrypoint.rpartition(":")[0]).exists():
@@ -868,7 +856,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
     fail_on: FailOn = args.fail_on
     if args.harness_error:
-        return CiResult(fail_on, EXIT_ERROR, harness_error=args.harness_error)
+        return CiResult(fail_on, harness_error=args.harness_error)
     overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
     # T154: a fix or a new file in this PR can't help until it merges, so a broken policy says so.
     from_base = (
@@ -880,7 +868,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         cfg = load_config(_policy_path(args, args.config), overrides)
     except (OSError, ValueError) as exc:
         msg = f"invalid lgcov.yaml: {exc}{from_base}"
-        return CiResult(fail_on, EXIT_ERROR, harness_error=msg)
+        return CiResult(fail_on, harness_error=msg)
     tier: Tier = args.tier or cfg.tier
     policy = tier_policy(tier, cfg.samples_per_case)
     budget.seconds = policy.budget if args.budget_seconds is None else args.budget_seconds
@@ -898,12 +886,12 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
             l2 = (specs, [_l2_judge(spec, cfg.jev_model) for spec in specs])
         except (OSError, ValueError) as exc:
             msg = f"invalid taxonomy: {exc}{from_base}"
-            return CiResult(fail_on, EXIT_ERROR, harness_error=msg)
+            return CiResult(fail_on, harness_error=msg)
         try:
             advisory, flagged, calibration = _gate_bands(_policy_path(args, args.bands), every, cfg)
         except (OSError, ValueError) as exc:
             msg = f"invalid lgcov.yaml or bands.json: {exc}{from_base}"
-            return CiResult(fail_on, EXIT_ERROR, harness_error=msg)
+            return CiResult(fail_on, harness_error=msg)
         llm_notes, llm_code = _llm_notes(llm, advisory, policy.llm_judges)
     try:
         # Exception: importing user graph code can raise anything.
@@ -911,10 +899,10 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         head = snapshot_from_compiled(graph)
     except Exception as exc:
         msg = _harness_message("cannot load graph", exc) + _moved_graph(args, cfg)
-        return CiResult(fail_on, EXIT_ERROR, harness_error=msg)
+        return CiResult(fail_on, harness_error=msg)
     graph_lines, graph_note = _base_diff(args.base_dir, cfg.graph_entrypoint, head)
     edited = _cassettes_edited(args, cfg)
-    partial = CiResult(fail_on, EXIT_ERROR, tuple(graph_lines), graph_note, cassettes_edited=edited)
+    partial = CiResult(fail_on, tuple(graph_lines), graph_note, cassettes_edited=edited)
     try:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -937,7 +925,6 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
             return replace(partial, harness_error=original, harness_node=exc.node)
         return replace(
             partial,
-            exit_code=Outcome.AGENT_FAIL,  # whatever fail-on says: fail-on governs drift only
             crash=f"Node `{exc.node}` raised {original}",
             root_drift=(exc.node,),
         )
@@ -957,11 +944,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     base, note = _coverage_baseline(args.coverage_baseline)
     # T089: nodes a run stopped before (divergence or budget) are INCONCLUSIVE, never a fail.
     not_checked = tuple(dict.fromkeys(n for r in replays for n in r.not_checked))
-    blocks = args.fail_on_inconclusive or cfg.gate.inconclusive_blocks
-    drift_code = drift_exit_code(fail_on, len(root), len(downstream))
     under_floor = node_floor_miss(cov, cfg.thresholds.min_node_coverage)
-    floor_code = Outcome.AGENT_FAIL if under_floor else 0  # a floor miss is 1, never 2
-    l1_code = max(drift_code, int(blocks and bool(not_checked)), floor_code)
     diverged = [*_divergence_lines(replays, args.on_divergence), *_rebind_lines(replays)]
     calls = [c for r in replays for c in r.calls]
     timing = Timing(
@@ -974,7 +957,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     )
     result = replace(
         partial,
-        exit_code=l1_code,
+        inconclusive_blocks=args.fail_on_inconclusive or cfg.gate.inconclusive_blocks,
         replay_lines=(
             *_replay_markdown(runs, drifts, not_checked),
             *([""] if diverged else []),
@@ -1007,10 +990,13 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     try:
         saved = _saved_cases(Path(_policy_path(args, args.bands)).parent / "cases", l2[0])
         extra = sum(len(saved.get(s.name, [])) for s in l2[0] if s.judge != "code")
-        stats, gate = _ci_gate(args, cfg, policy.k, advisory, flagged, *l2, runs, pairs, extra)
+        stopped = frozenset(i for i, r in enumerate(replays) if r.not_checked)
+        stats, gate = _ci_gate(
+            args, cfg, policy.k, advisory, flagged, *l2, runs, pairs, extra, stopped
+        )
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
-        return replace(result, exit_code=l1_code or EXIT_ERROR, harness_error=msg)
+        return replace(result, harness_error=msg)
     tokens = [s.tokens_total for s in stats if s.tokens_total]  # code judges report 0
     judged = replace(
         timing,
@@ -1019,22 +1005,15 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         tokens=sum(tokens) if tokens else None,
     )
     groups = _groups(stats, l2[0], cfg, gate)
-    gate_code = groups_exit(
-        gate_exit_code(stats, gate.inconclusive_blocks), groups, gate.inconclusive_blocks
-    )
+    findings = gate_findings(stats, groups)
     return replace(
         result,
-        exit_code=1 if 1 in (l1_code, gate_code) else max(l1_code, gate_code, llm_code),
+        gate=replace(findings, infra=findings.infra or bool(llm_code)),
         l2_lines=(
             *calibration,
             *([""] if calibration and stats else []),
             *(_l2_tables(stats, groups, gate) if stats else ()),
         ),
-        blocked=(
-            *(s.kpi for s in stats if s.blocking and s.outcome == "fail"),
-            *failing_groups(groups),
-        ),
-        inconclusive=tuple(s.kpi for s in stats if s.blocking and s.outcome == "needs_human"),
         timing=replace(judged, total=perf_counter() - start),
         calibration_lines=(*changes, *_rejudge(saved, l2[0], l2[1])),
     )
@@ -1071,10 +1050,12 @@ def _ci_gate(
     runs: list[Cassette],
     replays: list[tuple[list[Drift], list[Step]]],
     extra: int = 0,
+    stopped: Collection[int] = (),
 ) -> tuple[list[KpiStats], GateConfig]:
     """T091: the L2 gate on recorded vs replayed outputs, as `lgcov judge` runs it. `extra`:
-    model judge calls on top of the plan (T102: saved cases)."""
-    plan = _l2_plan(specs, runs, replays)
+    model judge calls on top of the plan (T102: saved cases); `stopped`: runs replay left
+    unfinished."""
+    plan = _l2_plan(specs, runs, replays, stopped)
     _, model = _l2_calls(plan, k)
     model += extra
     if model > args.max_calls:
@@ -1122,7 +1103,7 @@ def _locked(result: CiResult, start: Commits, base_dir: str | None) -> CiResult:
     """T114: a run whose base or candidate commit moved gives no verdict: INFRA_ERROR."""
     refused = moved(start, _commits(base_dir))
     if refused:
-        return CiResult(result.fail_on, EXIT_ERROR, harness_error=refused)
+        return CiResult(result.fail_on, harness_error=refused)
     return replace(result, locked=locked_line(start))
 
 
@@ -1163,30 +1144,35 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
     ap.add_argument("--policy-dir", help="checkout of the PR's base: lgcov.yaml, taxonomy, bands")
     ap.add_argument("--result-out", help="write the result here, bound to commits and policy")
+    ap.add_argument("--mode", choices=MODES, default="enforcing", help=_MODE_HELP)
+    ap.add_argument("--approved-by", default="", help=_APPROVED_BY_HELP)
+    ap.add_argument("--ci-status", choices=CI_STATUSES, default="", help=_CI_STATUS_HELP)
     args = ap.parse_args(argv)
     policy = _policy_hashes(args)  # T154: the base's, before the PR's code can touch them
     bootstrap = _first_adoption(args)
     if bootstrap:
         args.policy_dir = None  # T154: the PR's policy is all there is, so nothing is enforced
     start = _commits(args.base_dir)  # T114: before anything is loaded
-    result = _locked(_ci_result(args), start, args.base_dir)
-    advisory = bootstrap and result.exit_code != EXIT_ERROR  # an error means nothing ran
-    if advisory:
-        result = replace(result, exit_code=0)
+    result = replace(
+        _locked(_ci_result(args), start, args.base_dir),
+        first_adoption=bootstrap,
+        mode=args.mode,
+        approved_by=tuple(n.strip() for n in args.approved_by.split(",") if n.strip()),
+        ci_status=args.ci_status,
+    )
+    action = result.action
     report = Path(args.report).resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
     body = render_ci_report(result)
-    body = _advisory_report(body) if advisory else body
     report.write_text(body, encoding="utf-8")
     print(body, end="")
-    shown = "advisory" if advisory else verdict(result.exit_code)
     if args.result_out:
         bound = GateResult(
             start.base or "",
             _pr_head() or start.candidate or "",
             policy,
-            int(result.exit_code),
-            shown,
+            action.exit_code,
+            action.verdict,
             file_hash(body.encode("utf-8")),
         )
         Path(args.result_out).parent.mkdir(parents=True, exist_ok=True)
@@ -1197,16 +1183,16 @@ def _ci(argv: list[str]) -> int:
         timing.write_text(json.dumps(asdict(result.timing)) + "\n", encoding="utf-8")
     if args.github_output:
         outputs = {
-            "exit-code": result.exit_code,
+            "exit-code": action.exit_code,
             "propagated-drift-count": len(result.propagated_drift),
             "report-path": report,
             "root-drift-count": len(result.root_drift),
             "tier": result.tier,
-            "verdict": shown,
+            "verdict": action.verdict,
         }
         with open(args.github_output, "a", encoding="utf-8") as f:
             f.writelines(f"{k}={v}\n" for k, v in outputs.items())
-    return result.exit_code
+    return action.exit_code
 
 
 def _verify_result_cmd(argv: list[str]) -> int:
@@ -1235,7 +1221,7 @@ def _verify_result_cmd(argv: list[str]) -> int:
     if result is None or why:
         msg = f"The result failed verification, so this PR has no verdict: {why}"
         report.parent.mkdir(parents=True, exist_ok=True)
-        body = render_ci_report(CiResult(args.fail_on, EXIT_ERROR, harness_error=msg))
+        body = render_ci_report(CiResult(args.fail_on, harness_error=msg))
         report.write_text(body, encoding="utf-8")
         print(msg, file=sys.stderr)
         code, shown = EXIT_ERROR, str(verdict(EXIT_ERROR))
@@ -1318,10 +1304,14 @@ def _l2_judge(spec: KPISpec, jev_model: str | None = None) -> Judge:
 _Cases = dict[str, tuple[NodeState, NodeState]]
 
 
-def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> _Cases:
-    """One case per run: the trace for code judges, else the node's own input and output."""
+def _l2_cases(spec: KPISpec, runs: list[list[Step]], stopped: Collection[int] = ()) -> _Cases:
+    """One case per run: the trace for code judges, else the node's own input and output. A
+    run in `stopped` has no whole-run case: its trace is cut off, and its last step isn't the
+    final one, so a code check would read as failed when it was never checked."""
     cases: _Cases = {}
     for i, steps in enumerate(runs):
+        if i in stopped and (spec.judge == "code" or spec.node == "final"):
+            continue
         case_id = f"run-{i}/{spec.node}"
         if spec.judge == "code":
             cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps]}})
@@ -1340,10 +1330,15 @@ def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> _Cases:
 
 
 def _l2_plan(
-    specs: list[KPISpec], runs: list[Cassette], replays: list[tuple[list[Drift], list[Step]]]
+    specs: list[KPISpec],
+    runs: list[Cassette],
+    replays: list[tuple[list[Drift], list[Step]]],
+    stopped: Collection[int] = (),
 ) -> list[tuple[KPISpec, _Cases, _Cases]]:
     base, fresh = [r.steps for r in runs], [steps for _, steps in replays]
-    return [(spec, _l2_cases(spec, base), _l2_cases(spec, fresh)) for spec in specs]
+    return [
+        (spec, _l2_cases(spec, base, stopped), _l2_cases(spec, fresh, stopped)) for spec in specs
+    ]
 
 
 def _l2_calls(plan: list[tuple[KPISpec, _Cases, _Cases]], k: int) -> tuple[int, int]:
@@ -2046,7 +2041,7 @@ def _selfcheck_cmd(argv: list[str]) -> int:
                 policy_dir=None,
             )
         )
-        actual = Outcome(result.exit_code)
+        actual = Outcome(result.action.exit_code)
         ok = actual == want.outcome and (want.root is None or want.root in result.root_drift)
         all_ok = all_ok and ok
         expected = want.outcome.name + (f" @ {want.root}" if want.root else "")

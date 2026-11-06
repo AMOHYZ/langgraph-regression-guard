@@ -317,3 +317,58 @@ def test_the_gate_table_says_what_ship_and_block_guarantee() -> None:
     assert render_gate_table([advisory])[-1] == (
         "No KPI blocks this PR (K_gate = 0), so the gate makes no SHIP or BLOCK claim."
     )
+
+
+def _scored(score: float) -> Sample:
+    return Sample(score >= 0.5, 1.0, 0.0, score=score)
+
+
+def _dropping(n: int, drops: int) -> tuple[dict[str, list[Sample]], dict[str, list[Sample]]]:
+    base = {f"c{i}": [_scored(1.0)] for i in range(n)}
+    new = {f"c{i}": [_scored(0.0 if i < drops else 1.0)] for i in range(n)}
+    return base, new
+
+
+def test_a_code_judge_names_the_cases_that_newly_fail_and_only_those() -> None:
+    base = {
+        "new": [_scored(1.0)],
+        "old": [_scored(0.0)],
+        "fixed": [_scored(0.0)],
+        "ok": [_scored(1.0)],
+    }
+    new = {
+        "new": [_scored(0.0)],
+        "old": [_scored(0.0)],
+        "fixed": [_scored(1.0)],
+        "ok": [_scored(1.0)],
+    }
+    assert kpi_stats(KPI_, 1, base, new, code=True).new_failures == ("new",)
+    # A model judge's drop stays the paired test's to weigh.
+    assert kpi_stats(KPI_, 1, base, new).new_failures == ()
+
+
+@pytest.mark.parametrize(
+    ("n", "decision"), [(8, "INCONCLUSIVE"), (200, "SHIP")], ids=["small suite", "large suite"]
+)
+def test_a_new_code_failure_fails_the_gate_whatever_the_test_says(n: int, decision: str) -> None:
+    stats = kpi_stats(KPI_, 1, *_dropping(n, 1), code=True)
+    assert stats.decision == decision
+    assert gate_exit_code([stats]) == 1
+    [advisory] = gate_kpis([stats], advisory={"grounded"})
+    assert gate_exit_code([advisory], inconclusive_blocks=True) == 0  # the opt-out
+    assert gate_exit_code([kpi_stats(KPI_, 1, *_dropping(n, 1))]) == 0  # a model judge
+
+
+def test_the_gate_table_shows_a_new_failure_the_rounded_rates_hide() -> None:
+    stats = kpi_stats(KPI_, 1, *_dropping(200, 1), code=True)
+    table = "\n".join(render_gate_table([stats]))
+    assert "| grounded | 200 | 100% | 100% |" in table  # 99.5% rounds up
+    assert "| 🔴 new failure: grounded on 1 of 200 cases: `c0` |" in table
+    [advisory] = gate_kpis([stats], advisory={"grounded"})
+    assert "| ⚠️ new failure: grounded on 1 of 200 cases: `c0` |" in "\n".join(
+        render_gate_table([advisory])
+    )
+    many = kpi_stats(KPI_, 1, *_dropping(200, 5), code=True)
+    assert "on 5 of 200 cases: `c0`, `c1`, `c2` and 2 more |" in "\n".join(
+        render_gate_table([many])
+    )
