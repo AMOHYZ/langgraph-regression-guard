@@ -7,8 +7,10 @@ a difference. Results: docs/validation/replay-audit.md.
 Each open finding is a strict xfail (`_finding`). Run with --runxfail to see them fail.
 """
 
+import asyncio
 import contextlib
 import json
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -27,10 +29,20 @@ from fixtures.replay_audit import (
 )
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Checkpointer, RetryPolicy
 
-from lgcov.cassette import Cassette, NodeError, Replay, Step, record, replay_run, runs_to_json
+from lgcov.cassette import (
+    Cassette,
+    Halt,
+    NodeError,
+    Replay,
+    Step,
+    record,
+    replay_run,
+    runs_to_json,
+)
 from lgcov.cli import _divergence_lines, main
 from lgcov.messages import plain
 
@@ -384,46 +396,138 @@ def test_a_write_whose_input_changed_runs_once_and_is_reported_as_diverged() -> 
     sink.assert_called_once_with("v2:p")
 
 
-def test_plain_langgraph_doesn_t_retry_a_node_s_value_error() -> None:
-    # What the next test compares with: the agent's own behaviour outside lgcov is one write.
-    sink = Mock()
-    boom = Mock(side_effect=ValueError("bad"))
-    with pytest.raises(ValueError, match="bad"):
-        side_effect.build("v2", sink, boom, RETRY).invoke({"payload": "p"})
-    assert sink.call_count == 1
+_Build = Callable[..., CompiledStateGraph[side_effect.State]]
 
 
-@_finding("`_named` turns the ValueError into a NodeError, which LangGraph's retry rule retries")
-def test_replay_doesn_t_repeat_a_write_that_langgraph_wouldn_t_retry() -> None:
+def _nested(build: _Build) -> _Build:
+    def nested(
+        tag: str, sink: Mock, fail: Mock | None = None, retry: RetryPolicy | None = None
+    ) -> CompiledStateGraph[side_effect.State]:
+        return side_effect.in_a_subgraph(build(tag, sink, fail, retry))
+
+    return nested
+
+
+FLAT = [pytest.param(side_effect.build, id="sync"), pytest.param(side_effect.abuild, id="async")]
+NESTED = [
+    pytest.param(_nested(side_effect.build), id="sync_subgraph"),
+    pytest.param(_nested(side_effect.abuild), id="async_subgraph"),
+]
+
+
+@pytest.mark.parametrize("build", [*FLAT, *NESTED])
+@pytest.mark.parametrize(
+    ("policy", "error", "attempts"),
+    [
+        pytest.param(None, ValueError, 1, id="no_policy"),
+        pytest.param(RETRY, ValueError, 1, id="default_rule_refuses_value_error"),
+        pytest.param(RETRY, ConnectionError, 3, id="default_rule_retries_connection_error"),
+        pytest.param(RETRY._replace(retry_on=ValueError), ValueError, 3, id="own_rule_names_it"),
+        pytest.param(RETRY._replace(retry_on=KeyError), ValueError, 1, id="own_rule_doesn_t"),
+    ],
+)
+def test_replay_makes_the_attempts_the_agent_makes_outside_lgcov(
+    build: _Build, policy: RetryPolicy | None, error: type[Exception], attempts: int
+) -> None:
     sink = Mock()
-    cassette = _recorded(side_effect.build("v1", sink), PAYLOAD)
+    boom = Mock(side_effect=error("bad"))
+    with pytest.raises(error):
+        asyncio.run(build("v2", sink, boom, policy).ainvoke({"payload": "p"}))
+    assert sink.call_count == attempts  # plain LangGraph, the agent as it runs outside lgcov
     sink.reset_mock()
-    boom = Mock(side_effect=ValueError("bad"))
-    with pytest.raises(NodeError):
-        replay_run(side_effect.build("v2", sink, boom, RETRY), cassette, serve=True)
-    assert sink.call_count == 1
+    with pytest.raises(NodeError) as caught:
+        replay_run(build("v2", sink, boom, policy), Cassette(dict(PAYLOAD), []), serve=True)
+    assert sink.call_count == attempts
+    assert caught.value.node.endswith("write")
+    assert caught.value.original is boom.side_effect
+    assert caught.value.attempts == attempts
+    assert (f"({attempts} failed attempts in this run)" in str(caught.value)) == (attempts > 1)
 
 
-def _retried_write(sink: Mock) -> Replay:
+def _retried_write(sink: Mock, build: _Build = side_effect.build) -> Replay:
     # `write`'s code is the same on both sides and its input changed. The first attempt writes
     # and hits a network error, which LangGraph is right to retry, and the second succeeds.
     flaky = Mock(side_effect=[None, ConnectionError("down"), None])
-    cassette = _recorded(side_effect.build("v1", sink, flaky, RETRY), PAYLOAD)
+    cassette = _recorded(build("v1", sink, flaky, RETRY), PAYLOAD)
     sink.reset_mock()
-    return replay_run(side_effect.build("v2", sink, flaky, RETRY), cassette, serve=True)
+    return replay_run(build("v2", sink, flaky, RETRY), cassette, serve=True)
 
 
-@_finding("a failed attempt logs no Call, so its write is in no count")
-def test_every_attempt_at_a_retried_write_is_in_the_calls() -> None:
+@pytest.mark.parametrize("build", FLAT)
+def test_every_attempt_at_a_retried_write_is_in_the_calls(build: _Build) -> None:
     sink = Mock()
-    fresh = _retried_write(sink)
-    assert len(_how(fresh, "write")) == sink.call_count
+    fresh = _retried_write(sink, build)
+    assert sink.call_count == 2
+    assert _how(fresh, "write") == [("write", "diverged"), ("write", "after_divergence")]
+    assert fresh.failed_attempts == ("write",)
 
 
-@_finding("the failed attempt takes the `diverged` label with it, so the report has no line")
+@pytest.mark.parametrize("build", NESTED)
+def test_a_failed_attempt_inside_a_subgraph_is_in_the_calls(build: _Build) -> None:
+    sink = Mock()
+    fresh = _retried_write(sink, build)
+    assert sink.call_count == 2
+    assert fresh.failed_attempts == ("sub.write",)
+
+
 def test_a_retried_write_whose_input_changed_is_reported_as_diverged() -> None:
     fresh = _retried_write(Mock())
-    assert any("`write`" in line for line in _divergence_lines([fresh], "flag"))
+    assert any(
+        "Diverged" in line and "`write`" in line for line in _divergence_lines([fresh], "flag")
+    )
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        pytest.param(RETRY, id="default_rule"),
+        pytest.param(RETRY._replace(retry_on=Exception), id="a_rule_that_retries_anything"),
+    ],
+)
+def test_on_divergence_fail_stops_a_write_with_a_retry_policy(policy: RetryPolicy) -> None:
+    # A retry mustn't get a node past the halt, or the write `fail` is there to stop still runs.
+    sink = Mock()
+    cassette = _recorded(side_effect.build("v1", sink, retry=policy), PAYLOAD)
+    sink.reset_mock()
+    pr = side_effect.build("v2", sink, retry=policy)
+    fresh = replay_run(pr, cassette, serve=True, on_divergence="fail")
+    assert fresh.halt == Halt("write", "diverged")
+    assert fresh.not_checked == ("write",)
+    sink.assert_not_called()
+
+
+def test_an_error_handler_gets_the_node_s_own_error_and_the_attempt_is_in_the_calls() -> None:
+    sink, seen = Mock(), Mock()
+    boom = Mock(side_effect=ValueError("bad"))
+    side_effect.build("v2", sink, boom, on_error=seen).invoke({"payload": "p"})
+    seen.assert_called_once_with("ValueError")  # plain LangGraph
+    sink.reset_mock()
+    seen.reset_mock()
+    pr = side_effect.build("v2", sink, boom, on_error=seen)
+    fresh = replay_run(pr, Cassette(dict(PAYLOAD), []), serve=True)
+    seen.assert_called_once_with("ValueError")
+    assert sink.call_count == 1
+    assert fresh.failed_attempts == ("write",)
+
+
+def test_on_divergence_fail_stops_a_write_and_its_error_handler() -> None:
+    sink, seen = Mock(), Mock()
+    cassette = _recorded(side_effect.build("v1", sink, on_error=seen), PAYLOAD)
+    sink.reset_mock()
+    pr = side_effect.build("v2", sink, on_error=seen)
+    fresh = replay_run(pr, cassette, serve=True, on_divergence="fail")
+    assert fresh.halt == Halt("write", "diverged")
+    sink.assert_not_called()
+    seen.assert_not_called()
+
+
+def test_a_halt_doesn_t_wait_out_the_default_retry_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    sink, sleep = Mock(), Mock()
+    monkeypatch.setattr(time, "sleep", sleep)
+    cassette = _recorded(side_effect.build("v1", sink, retry=RETRY), PAYLOAD)
+    pr = side_effect.build("v2", sink, retry=RETRY)
+    assert replay_run(pr, cassette, serve=True, on_divergence="fail").halt is not None
+    sleep.assert_not_called()
 
 
 @_finding("Y is served: what it reads from the Store changed, and its state didn't")

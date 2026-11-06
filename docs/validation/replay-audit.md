@@ -7,12 +7,11 @@ pattern it can't replay safely say `unsupported` with a reason? Audited on 6 Nov
 **Today the answer is no to both.** Replay is right when a change reaches a part of the input
 the key can see, which covers plain chains, loops, Send fan-out, plain subgraphs, reducers and
 async nodes. It serves stale outputs, with no drift, when a change reaches only a masked value
-or a Store. lgcov has no `unsupported` result, so what it can't replay ends in a raw error. And
-a retry policy can repeat a write that no report mentions.
+or a Store. lgcov has no `unsupported` result, so what it can't replay ends in a raw error.
 
-Nothing is fixed here. Each finding is a strict xfail in
-`tests/test_cassette_replay_audit.py`, so a fix fails its test until the marker comes off.
-To see them fail:
+The retried writes the audit found are fixed: see Side-effect safety. Each finding still open is
+a strict xfail in `tests/test_cassette_replay_audit.py`, so a fix fails its test until the marker
+comes off. To see them fail:
 
 ```bash
 uv run pytest tests/test_cassette_replay_audit.py --runxfail
@@ -20,26 +19,32 @@ uv run pytest tests/test_cassette_replay_audit.py --runxfail
 
 ## Side-effect safety
 
-The first fix. A node that writes can run more times under lgcov than the report says. Both
-cases need a `RetryPolicy` on the node, here with `max_attempts=3`.
+Fixed, the audit's first fix. A node that writes ran more times under lgcov than it does outside
+it, and the reports didn't say so. These cases need a `RetryPolicy` on the node, here with
+`max_attempts=3`, or an error handler.
 
-| Case | Writes | What the report shows | Tests |
+| Case | Before the fix | Now | Tests |
 |---|---|---|---|
-| 7b. The node writes, then raises `ValueError` | Plain LangGraph: **1**. Under lgcov: **3** | The crash, and nothing about three attempts | `test_plain_langgraph_doesn_t_retry_a_node_s_value_error`, `test_replay_doesn_t_repeat_a_write_that_langgraph_wouldn_t_retry` |
-| 7c. The first attempt writes and hits `ConnectionError`, the second succeeds | **2** writes, **1** logged call; the failed attempt is unlogged | No line at all, where a write with no retry gets `Diverged, so run live` | `test_every_attempt_at_a_retried_write_is_in_the_calls`, `test_a_retried_write_whose_input_changed_is_reported_as_diverged` |
+| 7b. The node writes, then raises `ValueError` | Plain LangGraph **1** write, lgcov **3** | **1** write, as outside lgcov | `test_replay_makes_the_attempts_the_agent_makes_outside_lgcov` |
+| 7c. The first attempt writes and hits `ConnectionError`, the second succeeds | **2** writes, **1** logged call, no report line | **2** writes, **2** logged calls, and the report names the node | `test_every_attempt_at_a_retried_write_is_in_the_calls`, `test_a_failed_attempt_inside_a_subgraph_is_in_the_calls`, `test_a_retried_write_whose_input_changed_is_reported_as_diverged`, `test_cli_ci_names_a_node_that_raised_and_ran_again`, `test_cli_replay_names_a_node_that_raised_and_ran_again` |
+| The node's own rule names the error, `retry_on=ValueError` | Plain LangGraph **3** writes, lgcov **1** and a crash | **3** writes, as outside lgcov | `test_replay_makes_the_attempts_the_agent_makes_outside_lgcov` |
+| Every attempt fails | The crash named no attempts | It says `(3 failed attempts in this run)` | `test_cli_ci_says_how_many_attempts_a_failed_node_made` |
+| `on-divergence: fail` on a node with a retry policy | Ignored: the retry caught the halt, and the write ran | The run halts, with no write and no wait | `test_on_divergence_fail_stops_a_write_with_a_retry_policy`, `test_a_halt_doesn_t_wait_out_the_default_retry_rule`, `test_on_divergence_fail_stops_a_write_and_its_error_handler` |
+| The node has an error handler | The handler got lgcov's wrapper | It gets the node's own error, and the failed attempt is logged | `test_an_error_handler_gets_the_node_s_own_error_and_the_attempt_is_in_the_calls` |
 
-Why each happens:
+What changed:
 
-- **7b.** `_named` wraps every node error in `NodeError`. LangGraph's `default_retry_on` refuses
-  `ValueError` and similar types but retries any type it doesn't recognise, so the wrapper turns
-  an error it wouldn't retry into one it does.
-- **7c.** A `Call` is logged only when a call returns. The failed attempt uses up the run's
-  `diverged` label, the retry is logged as `after_divergence`, and `_divergence_lines` prints
-  nothing without a `diverged` call.
+- A node's error now goes through LangGraph as it is, and `_run` makes it a `NodeError` once it
+  leaves the run. A retry rule or an error handler sees what it sees outside lgcov.
+- Every attempt that raised is a `Call`. It counts as a live call, the run keeps its `diverged`
+  line, and the report adds `Raised, and the run went on`.
+- A halt stays in force once it's set, so a retry can't get a call past it.
 
-With no retry policy, writes behave as they should: an unchanged input is served with no write,
-and a changed input writes exactly once and is reported as diverged. That one write is real.
-Replay can't tell that a node writes, so it runs it against whatever the node is connected to.
+A retry is still a real write: if the agent's own policy retries a write, it runs again under
+lgcov as it does outside it, and now the report says so. With no retry policy, an unchanged input
+is served with no write, and a changed input writes exactly once and is reported as diverged.
+That one write is real too. Replay can't tell that a node writes, so it runs it against whatever
+the node is connected to.
 
 ## How a step is matched
 
@@ -100,8 +105,8 @@ rows with an open finding.
 | 6b | Interrupted run, with a checkpointer | bug found: no `unsupported` | The `ValueError` in 4a: `test_an_interrupted_run_with_a_checkpointer_replays_or_says_unsupported` | T133 |
 | 7 | Tool that writes, input unchanged | supported | Served, no write: `test_a_write_whose_input_is_unchanged_is_served_and_doesn_t_run_again` | |
 | 7a | Tool that writes, input changed | supported | One write, reported as diverged: `test_a_write_whose_input_changed_runs_once_and_is_reported_as_diverged` | |
-| 7b | Write with a retry policy, node raises `ValueError` | bug found | 1 write becomes 3: see Side-effect safety | first fix |
-| 7c | Write with a retry policy, transient error | bug found | 2 writes, 1 logged call, no report line: see Side-effect safety | first fix |
+| 7b | Write with a retry policy, node raises `ValueError` | supported | 1 write, as outside lgcov: `test_replay_makes_the_attempts_the_agent_makes_outside_lgcov` | |
+| 7c | Write with a retry policy, transient error | supported | 2 writes, both logged, and the report names the node: `test_every_attempt_at_a_retried_write_is_in_the_calls` | |
 | 7d | Y reads from a Store what a changed X wrote | bug found | Served `old`, live `new`, no drift: `test_y_is_not_served_when_what_it_reads_from_a_store_changed` | documented limit |
 | 8 | Async X → Y → outcome, regression check for T164 (PR #54) | supported | Same as row 1, and an unchanged graph is fully served: `test_async_y_reruns_when_x_s_prompt_changes_its_input`, `test_an_unchanged_async_graph_is_served_without_running` | |
 
