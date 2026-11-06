@@ -35,6 +35,9 @@ ROWS: dict[str, Evidence] = {
     "infra": Evidence(infra=True),
     "first_adoption": Evidence(first_adoption=True, statistical="SHIP", k_gate=2),
     "agent_failure": Evidence(crashed=True),
+    "policy_hidden_code_check": Evidence(
+        hidden_failures=(FAILURE,), cassettes_edited=True, statistical="SHIP", k_gate=2
+    ),
     "policy_code_check": Evidence(code_failures=(FAILURE,), statistical="SHIP", k_gate=2),
     "policy_drift": Evidence(enforced_drift=("respond",), statistical="SHIP", k_gate=2),
     "block": Evidence(statistical="BLOCK", k_gate=2),
@@ -99,7 +102,7 @@ def _every_combination() -> Iterator[Evidence]:
         for flags in product((False, True), repeat=13):
             infra, crashed, drift, unenforced, floor, unchecked = flags[:6]
             unsure, drop, idle, blocks, adopting, edited, failing = flags[6:]
-            yield Evidence(
+            evidence = Evidence(
                 statistical=statistical,
                 k_gate=0 if statistical is None else 2,
                 infra=infra,
@@ -117,12 +120,16 @@ def _every_combination() -> Iterator[Evidence]:
                 code_failures=(FAILURE,) if failing else (),
                 mode=mode,
             )
+            if edited:  # only a PR that edited its cassettes can hide a failure in them
+                yield replace(evidence, hidden_failures=(FAILURE,))
+            yield evidence
 
 
 def _finding(e: Evidence) -> bool:
     return (
         e.crashed
         or bool(e.code_failures)
+        or bool(e.hidden_failures)
         or bool(e.enforced_drift)
         or e.statistical == "BLOCK"
         or e.under_floor
@@ -192,11 +199,29 @@ def test_advisory_mode_exits_0_unless_infra_and_says_what_it_authorises() -> Non
 def test_a_new_code_failure_outranks_drift_and_every_statistical_verdict() -> None:
     # Drift's next step is to re-baseline, which would erase the very failure being reported.
     for e in _every_combination():
-        if e.code_failures and not (e.crashed or e.first_adoption):
+        if e.code_failures and not (e.crashed or e.first_adoption or e.hidden_failures):
             a = decide_action(e)
             assert (a.state, a.verdict) == ("policy_code_check", "fail")
             assert a.exit_code == (1 if e.mode == "enforcing" else 2 if e.infra else 0)
             assert "cassette accept" not in a.next_step
+
+
+def test_a_hidden_code_failure_outranks_everything_but_a_crash_and_first_adoption() -> None:
+    for e in _every_combination():
+        if e.hidden_failures and not (e.crashed or e.first_adoption):
+            a = decide_action(e)
+            assert (a.state, a.verdict) == ("policy_hidden_code_check", "fail")
+            assert a.headline.startswith(
+                "🔴 code check failed (hidden by a re-baseline in this PR)"
+            )
+            assert a.exit_code == (1 if e.mode == "enforcing" else 2 if e.infra else 0)
+
+
+def test_a_hidden_failure_names_any_new_ones_too() -> None:
+    new = CodeFailure("polite", ("run-1/n",), 8)
+    step = decide_action(Evidence(hidden_failures=(FAILURE,), code_failures=(new,))).next_step
+    assert "`tone` passed on the base's cassettes and fails here on 1 of 8 cases" in step
+    assert "`polite` passed on the base and fails here on 1 of 8 cases" in step
 
 
 def test_several_code_failures_are_each_named() -> None:
@@ -345,6 +370,19 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             l2_lines=_kpi_rows(
                 TONE_SHIP, "| 🔴 new failure: tone on 1 of 8 cases: `run-0/respond` |"
             ),
+        ),
+        1,
+        "fail",
+    ),
+    "policy_hidden_code_check": (
+        replace(
+            SHIPPED,
+            gate=GateFindings(
+                "SHIP", 1, hidden_failures=(CodeFailure("tone", ("run-0/respond",), 8),)
+            ),
+            cassettes_edited=True,
+            replay_lines=NO_DRIFT,
+            notes=("⚠️ This PR changes `cassettes`, the expected outputs this gate compares.",),
         ),
         1,
         "fail",

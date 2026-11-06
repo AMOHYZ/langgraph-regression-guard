@@ -104,6 +104,7 @@ class CiResult:
                 first_adoption=self.first_adoption,
                 cassettes_edited=self.cassettes_edited,
                 code_failures=self.gate.code_failures,
+                hidden_failures=self.gate.hidden_failures,
                 inconclusive_blocks=self.inconclusive_blocks,
                 mode=self.mode,
                 approved_by=self.approved_by,

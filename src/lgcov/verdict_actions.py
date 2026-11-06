@@ -40,6 +40,11 @@ _ROWS: dict[str, tuple[str, str]] = {
         "🔴 lgcov: agent failure",
         "Fix the node named below. The run stopped there, so nothing after it was checked.",
     ),
+    "policy_hidden_code_check": (
+        "🔴 code check failed (hidden by a re-baseline in this PR)",
+        "{hidden_failures}. Fix the regression. If the new behaviour is right, change the check on "
+        "the base branch first: this PR can't change what grades it.",
+    ),
     "policy_code_check": (
         "🔴 lgcov: code check failed",
         "{code_failures}. Fix the regression. If a check can legitimately vary between runs, make "
@@ -100,7 +105,14 @@ _ROWS: dict[str, tuple[str, str]] = {
         "Review as usual. lgcov compared the recorded runs; it judged no KPI that can block.",
     ),
 }
-_FINDINGS = ("agent_failure", "policy_code_check", "policy_drift", "block", "policy_floor")
+_FINDINGS = (
+    "agent_failure",
+    "policy_hidden_code_check",
+    "policy_code_check",
+    "policy_drift",
+    "block",
+    "policy_floor",
+)
 _SWITCHABLE = ("not_checked", "abstained", "inconclusive")  # the switch can make these fail
 _INCONCLUSIVE_NOTE = (
     "This check exits 0 because INCONCLUSIVE does not block by default. That is not a pass."
@@ -144,6 +156,7 @@ class GateFindings:
     advisory_drops: tuple[str, ...] = ()  # advisory KPIs whose BLOCK can't act on the PR
     infra: bool = False  # a blocking KPI with no valid judgment on a side
     code_failures: tuple[CodeFailure, ...] = ()
+    hidden_failures: tuple[CodeFailure, ...] = ()  # pass on the base's cassettes, not this PR's
 
 
 def _judge_abstained(s: KpiStats) -> bool:
@@ -189,6 +202,7 @@ class Evidence:
     first_adoption: bool = False  # T154: the base has no policy yet, so this PR's own is used
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
     code_failures: tuple[CodeFailure, ...] = ()  # a policy violation, whatever the test says
+    hidden_failures: tuple[CodeFailure, ...] = ()  # the same, with a re-baseline hiding it
     inconclusive_blocks: bool = False  # the switch: an undecided run fails the check
     mode: Mode = "enforcing"
     approved_by: tuple[str, ...] = ()  # recorded only
@@ -211,6 +225,8 @@ def _finding(e: Evidence) -> str:
     """The row of a real finding about the agent, or ''."""
     if e.crashed:
         return "agent_failure"
+    if e.hidden_failures:
+        return "policy_hidden_code_check"
     if e.code_failures:  # before drift: its next step, re-baselining, would erase the failure
         return "policy_code_check"
     if e.enforced_drift:
@@ -265,14 +281,20 @@ def _details(e: Evidence) -> tuple[str, ...]:
     return (" · ".join(status), *((_ADVISORY_LINE,) if e.mode == "advisory" else ()))
 
 
+def _failed(failures: Sequence[CodeFailure], where: str) -> list[str]:
+    return [
+        f"`{f.kpi}` passed on {where} and fails here on {len(f.cases)} of {f.of} cases "
+        f"({named_cases(f.cases)})"
+        for f in failures
+    ]
+
+
 def decide_action(e: Evidence) -> Action:
     state = _state(e)
+    new = _failed(e.code_failures, "the base")
     fill = {
-        "code_failures": "; ".join(
-            f"`{f.kpi}` passed on the base and fails here on {len(f.cases)} of {f.of} cases "
-            f"({named_cases(f.cases)})"
-            for f in e.code_failures
-        ),
+        "code_failures": "; ".join(new),
+        "hidden_failures": "; ".join([*_failed(e.hidden_failures, "the base's cassettes"), *new]),
         "root": ",".join(e.enforced_drift),
         "not_checked": _code(e.not_checked),
         "abstained": _code(e.abstained),

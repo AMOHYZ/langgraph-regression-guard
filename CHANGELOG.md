@@ -15,6 +15,7 @@
 - `lgcov ci --result-out` binds the result to the commits and the policy, and `lgcov verify-result` checks it before the PR comment; a mismatch posts no verdict and exits 2.
 - Every `lgcov ci` outcome gives one headline, next step and exit code, in `docs/verdict-actions.md`: INCONCLUSIVE shows as "No decision: needs_human", a PR that edits its own cassettes can't SHIP, `verdict` gains `needs_human`, and the Action gains `mode`, `approved-by` and `ci-status`.
 - A code check that passed on the base and fails on the PR blocks, whatever the paired test says, and a run replay stopped early no longer counts as a failed check.
+- A re-baseline in a PR can't hide a code check's new failure: when a PR edits its cassettes, blocking code checks also run against the base's.
 
 ## 0.1.0 (2026-11-02)
 

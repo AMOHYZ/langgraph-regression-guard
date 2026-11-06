@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
@@ -100,6 +100,7 @@ from lgcov.langsmith import (
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
 from lgcov.messages import plain
+from lgcov.normalize import normalize
 from lgcov.review import ReviewDecision, apply_decision
 from lgcov.sampling import (
     KpiStats,
@@ -113,7 +114,7 @@ from lgcov.sampling import (
 from lgcov.slices import Group, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
-from lgcov.verdict_actions import CI_STATUSES, MODES, gate_findings
+from lgcov.verdict_actions import CI_STATUSES, MODES, CodeFailure, gate_findings
 
 # 0 = no change / accepted, 1 = graph/replay changed or named node not drifted,
 # 2 = bad input (missing/unreadable/invalid).
@@ -1006,9 +1007,14 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     )
     groups = _groups(stats, l2[0], cfg, gate)
     findings = gate_findings(stats, groups)
+    base_runs, base_notes = _base_runs(args, cfg) if edited else (list[Cassette](), list[str]())
+    hidden = _hidden_failures(
+        *l2, stats, runs, [steps for _, steps in pairs], base_runs, stopped, cfg.ignore_paths
+    )
     return replace(
         result,
-        gate=replace(findings, infra=findings.infra or bool(llm_code)),
+        gate=replace(findings, infra=findings.infra or bool(llm_code), hidden_failures=hidden),
+        notes=(*result.notes, *base_notes),
         l2_lines=(
             *calibration,
             *([""] if calibration and stats else []),
@@ -1339,6 +1345,60 @@ def _l2_plan(
     return [
         (spec, _l2_cases(spec, base, stopped), _l2_cases(spec, fresh, stopped)) for spec in specs
     ]
+
+
+def _base_runs(args: argparse.Namespace, cfg: Config) -> tuple[list[Cassette], list[str]]:
+    """The runs recorded on the base, and a note if they can't be read. None there: nothing
+    to compare, as when this PR adds the first baseline."""
+    path = Path(_policy_path(args, cfg.cassette_dir)) / "baseline.json"
+    if not path.is_file():
+        return [], []
+    try:
+        return _load_runs(str(path)), []
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        why = _harness_message("baseline.json", exc)
+        return [], [f"⚠️ Could not read the base's cassettes, so they weren't compared: {why}"]
+
+
+def _hidden_failures(
+    specs: list[KPISpec],
+    judges: list[Judge],
+    stats: list[KpiStats],
+    runs: list[Cassette],
+    fresh: list[list[Step]],
+    base_runs: list[Cassette],
+    stopped: Collection[int],
+    ignore_paths: Sequence[str],
+) -> tuple[CodeFailure, ...]:
+    """Blocking code checks that pass on the base's recorded runs and fail on this PR's, though
+    its own cassettes show nothing new: a re-baseline moved what they're compared with. Runs
+    pair by masked input, each used once, since a re-recording can reorder them. A run with no
+    partner, or one replay stopped, isn't compared. Code judges cost no model calls."""
+
+    def key(run: Cassette) -> str:
+        return json.dumps(normalize(run.inputs, ignore_paths), sort_keys=True, default=str)
+
+    waiting: dict[str, list[list[Step]]] = {}
+    for run in base_runs:
+        waiting.setdefault(key(run), []).append(run.steps)
+    paired = [waiting[key(run)].pop(0) if waiting.get(key(run)) else None for run in runs]
+    skipped = {*stopped, *(i for i, steps in enumerate(paired) if steps is None)}
+    recorded = [steps or [] for steps in paired]
+    found = []
+    for spec, judge, s in zip(specs, judges, stats, strict=True):
+        if spec.judge != "code" or not s.blocking:
+            continue
+        there, here = _l2_cases(spec, recorded, skipped), _l2_cases(spec, fresh, skipped)
+        hidden = tuple(
+            case
+            for case in here
+            if case not in s.new_failures
+            and judge_samples(judge, *there[case], 1)[0].passed is True
+            and judge_samples(judge, *here[case], 1)[0].passed is False
+        )
+        if hidden:
+            found.append(CodeFailure(s.kpi, hidden, len(here)))
+    return tuple(found)
 
 
 def _l2_calls(plan: list[tuple[KPISpec, _Cases, _Cases]], k: int) -> tuple[int, int]:

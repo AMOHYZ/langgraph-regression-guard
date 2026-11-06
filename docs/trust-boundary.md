@@ -51,9 +51,11 @@ Two cases work differently:
    the report itself. `test_the_known_limit_a_forger_who_recomputes_every_field_passes` pins this.
    Only T179 closes it, by computing the result in a job the PR's code never runs in.
 3. **Cassettes.** A PR's edits to `cassette_dir` are still honoured, or `lgcov cassette accept`
-   could never pass in its own PR. So re-baselining still exits 0. It can't pass unnoticed: the
+   could never pass in its own PR. So a clean re-baseline still exits 0. It can't pass unnoticed: the
    report flags it (`CiResult.cassettes_edited`), and it can't read as a SHIP, because its
-   headline is "No decision: needs_human".
+   headline is "No decision: needs_human". A blocking code check that passes on the base's
+   cassettes and fails on the PR exits 1 all the same. Other KPIs get no such comparison, and a
+   run the PR removes has nothing to compare against.
 4. **Secrets in the job.** The README's `JEV_API_KEY` and `LANGSMITH_API_KEY` go in the job that
    runs the PR's code, which can read them. Until T179, only put them there if PR authors are
    trusted: no fork PRs, no outside contributors. A changed node that calls a model needs its key
