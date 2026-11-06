@@ -12,6 +12,7 @@ from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from lgcov.cli import main
 from lgcov.judges import KPI, NodeState, Verdict
+from lgcov.slices import Group
 
 
 def test_cli_prints_added_and_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -736,14 +737,46 @@ def test_cli_ci_reports_an_earlier_install_failure(
     assert "uv sync --locked failed" in report
 
 
-def test_cli_ci_fail_on_never_passes_but_still_shows_drift(
+def test_cli_ci_fail_on_never_exits_0_but_asks_a_human_about_the_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     demo = DEMO_GRAPH.read_text(encoding="utf-8")
     _ci_project(tmp_path, monkeypatch, demo.replace("a concise", "a friendly"))
     code, report, outputs = _run_ci(tmp_path, "--fail-on", "never")
-    assert (code, outputs["verdict"], outputs["root-drift-count"]) == (0, "pass", "1")
+    assert (code, outputs["verdict"], outputs["root-drift-count"]) == (0, "needs_human", "1")
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ No decision: needs_human\n")  # T153
     assert "| `respond` | root | 2/2 |" in report
+
+
+def test_cli_ci_advisory_mode_reports_drift_and_says_it_does_not_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace("a concise", "a friendly"))
+    code, report, outputs = _run_ci(tmp_path, "--mode", "advisory")
+    assert (code, outputs["verdict"], outputs["exit-code"]) == (0, "fail", "0")
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: drift (advisory, not blocking)\n")
+    assert "It does not block this merge and it does not approve this PR." in report
+    assert "`lgcov cassette accept --nodes respond`" in report  # the real node, ready to run
+
+
+def test_cli_ci_an_infra_error_stays_exit_2_in_advisory_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    code, report, outputs = _run_ci(tmp_path, "--mode", "advisory", "--harness-error", "boom")
+    assert (code, outputs["verdict"]) == (2, "error")
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: harness error, not a regression")
+    assert "⚠️ Harness error, not a regression: lgcov could not finish" in report
+
+
+def test_cli_ci_rejects_an_unknown_mode_or_ci_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    for bad in (("--mode", "shadow"), ("--ci-status", "green")):
+        with pytest.raises(SystemExit):
+            _run_ci(tmp_path, *bad)
 
 
 def test_cli_ci_serves_unchanged_nodes_unless_live(
@@ -1034,15 +1067,279 @@ def test_cli_ci_gates_kpis_and_fails_on_inconclusive_only_when_asked(
     (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
     _bands(tmp_path / "calibration" / "bands.json", answer_states_order_status="blocking")
     code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
-    assert (code, outputs["verdict"]) == (0, "pass")
-    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: inconclusive, needs a human")
+    assert (code, outputs["verdict"]) == (0, "needs_human")
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ No decision: needs_human\n")
+    assert "That is not a pass." in report and "verdict: **needs_human**" in report  # T153
+    assert "Statistical verdict: INCONCLUSIVE" in report
     assert "| answer_states_order_status | 2 | 100% | 50% |" in report
     assert "| ⚠️ underpowered: need 6 more cases for answer_states_order_status" in report
     code, report, outputs = _run_ci(
         tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on-inconclusive"
     )
+    assert (code, outputs["verdict"]) == (1, "needs_human")  # T153: fails the check, finds nothing
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ No decision: needs_human\n")
+    assert "that is not a finding against the agent" in report
+
+
+def test_cli_ci_records_approval_and_other_ci_without_changing_the_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    _bands(tmp_path / "calibration" / "bands.json", answer_states_order_status="blocking")
+    taxonomy = ("--taxonomy", "taxonomy.yaml")
+    code, plain, outputs = _run_ci(tmp_path, *taxonomy)
+    told = ("--approved-by", "alice, bob", "--ci-status", "failure")
+    told_code, report, told_outputs = _run_ci(tmp_path, *taxonomy, *told)
+    assert (told_code, told_outputs["verdict"]) == (code, outputs["verdict"]) == (0, "needs_human")
+    assert report.splitlines()[1] == plain.splitlines()[1]  # the headline
+    assert (
+        "Statistical verdict: INCONCLUSIVE · Human approval: `alice`, `bob` (recorded; it does "
+        "not change the verdict) · Other CI: failure"
+    ) in report
+    assert "Fix the failing CI first. `alice`, `bob` approved, so the merge is their" in report
+
+
+def test_cli_ci_inconclusive_blocks_in_lgcov_yaml_fails_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    _bands(tmp_path / "calibration" / "bands.json", answer_states_order_status="blocking")
+    (tmp_path / "lgcov.yaml").write_text("gate:\n  inconclusive_blocks: true\n", encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    assert (code, outputs["verdict"]) == (1, "needs_human")
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ No decision: needs_human\n")
+
+
+# T153: a code judge, identical on both sides, with a margin wide enough for 4 cases to SHIP.
+SHIPPING_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: respond_drift
+    description: The respond node stops answering.
+kpis:
+  - name: respond_runs
+    failure_mode: respond_drift
+    node: respond
+    judge: code
+    margin: 0.95
+    description: Every run ends by responding.
+    rubric: Did the run visit respond?
+    check: {type: node_visited, node: respond}
+"""
+
+
+def _ship_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The demo with its 2 runs recorded twice over: 4 cases, enough for SHIPPING_TAXONOMY."""
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(SHIPPING_TAXONOMY, encoding="utf-8")
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    doc = json.loads(baseline.read_text(encoding="utf-8"))
+    baseline.write_text(json.dumps({"runs": doc["runs"] * 2}), encoding="utf-8")
+
+
+def test_cli_ci_a_ship_says_what_it_covers_and_a_served_only_one_says_nothing_ran(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ship_project(tmp_path, monkeypatch)
+    taxonomy = ("--taxonomy", "taxonomy.yaml")
+    code, report, outputs = _run_ci(tmp_path, *taxonomy)
+    assert (code, outputs["verdict"]) == (0, "pass")
+    assert report.startswith(
+        "<!-- lgcov-report -->\n## 🟢 lgcov: every node served, nothing re-ran\n"
+    )
+    assert "Statistical verdict: SHIP" in report and "(0 live / " in report
+    code, report, outputs = _run_ci(tmp_path, *taxonomy, "--live")
+    assert (code, outputs["verdict"]) == (0, "pass")
+    assert report.startswith("<!-- lgcov-report -->\n## 🟢 lgcov: SHIP (1 blocking KPI)\n")
+
+
+def test_cli_ci_a_blocking_group_that_does_not_ship_is_no_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A few cases can't pool into a real one; tests/test_verdict_actions.py builds that from 120.
+    _ship_project(tmp_path, monkeypatch)
+    undecided = Group("respond", "", ("respond_runs",), True, None, 0.05, None, None, "needs_human")
+    taxonomy = ("--taxonomy", "taxonomy.yaml")
+    assert _run_ci(tmp_path, *taxonomy)[2]["verdict"] == "pass"  # the KPI SHIPs on its own
+    monkeypatch.setattr("lgcov.cli._groups", lambda *_: [undecided])
+    code, report, outputs = _run_ci(tmp_path, *taxonomy)
+    assert (code, outputs["verdict"]) == (0, "needs_human")
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ No decision: needs_human\n")
+    assert "Statistical verdict: INCONCLUSIVE" in report
+    code, _, outputs = _run_ci(tmp_path, *taxonomy, "--fail-on-inconclusive")
+    assert (code, outputs["verdict"]) == (1, "needs_human")
+
+
+ORDER_LOOKUP_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: skips_the_lookup
+    description: An order question no longer reaches the order lookup.
+kpis:
+  - name: order_lookup_runs
+    failure_mode: skips_the_lookup
+    node: lookup_order
+    judge: code
+    description: Every run looks up the order.
+    rubric: Did the run visit lookup_order?
+    check: {type: node_visited, node: lookup_order}
+"""
+
+
+def _order_lookup_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, questions: list[str]
+) -> None:
+    """The demo with these questions really recorded, gated on a code check."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "graph.py").write_text(DEMO_GRAPH.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "taxonomy.yaml").write_text(ORDER_LOOKUP_TAXONOMY, encoding="utf-8")
+    (tmp_path / "lgcov.yaml").write_text(
+        "graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n", encoding="utf-8"
+    )
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text(json.dumps([{"question": q} for q in questions]), encoding="utf-8")
+    assert main(["record", "--inputs", str(inputs)]) == 0
+
+
+def _skipping_the_lookup_for(marker: str) -> str:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    src = demo.replace(
+        'return {"needs_tool": "order" in state["question"].lower()}',
+        'q = state["question"].lower()\n'
+        f'    return {{"needs_tool": "order" in q and {marker!r} not in q}}',
+    )
+    assert src != demo
+    return src
+
+
+def test_cli_ci_one_new_code_failure_in_200_blocks_though_the_test_says_ship(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    questions = [f"Where is my order {i}?" for i in range(199)] + ["Where is my order 999?"]
+    _order_lookup_project(tmp_path, monkeypatch, questions)
+    (tmp_path / "graph.py").write_text(_skipping_the_lookup_for("999"), encoding="utf-8")
+    never = ("--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    code, report, outputs = _run_ci(tmp_path, *never)
     assert (code, outputs["verdict"]) == (1, "fail")
-    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: inconclusive")
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: code check failed\n")
+    assert (
+        "`order_lookup_runs` passed on the base and fails here on 1 of 200 cases "
+        "(`run-199/lookup_order`)."
+    ) in report
+    assert "Statistical verdict: SHIP" in report  # what the test says stays as it was
+    assert "| 🔴 new failure: order_lookup_runs on 1 of 200 cases" in report
+    code, report, outputs = _run_ci(tmp_path, *never, "--mode", "advisory")
+    assert (code, outputs["verdict"]) == (0, "fail")
+    assert "## 🔴 lgcov: code check failed (advisory, not blocking)\n" in report
+
+
+def test_cli_ci_a_new_code_failure_is_named_over_the_drift_it_comes_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    questions = ["Where is my order 1?", "Where is my order 999?"]
+    _order_lookup_project(tmp_path, monkeypatch, questions)
+    (tmp_path / "graph.py").write_text(_skipping_the_lookup_for("999"), encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    assert code == 1
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: code check failed\n")
+    assert "`lgcov cassette accept" not in report  # that would erase the failure
+
+
+def test_cli_ci_a_code_check_in_advisory_kpis_reports_the_drop_and_does_not_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    questions = ["Where is my order 1?", "Where is my order 999?"]
+    _order_lookup_project(tmp_path, monkeypatch, questions)
+    (tmp_path / "graph.py").write_text(_skipping_the_lookup_for("999"), encoding="utf-8")
+    (tmp_path / "lgcov.yaml").write_text(
+        "graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n"
+        "gate: {advisory_kpis: [order_lookup_runs]}\n",
+        encoding="utf-8",
+    )
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert (code, outputs["verdict"]) == (0, "needs_human")
+    assert "code check failed" not in report
+    assert "| ⚠️ new failure: order_lookup_runs on 1 of 2 cases" in report  # still reported
+
+
+def test_cli_ci_a_check_that_already_failed_on_the_base_is_not_a_new_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _order_lookup_project(tmp_path, monkeypatch, ["Where is my order?", "What are your hours?"])
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--live")
+    assert (code, outputs["verdict"]) == (0, "needs_human")  # 2 cases can't SHIP
+    assert "code check failed" not in report and "new failure" not in report
+
+
+@pytest.mark.parametrize(
+    "stop",
+    [("--on-divergence", "fail"), ("--budget-seconds", "0")],
+    ids=["on-divergence fail", "a budget hit"],
+)
+def test_cli_ci_a_run_replay_stopped_early_is_not_a_failed_code_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: tuple[str, str]
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    (tmp_path / "taxonomy.yaml").write_text(SHIPPING_TAXONOMY, encoding="utf-8")
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    doc = json.loads(baseline.read_text(encoding="utf-8"))
+    baseline.write_text(
+        json.dumps({"runs": doc["runs"] * 4}), encoding="utf-8"
+    )  # 8: enough to BLOCK
+    code, report, outputs = _run_ci(
+        tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never", *stop
+    )
+    assert (code, outputs["verdict"]) == (0, "needs_human")
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ No decision: needs_human\n")
+    assert "lgcov did not check them." in report
+    assert "KPI regression" not in report and "code check failed" not in report
+
+
+def test_cli_ci_a_run_replay_stopped_early_is_no_case_for_a_final_kpi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    taxonomy = UNDECIDED_TAXONOMY.replace("node: respond", "node: final")
+    assert taxonomy != UNDECIDED_TAXONOMY
+    (tmp_path / "taxonomy.yaml").write_text(taxonomy, encoding="utf-8")
+    _bands(tmp_path / "calibration" / "bands.json", answer_states_order_status="blocking")
+    args = ("--taxonomy", "taxonomy.yaml", "--fail-on", "never", "--on-divergence", "fail")
+    _, report, _ = _run_ci(tmp_path, *args)
+    assert "| answer_states_order_status | 0 |" in report  # its last step isn't the final one
+    _, report, _ = _run_ci(tmp_path, *args, "--max-calls", "0")
+    assert "refusing to make" not in report  # nor is its base side judged: no wasted model call
+
+
+def test_cli_ci_a_run_replay_stopped_early_keeps_its_case_for_a_node_that_ran(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    taxonomy = UNDECIDED_TAXONOMY.replace("node: respond", "node: classify")
+    assert taxonomy != UNDECIDED_TAXONOMY
+    (tmp_path / "taxonomy.yaml").write_text(taxonomy, encoding="utf-8")
+    _bands(tmp_path / "calibration" / "bands.json", answer_states_order_status="blocking")
+    args = ("--taxonomy", "taxonomy.yaml", "--fail-on", "never", "--on-divergence", "fail")
+    _, report, _ = _run_ci(tmp_path, *args)
+    assert "Not checked (on-divergence: fail)" in report
+    assert "| answer_states_order_status | 2 |" in report  # classify ran before the stop
+
+
+def test_cli_judge_exits_1_on_a_new_code_failure_and_says_which(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    taxonomy = tmp_path / "taxonomy.yaml"
+    taxonomy.write_text(ORDER_LOOKUP_TAXONOMY, encoding="utf-8")
+    graph = tmp_path / "graph.py"
+    graph.write_text(_skipping_the_lookup_for("order"), encoding="utf-8")  # never looks it up
+    args = [*_judge_args(tmp_path), "--taxonomy", str(taxonomy), "--graph", f"{graph}:graph"]
+    assert main(args) == 1
+    assert "| 🔴 new failure: order_lookup_runs on 1 of 2 cases: `run-0/lookup_order` |" in (
+        capsys.readouterr().out
+    )
 
 
 def test_cli_ci_refuses_more_model_judge_calls_than_max_calls(
@@ -1053,6 +1350,44 @@ def test_cli_ci_refuses_more_model_judge_calls_than_max_calls(
     code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--max-calls", "3")
     assert code == 2  # 4 model judge calls planned: a harness limit, not a regression
     assert "refusing to make 4 model judge calls" in report
+
+
+def test_cli_ci_a_finding_stands_when_the_kpi_gate_then_cannot_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace("a concise", "a friendly"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    args = ("--taxonomy", "taxonomy.yaml", "--max-calls", "3")  # the gate refuses to start
+    code, report, outputs = _run_ci(tmp_path, *args)
+    assert (code, outputs["verdict"]) == (1, "fail")  # the drift replay found, not the harness
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: drift\n")
+    assert "What it found before that stands; anything after it was not checked." in report
+    assert "this PR was not checked" not in report  # T153: replay did check it
+    assert "refusing to make 4 model judge calls" in report
+    code, _, outputs = _run_ci(tmp_path, *args, "--mode", "advisory")
+    assert (code, outputs["verdict"]) == (2, "fail")  # only the infra failure is left to report
+
+
+def test_cli_ci_inconclusive_with_an_infra_error_exits_2_even_with_the_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    args = (
+        "--taxonomy",
+        "taxonomy.yaml",
+        "--max-calls",  # the gate refuses to start, after replay left nodes not checked
+        "1",
+        "--on-divergence",
+        "fail",
+        "--fail-on",
+        "never",
+        "--fail-on-inconclusive",
+    )
+    code, report, outputs = _run_ci(tmp_path, *args)
+    assert (code, outputs["verdict"]) == (2, "error")  # T153: was 1, an infra error called a fail
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: harness error, not a regression")
 
 
 # T089: classify rewrites the question (the demo's classify has no prompt), so the nodes
@@ -1172,8 +1507,9 @@ def test_cli_ci_divergence_fail_leaves_the_rest_of_the_run_not_checked(
     _ci_project(tmp_path, monkeypatch, _rewriting_classify())
     args = ("--on-divergence", "fail", "--fail-on", "never")
     code, report, outputs = _run_ci(tmp_path, *args)
-    assert (code, outputs["verdict"]) == (0, "pass")  # INCONCLUSIVE exits 0 by default
-    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ lgcov: inconclusive, needs a human")
+    assert (code, outputs["verdict"]) == (0, "needs_human")  # INCONCLUSIVE exits 0 by default
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ No decision: needs_human\n")
+    assert "or review `lookup_order`, `respond` yourself: lgcov did not check them." in report
     assert (
         "Not checked (on-divergence: fail): run 1 from `lookup_order` (`lookup_order`, "
         "`respond`), run 2 from `respond` (`respond`)."

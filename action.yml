@@ -34,7 +34,7 @@ inputs:
     required: false
     default: "false"
   fail-on-inconclusive:
-    description: "true: an INCONCLUSIVE blocking KPI exits 1 (default false: 0, shown as ⚠️). Never 2."
+    description: "true: an INCONCLUSIVE blocking KPI exits 1 (default false: 0, shown as 'No decision: needs_human'). An infra error in the same run still exits 2."
     required: false
     default: "false"
   on-divergence:
@@ -49,6 +49,18 @@ inputs:
     description: "pr (serve unchanged nodes, k = 1, 90 s) or nightly (every node live, every judge, k = 3). Empty: tier from lgcov.yaml, else pr."
     required: false
     default: ""
+  mode:
+    description: "enforcing (default) or advisory. Advisory: lgcov reports what it found, it neither blocks the merge nor approves the PR, and only a harness error fails this check."
+    required: false
+    default: enforcing
+  approved-by:
+    description: "Who approved this PR, comma-separated; your workflow fills this in. Recorded in the comment; it changes no verdict or exit code."
+    required: false
+    default: ""
+  ci-status:
+    description: "The result of your other CI jobs, as needs.<job>.result gives it: success, failure, cancelled or skipped. Shown in the comment; it changes no verdict or exit code."
+    required: false
+    default: ""
 
 outputs:
   report-path:
@@ -61,7 +73,7 @@ outputs:
     description: "Nodes that drifted only after an earlier node in the same run."
     value: ${{ steps.lgcov.outputs.propagated-drift-count }}
   verdict:
-    description: "pass | fail | error (error: harness error, not a regression) | advisory (first adoption PR: nothing enforced yet)."
+    description: "pass | fail | needs_human | error | advisory (needs_human: no decision, a human decides; error: harness error, not a regression; advisory: first adoption PR, nothing enforced yet). See docs/verdict-actions.md."
     value: ${{ steps.verify.outputs.verdict || steps.lgcov.outputs.verdict }}
 
 runs:
@@ -76,6 +88,8 @@ runs:
         ON_DIVERGENCE: ${{ inputs.on-divergence }}
         BUDGET_SECONDS: ${{ inputs.budget-seconds }}
         TIER: ${{ inputs.tier }}
+        MODE: ${{ inputs.mode }}
+        CI_STATUS: ${{ inputs.ci-status }}
       run: |
         case "$FAIL_ON" in
           root-drift|any-drift|never) ;;
@@ -109,6 +123,20 @@ runs:
           ""|pr|nightly) ;;
           *)
             echo "::error title=lgcov::tier must be pr or nightly, or empty; got '$TIER'"
+            exit 2
+            ;;
+        esac
+        case "$MODE" in
+          enforcing|advisory) ;;
+          *)
+            echo "::error title=lgcov::mode must be one of enforcing, advisory; got '$MODE'"
+            exit 2
+            ;;
+        esac
+        case "$CI_STATUS" in
+          ""|success|failure|cancelled|skipped) ;;
+          *)
+            echo "::error title=lgcov::ci-status must be one of success, failure, cancelled, skipped, or empty; got '$CI_STATUS'"
             exit 2
             ;;
         esac
@@ -246,6 +274,9 @@ runs:
         TIER: ${{ inputs.tier }}
         NIGHTLY_URL: ${{ steps.nightly.outputs.url }}
         COVERAGE_BASELINE: ${{ steps.coverage-main.outputs.path }}
+        MODE: ${{ inputs.mode }}
+        APPROVED_BY: ${{ inputs.approved-by }}
+        CI_STATUS: ${{ inputs.ci-status }}
       run: |
         # Actions runs bash with -e; this step checks exit codes itself.
         set +e -uo pipefail
@@ -268,6 +299,9 @@ runs:
         [ -n "$BUDGET_SECONDS" ] && args+=(--budget-seconds "$BUDGET_SECONDS")
         [ -n "$TIER" ] && args+=(--tier "$TIER")
         [ -n "$NIGHTLY_URL" ] && args+=(--nightly-url "$NIGHTLY_URL")
+        args+=(--mode "$MODE")
+        [ -n "$APPROVED_BY" ] && args+=(--approved-by "$APPROVED_BY")
+        [ -n "$CI_STATUS" ] && args+=(--ci-status "$CI_STATUS")
         if [ -n "$HARNESS_ERROR" ]; then
           # The run can't go ahead; lgcov alone is enough to render the harness report.
           uvx --from "$ACTION_PATH" lgcov "${args[@]}" --harness-error "$HARNESS_ERROR"
@@ -389,4 +423,8 @@ runs:
         FAIL_ON: ${{ inputs.fail-on }}
       run: |
         echo "lgcov: verdict $VERDICT (fail-on: $FAIL_ON), exit ${CODE:-2}"
+        # T153: an exit 0 shows a green tick, and a composite Action can't show a neutral one.
+        if [ "$VERDICT" = "needs_human" ]; then
+          echo "::warning title=lgcov::No decision: needs_human. lgcov makes no claim about this PR, whatever this check shows; see the PR comment."
+        fi
         exit "${CODE:-2}"

@@ -131,10 +131,10 @@ REPORT_MD, RESULT_JSON, OUTPUTS = (
 )
 
 
-def _ci() -> int:
+def _ci(*extra: str) -> int:
     """`lgcov ci` as the Action runs it. Neither checkout is a git repo here, so base is ''."""
     args = ["ci", "--report", str(REPORT_MD), "--result-out", str(RESULT_JSON)]
-    return main([*args, "--base-dir", "../base", "--policy-dir", "../base"])
+    return main([*args, "--base-dir", "../base", "--policy-dir", "../base", *extra])
 
 
 def _verify_cmd(base_sha: str = "", head_sha: str = HEAD_SHA) -> tuple[int, dict[str, str]]:
@@ -168,6 +168,25 @@ def test_a_failing_result_verifies_and_keeps_its_exit_code(pr: Path) -> None:
     assert _ci() == 1
     code, outputs = _verify_cmd()
     assert (code, outputs) == (1, {"exit-code": "1", "verdict": "fail"})
+
+
+@pytest.mark.parametrize(
+    ("extra", "code", "verdict"),
+    [
+        (("--mode", "advisory"), 0, "fail"),  # a would-be block that blocks nothing
+        (("--fail-on", "never"), 0, "needs_human"),  # drift nothing enforces
+        ((), 1, "fail"),
+    ],
+    ids=["advisory mode", "fail-on never", "enforcing"],
+)
+def test_the_verified_result_says_what_the_comment_says(
+    pr: Path, extra: tuple[str, ...], code: int, verdict: str
+) -> None:
+    # T153: these values become the job's real exit code and `verdict` output.
+    _write(pr, {"graph.py": GRAPH.replace("a concise", "a friendly")})
+    assert _ci(*extra) == code
+    assert _verify_cmd() == (code, {"exit-code": str(code), "verdict": verdict})
+    assert f"verdict: **{verdict}**" in REPORT_MD.read_text(encoding="utf-8")
 
 
 def test_a_result_edited_to_pass_gives_no_verdict(pr: Path) -> None:
