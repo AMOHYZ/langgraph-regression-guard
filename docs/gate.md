@@ -24,8 +24,11 @@ or slice group never goes further than its KPIs' own verdicts.
   63% of PRs with 100 live runs if it varies 1% of the time. List such a check in
   `gate.advisory_kpis`, and it reports the drop instead.
   - A case that also failed on the base isn't new, and a run replay stopped early isn't scored.
-  - A PR that re-baselines its own cassettes moves the base, so nothing it does there is new. Its
-    comment says no decision instead.
+  - A PR that edits its own cassettes moves what they're compared with, so blocking code checks
+    also run against the runs recorded on the base, paired by input. One that passes there and
+    fails on the PR exits 1, named as hidden by the re-baseline. Otherwise the comment says no
+    decision and it exits 0, so an intended change can land. A run the PR removes from its
+    cassettes has nothing to compare against, so check that diff.
   - `tool_called` and `tool_not_called` can't fire this way yet: `lgcov ci` doesn't pass them the
     run's tools, so the first always fails and the second always passes.
 - **The 2.5%** is at the default α = 0.05. With no discordant pair, SHIP reads the no-drop

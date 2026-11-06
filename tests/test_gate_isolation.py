@@ -65,13 +65,15 @@ def pr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path / "pr"
 
 
-def _ci(*extra: str, policy: bool = True, taxonomy: bool = True) -> tuple[int, str, dict[str, str]]:
+def _ci(
+    *extra: str, policy: bool = True, taxonomy: bool = True, switch: bool = True
+) -> tuple[int, str, dict[str, str]]:
     """`lgcov ci` as the Action runs it on a PR; policy=False: as it did before T154."""
     report, outputs = Path("../out/report.md"), Path("../out/outputs.txt")
     report.parent.mkdir(exist_ok=True)
     outputs.write_text("", encoding="utf-8")
     args = ["ci", "--report", str(report), "--github-output", str(outputs)]
-    args += ["--base-dir", "../base", "--fail-on-inconclusive"]
+    args += ["--base-dir", "../base", *(["--fail-on-inconclusive"] if switch else [])]
     args += ["--policy-dir", "../base"] if policy else []
     args += ["--taxonomy", "taxonomy.yaml"] if taxonomy else []
     code = main([*args, *extra])
@@ -252,3 +254,226 @@ def test_a_broken_lgcov_yaml_on_the_base_says_a_fix_applies_after_it_merges(
     code, report, _ = _ci()
     assert code == 2
     assert "read from the base commit, so this PR's edits apply after it merges" in report
+
+
+# A re-baseline moves what a PR's code checks are compared with, so they also run against the
+# base's recorded runs. 4 cases at this margin: identical sides SHIP.
+CODE_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: skips_the_lookup
+    description: An order question no longer reaches the order lookup.
+kpis:
+  - name: lookup_runs
+    failure_mode: skips_the_lookup
+    node: lookup_order
+    judge: code
+    margin: 0.95
+    description: Order questions look the order up.
+    rubric: Did the run visit lookup_order?
+    check: {type: node_visited, node: lookup_order}
+"""
+CLASSIFY = 'return {"needs_tool": "order" in state["question"].lower()}'
+SKIPS_THE_LOOKUP = DEMO_GRAPH.replace(CLASSIFY, 'return {"needs_tool": False}')
+REWRITES_THE_QUESTION = DEMO_GRAPH.replace(
+    CLASSIFY,
+    'return {"question": state["question"].lower(), '
+    '"needs_tool": "order" in state["question"].lower()}',
+)
+HIDDEN = "## 🔴 code check failed (hidden by a re-baseline in this PR)"
+NO_DECISION = "## ⚠️ No decision: needs_human"
+
+
+@pytest.fixture
+def gated(pr: Path, tmp_path: Path) -> Path:
+    """Both checkouts gate on the code check: run 0 and 2 pass it, and 1 and 3 never can."""
+    files = {
+        "taxonomy.yaml": CODE_TAXONOMY,
+        "cassettes/baseline.json": json.dumps({"runs": json.loads(BASELINE)["runs"] * 2}),
+        "calibration/bands.json": json.dumps({"version": 1, "jev_model": None, "judges": {}}),
+    }
+    _write(tmp_path / "base", files)
+    _write(pr, files)
+    return pr
+
+
+def _re_record(reverse: bool = False) -> None:
+    runs = json.loads(Path("cassettes/baseline.json").read_text(encoding="utf-8"))["runs"]
+    inputs = [r["inputs"] for r in (runs[::-1] if reverse else runs)]
+    Path("../inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
+    assert main(["record", "--inputs", "../inputs.json"]) == 0
+
+
+def _edit_cassettes_without_re_baselining() -> None:
+    path = Path("cassettes/baseline.json")
+    path.write_text(json.dumps(json.loads(path.read_text(encoding="utf-8")), indent=1), "utf-8")
+
+
+def test_a_re_baseline_cannot_hide_a_code_check_that_now_fails(gated: Path) -> None:
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _re_record()
+    code, report, outputs = _ci()
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert report.splitlines()[1] == HIDDEN
+    assert (
+        "`lookup_runs` passed on the base's cassettes and fails here on 2 of 4 cases "
+        "(`run-0/lookup_order`, `run-2/lookup_order`)."
+    ) in report
+    assert "Statistical verdict: SHIP" in report  # the PR's cassettes say nothing changed
+    assert "⚠️ This PR changes `cassettes`" in report
+
+
+def test_a_clean_re_baseline_is_no_decision_and_can_land(gated: Path) -> None:
+    # README's Quickstart, step 5: the change is intended, so re-baseline that node.
+    _write(gated, {"graph.py": DRIFTED_GRAPH})
+    assert main(["cassette", "accept", "--nodes", "respond"]) == 0
+    for switch in (False, True):
+        code, report, outputs = _ci(switch=switch)
+        assert (code, outputs["verdict"]) == (0, "needs_human")
+        assert report.splitlines()[1] == NO_DECISION
+        assert "Read the cassette diff and decide" in report
+        assert "code check failed" not in report
+
+
+def test_runs_pair_by_input_so_a_re_recording_in_another_order_is_still_compared(
+    gated: Path,
+) -> None:
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _re_record(reverse=True)  # the order questions are now runs 1 and 3
+    _, report, _ = _ci()
+    assert report.splitlines()[1] == HIDDEN
+    assert "(`run-1/lookup_order`, `run-3/lookup_order`)" in report
+
+
+def test_a_check_that_also_failed_on_the_base_s_cassettes_is_not_hidden(gated: Path) -> None:
+    _write(gated, {"graph.py": DRIFTED_GRAPH})
+    _re_record()  # runs 1 and 3 never look the order up, on either side
+    code, report, _ = _ci(switch=False)
+    assert code == 0
+    assert report.splitlines()[1] == NO_DECISION
+
+
+def test_a_new_failure_the_pr_s_cassettes_still_show_is_not_called_hidden(gated: Path) -> None:
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _edit_cassettes_without_re_baselining()
+    code, report, _ = _ci("--fail-on", "never")
+    assert code == 1
+    assert report.splitlines()[1] == "## 🔴 lgcov: code check failed"
+    assert "hidden" not in report
+
+
+def test_advisory_mode_reports_a_hidden_failure_and_exits_0(gated: Path) -> None:
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _re_record()
+    code, report, outputs = _ci("--mode", "advisory")
+    assert (code, outputs["verdict"]) == (0, "fail")
+    assert report.splitlines()[1] == f"{HIDDEN} (advisory, not blocking)"
+
+
+def test_a_code_check_in_the_base_s_advisory_kpis_is_not_a_hidden_failure(
+    gated: Path, tmp_path: Path
+) -> None:
+    _write(tmp_path / "base", {"lgcov.yaml": CONFIG + "gate: {advisory_kpis: [lookup_runs]}\n"})
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _re_record()
+    code, report, _ = _ci()
+    assert code == 0
+    assert report.splitlines()[1] == NO_DECISION
+
+
+def test_the_first_adoption_pr_exits_0_with_nothing_to_compare(gated: Path, tmp_path: Path) -> None:
+    for name in CHECKOUT:
+        (tmp_path / "base" / name).unlink()
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _re_record()
+    code, report, outputs = _ci()
+    assert (code, outputs["verdict"]) == (0, "advisory")
+    assert report.splitlines()[1] == f"## ⚠️ {BOOTSTRAP_HEADLINE}"
+
+
+def test_a_stopped_run_is_not_compared_and_follows_the_switch(gated: Path) -> None:
+    # Its trace is cut off, so against the base's cassettes the check would read as newly failed.
+    _write(gated, {"graph.py": REWRITES_THE_QUESTION})
+    _edit_cassettes_without_re_baselining()
+    args = ("--fail-on", "never", "--on-divergence", "fail")
+    code, report, outputs = _ci(*args, switch=False)
+    assert (code, outputs["verdict"]) == (0, "needs_human")
+    assert report.splitlines()[1] == NO_DECISION
+    assert "lgcov did not check them." in report
+    code, report, outputs = _ci(*args, switch=True)
+    assert (code, outputs["verdict"]) == (1, "needs_human")
+    assert "code check failed" not in report
+
+
+def test_a_base_with_no_baseline_has_nothing_to_compare(gated: Path, tmp_path: Path) -> None:
+    (tmp_path / "base" / "cassettes" / "baseline.json").unlink()
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _re_record()
+    code, report, _ = _ci(switch=False)
+    assert code == 0
+    assert report.splitlines()[1] == NO_DECISION
+    assert "Could not read" not in report
+
+
+def test_a_base_baseline_that_cannot_be_read_says_so(gated: Path, tmp_path: Path) -> None:
+    _write(tmp_path / "base", {"cassettes/baseline.json": "not json"})
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    _re_record()
+    code, report, _ = _ci(switch=False)
+    assert code == 0
+    assert report.splitlines()[1] == NO_DECISION
+    assert "⚠️ Could not read the base's cassettes, so they weren't compared" in report
+
+
+def test_a_run_the_pr_removed_has_nothing_to_compare(gated: Path) -> None:
+    # A known limit: the row still says to read the cassette diff, but this doesn't block.
+    _write(gated, {"graph.py": SKIPS_THE_LOOKUP})
+    path = Path("cassettes/baseline.json")
+    runs = json.loads(path.read_text(encoding="utf-8"))["runs"]
+    path.write_text(
+        json.dumps({"runs": [r for r in runs if "order" not in str(r["inputs"])]}), "utf-8"
+    )
+    code, report, _ = _ci("--fail-on", "never", switch=False)
+    assert code == 0
+    assert report.splitlines()[1] == NO_DECISION
+    assert "Read the KPI table" in report or "Read the cassette diff" in report
+
+
+def test_a_run_the_pr_added_has_nothing_to_compare(gated: Path, tmp_path: Path) -> None:
+    # With no base run to pair it with, an empty trace mustn't read as a pass on the base.
+    never = CODE_TAXONOMY.replace("type: node_visited", "type: node_not_visited")
+    runs = json.loads(BASELINE)["runs"]
+    hours = [r for r in runs if "order" not in str(r["inputs"])] * 4
+    files = {"taxonomy.yaml": never, "cassettes/baseline.json": json.dumps({"runs": hours})}
+    _write(tmp_path / "base", files)
+    _write(gated, files)
+    inputs = [r["inputs"] for r in hours] + [next(r for r in runs if r not in hours)["inputs"]]
+    Path("../inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
+    assert main(["record", "--inputs", "../inputs.json"]) == 0
+    code, report, _ = _ci(switch=False)
+    assert code == 0
+    assert report.splitlines()[1] == NO_DECISION
+
+
+def test_runs_with_the_same_input_each_pair_with_their_own_base_run(
+    gated: Path, tmp_path: Path
+) -> None:
+    runs = json.loads(BASELINE)["runs"]
+    order = next(r for r in runs if "order" in str(r["inputs"]))
+    varied = {**order, "steps": [s for s in order["steps"] if s["node"] != "lookup_order"]}
+    files = {"cassettes/baseline.json": json.dumps({"runs": [order, varied] * 2})}
+    _write(tmp_path / "base", files)
+    _write(gated, {**files, "graph.py": SKIPS_THE_LOOKUP})
+    _re_record()
+    _, report, _ = _ci()
+    assert report.splitlines()[1] == HIDDEN
+    assert "on 2 of 4 cases (`run-0/lookup_order`, `run-2/lookup_order`)" in report
+
+
+def test_a_model_judge_is_not_compared_against_the_base_s_cassettes(pr: Path) -> None:
+    # Only code checks are free to run twice over, and only their verdicts are facts.
+    _edit_cassettes_without_re_baselining()
+    code, report, _ = _ci(switch=False)
+    assert code == 0
+    assert "hidden" not in report
