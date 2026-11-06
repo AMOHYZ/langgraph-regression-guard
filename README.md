@@ -109,6 +109,7 @@ taxonomy_path: taxonomy.yaml       # optional; `taxonomy:` is an alias
 thresholds:
   min_node_coverage: 80            # percent; under it `lgcov ci` exits 1 (default 0: off)
 ignore_paths: [/meta/nonce]        # JSON pointers into node I/O
+mask_volatile_in_key: false        # true: replay also masks ids, UUIDs and date-times; see below
 gate:                              # the L2 KPI gate; see "The gate" below
   margin: 0.05                     # δ; a KPI's own `margin:` in taxonomy.yaml wins
 ```
@@ -120,13 +121,15 @@ Precedence: CLI flag > file > default.
 `lgcov replay` and `lgcov ci` (the Action) treat a node as unchanged, and serve
 its recorded output without running it, when two things match the recording:
 
-- **Its input**, with volatile fields and `ignore_paths` masked as in the
-  comparison. By default the mask hides the values of `id`, `message_id`, `request_id`,
-  `run_id`, `span_id`, `tool_call_id` and `trace_id` at any depth, UUIDs and date-times
-  inside text, and everything in a message except its type, content, name, status, and tool
-  call names and args. A node downstream of a change re-runs if the change reaches what
-  the mask leaves in. A change only to a masked value still matches, so that node can be
-  served from the cassette.
+- **Its input**, with volatile fields and `ignore_paths` masked. By default the mask hides
+  the values of `message_id`, `request_id`, `run_id`, `span_id`, `tool_call_id` and `trace_id`
+  at any depth, and a tool call's `id`. In a message, what counts is its type, content, name,
+  status, tool call names and args, `artifact`, `additional_kwargs`, and `finish_reason` or
+  `stop_reason`. A node downstream of a change re-runs if the change reaches what the mask
+  leaves in, including an `id` in plain state or a UUID or date-time in text. A change only to
+  a masked value still matches, so that node can be served from the cassette. If your state
+  gets a new id or time on every run, `mask_volatile_in_key: true` masks `id` values, UUIDs and
+  date-times too, and `ignore_paths` drops a single field.
 - **Its code fingerprint**: the node function's source, defaults and closure
   values, plus the values of the module-level names it uses, following the
   functions, classes and modules of your project the same way. Library code
@@ -143,13 +146,17 @@ command to re-run every node.
 From the [replay audit](docs/validation/replay-audit.md#matrix). With `--live` nothing is
 served, which rules out the first two.
 
-- **Masked changes can be served stale.** After a change only to an `id`, a UUID or date-time
-  in text, or a message's id, metadata or artifact, the nodes below it are served and show no
-  drift. A fix is in progress. Rows [1a, 3a and 5a](docs/validation/replay-audit.md#matrix).
+- **Masked changes can be served stale.** After a change only to a message's id, usage or other
+  metadata, or a key like `run_id`, the nodes below it are served and show no drift. That's
+  accepted, since these change on every model call. `mask_volatile_in_key` adds `id` values,
+  UUIDs and date-times to the list. [Row 5a](docs/validation/replay-audit.md#matrix).
 - **Reads from a LangGraph `Store`, `config` or `runtime` aren't in the key**, so a changed
   `Store` value can be served stale. A documented limit. Replay passes no `config` or runtime
   context of its own. [Row 7d](docs/validation/replay-audit.md#matrix) and
   [how a step is matched](docs/validation/replay-audit.md#how-a-step-is-matched).
+- **A change only to an `id`, UUID or date-time is named one node late.** The comparison still
+  masks these, so the node that changed shows no drift, and the first node whose output changes
+  because of it is called the root. [Rows 1a and 3a](docs/validation/replay-audit.md#matrix).
 - **A parent graph with a checkpointer, or a run that hits an `interrupt`, ends in an error**
   (`ValueError` or `TypeError`, exit 2). Planned: an `unsupported` result. Rows
   [4a, 6a and 6b](docs/validation/replay-audit.md#matrix).

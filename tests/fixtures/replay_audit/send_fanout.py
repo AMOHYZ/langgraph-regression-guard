@@ -16,7 +16,7 @@ class State(TypedDict, total=False):
 
 
 class Task(TypedDict, total=False):
-    # What a task's payload calls its name. Of these, replay's input key masks only `id`.
+    # What a task's payload calls its name. Of these, comparing masks `id`; replay's key masks none.
     task: str
     task_id: str
     id: str

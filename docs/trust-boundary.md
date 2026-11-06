@@ -8,8 +8,8 @@ yet.
 On a `pull_request` run the Action checks out the base commit and `lgcov ci` reads the gate's
 policy from there (`--policy-dir`), never from the PR's checkout:
 
-- `lgcov.yaml`, all of it: `gate.margin`, `advisory_kpis`, `blocking_kpis`, `ignore_paths`, the
-  coverage floor and `graph_entrypoint`.
+- `lgcov.yaml`, all of it: `gate.margin`, `advisory_kpis`, `blocking_kpis`, `ignore_paths`,
+  `mask_volatile_in_key`, the coverage floor and `graph_entrypoint`.
 - The taxonomy, including a KPI's own `margin`.
 - `calibration/bands.json` and `calibration/cases/`.
 

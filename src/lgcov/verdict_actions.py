@@ -93,8 +93,8 @@ _ROWS: dict[str, tuple[str, str]] = {
     "nothing_ran": (
         "🟢 lgcov: every node served, nothing re-ran",
         "Review as usual. lgcov measured nothing here: every node's code and masked input match "
-        "the recording, so it was served. A change that reaches only a masked value, such as an "
-        "id or a date, or a Store isn't seen.",
+        "the recording, so it was served. A change that reaches only a masked value, such as a "
+        "run id or a message's usage, or a Store isn't seen.",
     ),
     "ship": (
         "🟢 lgcov: SHIP ({blocking})",

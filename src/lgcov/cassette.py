@@ -23,7 +23,7 @@ from langgraph.types import Command, Send
 
 from lgcov.fingerprint import fingerprint
 from lgcov.messages import decode, encode
-from lgcov.normalize import normalize
+from lgcov.normalize import key_view, normalize
 from lgcov.rebind import Ambiguous, rebind
 
 
@@ -97,10 +97,10 @@ def record(graph: Any, inputs: dict[str, Any]) -> Cassette:
     return Cassette(inputs=inputs, steps=_run(graph, inputs, (), ())[0])
 
 
-def _key(value: Any, ignore_paths: Sequence[str]) -> str | None:
+def _key(value: Any, ignore_paths: Sequence[str], mask_volatile: bool) -> str | None:
     # Canonical JSON of the masked value; None if it is not JSON, so never kept or served.
     try:
-        return json.dumps(normalize(value, ignore_paths), sort_keys=True)
+        return json.dumps(key_view(value, ignore_paths, mask_volatile), sort_keys=True)
     except (TypeError, ValueError):
         return None
 
@@ -418,6 +418,7 @@ def _run(
     ignore_paths: Sequence[str],
     on_divergence: OnDivergence = "flag",
     budget: Budget | None = None,
+    mask_volatile: bool = False,
 ) -> tuple[list[Step], list[Call], Halt | None]:
     """Stream the graph once; return its steps with each node's input and fingerprint, how
     each call ran, and where the run stopped, if it stopped early.
@@ -438,7 +439,7 @@ def _run(
     that raised is in the `Call`s, and a retry can't get a call past a halt.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
-    unused = [(s, _key(s.input, ignore_paths)) for s in served if s.code is not None]
+    unused = [(s, _key(s.input, ignore_paths, mask_volatile)) for s in served if s.code is not None]
     recorded = {(s.node, s.code) for s in served if s.code is not None}
     calls: list[tuple[str, Any, Any, str | None]] = []  # node, input, returned, fingerprint
     log: list[Call] = []
@@ -460,7 +461,7 @@ def _run(
         # How this call runs: the step to serve, if any, what logs the call when it's done, and
         # what logs it if it raises.
         nonlocal halted
-        key = _key(state, ignore_paths)
+        key = _key(state, ignore_paths, mask_volatile)
         snapshot = deepcopy(state) if key is not None else None  # before fn can mutate it
         hit: Step | None = None
         diverged = False
@@ -659,10 +660,13 @@ def replay_run(
     serve: bool = False,
     on_divergence: OnDivergence = "flag",
     budget: Budget | None = None,
+    mask_volatile: bool = False,
 ) -> Replay:
     """`replay_steps` under a divergence policy and a budget, with how each call ran."""
     served = cassette.steps if serve else ()
-    fresh, calls, halt = _run(graph, cassette.inputs, served, ignore_paths, on_divergence, budget)
+    fresh, calls, halt = _run(
+        graph, cassette.inputs, served, ignore_paths, on_divergence, budget, mask_volatile
+    )
     recorded = cassette.steps
     not_checked: tuple[str, ...] = ()
     if halt is not None:  # compare only what the run reached: each node's first k steps
