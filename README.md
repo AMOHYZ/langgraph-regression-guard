@@ -241,6 +241,9 @@ jobs:
   the run not checked. `budget-seconds` stops starting live node calls once the run is
   projected to take longer, and the nodes it stops before are not checked either. A node
   not checked is INCONCLUSIVE: never a fail, never a harness error.
+- A node's retry policy and error handler work as they do outside lgcov. Each attempt that
+  raised counts as a live call and the report names the node, because what the attempt did
+  before raising, like a write, still happened.
 - The report ends with where the time went, e.g. `⏱ 42 s · agent 31 s (3 live / 1 served)
   · judges 9 s (12 calls, 1.4k tokens) · budget 90 s`.
 - Two tiers. `pr` (the default) serves unchanged nodes, judges each case once, skips

@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from lgcov.cassette import Cassette, Replay, record, replay_run, runs_from_json, runs_to_json
-from lgcov.cli import CANT_IMPORT, _load_graph, _say_rebind_skipped
+from lgcov.cli import CANT_IMPORT, _load_graph, _say_replay_notes
 
 
 def _save(path: Path, runs: list[Cassette]) -> None:
@@ -54,7 +54,7 @@ def side_main(argv: list[str]) -> int:
                     fresh.append(Cassette(run.inputs, list(done[-1].steps)))
                     _save(Path(paths[2]), fresh)
             finally:
-                _say_rebind_skipped(done)
+                _say_replay_notes(done)
             drifted = [[d.node for d in r.drifts] for r in done]
             Path(paths[1]).write_text(json.dumps(drifted), encoding="utf-8")
     except Exception as exc:  # user graph code can raise anything: the parent reports it

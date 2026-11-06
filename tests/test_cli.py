@@ -1080,6 +1080,92 @@ def test_cli_ci_divergence_flag_reruns_live_and_marks_what_ran_after(
     assert "(5 live / 0 served)" in report
 
 
+# T152: the demo's `respond` raises these in turn, under a retry policy.
+def _respond_raising(raises: str, rule: str = "") -> str:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    src = (
+        demo.replace(
+            "def respond(state: State) -> State:\n",
+            f"RAISES = {raises}\n\n\n"
+            "def respond(state: State) -> State:\n    if RAISES:\n        raise RAISES.pop()\n",
+        )
+        .replace(
+            'b.add_node("respond", respond)',
+            'b.add_node("respond", respond, retry_policy=RetryPolicy('
+            f"initial_interval=0.0, jitter=False{rule}))",
+        )
+        .replace(
+            "b = StateGraph(State)",
+            "from langgraph.types import RetryPolicy\nb = StateGraph(State)",
+        )
+    )
+    assert "RAISES" in src and "RetryPolicy(" in src
+    return src
+
+
+RAISED_LINE = (
+    "Raised, and the run went on (a retry policy or error handler): `respond` in run 1 (1x). "
+    "What a failed attempt did before raising, like a write, still happened."
+)
+
+
+def test_cli_ci_names_a_node_that_raised_and_ran_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _respond_raising('[ConnectionError("down")]'))
+    code, report, _ = _run_ci(tmp_path)
+    assert code == 0  # it recovered, and its answer is the recorded one
+    assert RAISED_LINE in report
+
+
+def test_cli_replay_names_a_node_that_raised_and_ran_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _respond_raising('[ConnectionError("down")]'))
+    assert main(["replay", "graph.py:graph", "cassettes/baseline.json"]) == 0
+    assert RAISED_LINE in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("raises", "rule", "code", "says"),
+    [
+        pytest.param(
+            '[ValueError("bad")] * 3',
+            "",
+            1,
+            "Node `respond` raised ValueError: bad\n",
+            id="the_default_rule_refuses_it",
+        ),
+        pytest.param(
+            '[ValueError("bad")] * 3',
+            ", retry_on=ValueError",
+            1,
+            "Node `respond` raised ValueError: bad (3 failed attempts in this run)",
+            id="its_own_rule_retries_it",
+        ),
+        pytest.param(
+            '[ConnectionError("down")] * 3',
+            "",
+            2,
+            "ConnectionError: down (3 failed attempts in this run)",
+            id="network_trouble_to_the_last_attempt",
+        ),
+    ],
+)
+def test_cli_ci_says_how_many_attempts_a_failed_node_made(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raises: str,
+    rule: str,
+    code: int,
+    says: str,
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _respond_raising(raises, rule))
+    got, report, _ = _run_ci(tmp_path)
+    assert got == code
+    assert says in report
+
+
 def test_cli_ci_divergence_fail_leaves_the_rest_of_the_run_not_checked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
