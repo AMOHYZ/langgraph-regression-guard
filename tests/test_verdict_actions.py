@@ -17,6 +17,7 @@ from lgcov.stats import Decision
 from lgcov.verdict_actions import (
     MODES,
     Action,
+    CodeFailure,
     Evidence,
     GateFindings,
     decide_action,
@@ -24,6 +25,7 @@ from lgcov.verdict_actions import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+FAILURE = CodeFailure("tone", ("run-0/n",), 8)
 DOC = ROOT / "docs" / "verdict-actions.md"
 SNAPSHOTS = Path(__file__).parent / "fixtures" / "verdict_actions"
 NO_DECISION = "⚠️ No decision: needs_human"
@@ -33,6 +35,7 @@ ROWS: dict[str, Evidence] = {
     "infra": Evidence(infra=True),
     "first_adoption": Evidence(first_adoption=True, statistical="SHIP", k_gate=2),
     "agent_failure": Evidence(crashed=True),
+    "policy_code_check": Evidence(code_failures=(FAILURE,), statistical="SHIP", k_gate=2),
     "policy_drift": Evidence(enforced_drift=("respond",), statistical="SHIP", k_gate=2),
     "block": Evidence(statistical="BLOCK", k_gate=2),
     "policy_floor": Evidence(under_floor=True, statistical="SHIP", k_gate=2),
@@ -64,6 +67,8 @@ def _filled(cell: str) -> str:
         ("<nodes>", "respond"),
         ("<kpi>", "tone"),
         ("N blocking", "2 blocking"),
+        ("F of N cases", "1 of 8 cases"),
+        ("<cases>", "run-0/n"),
     ):
         cell = cell.replace(placeholder, value)
     return cell
@@ -91,9 +96,9 @@ def test_the_doc_table_matches_decide_action(state: str) -> None:
 def _every_combination() -> Iterator[Evidence]:
     verdicts: tuple[Decision | None, ...] = ("SHIP", "BLOCK", "INCONCLUSIVE", None)
     for statistical, mode in product(verdicts, MODES):
-        for flags in product((False, True), repeat=12):
+        for flags in product((False, True), repeat=13):
             infra, crashed, drift, unenforced, floor, unchecked = flags[:6]
-            unsure, drop, idle, blocks, adopting, edited = flags[6:]
+            unsure, drop, idle, blocks, adopting, edited, failing = flags[6:]
             yield Evidence(
                 statistical=statistical,
                 k_gate=0 if statistical is None else 2,
@@ -109,12 +114,19 @@ def _every_combination() -> Iterator[Evidence]:
                 inconclusive_blocks=blocks,
                 first_adoption=adopting,
                 cassettes_edited=edited,
+                code_failures=(FAILURE,) if failing else (),
                 mode=mode,
             )
 
 
 def _finding(e: Evidence) -> bool:
-    return e.crashed or bool(e.enforced_drift) or e.statistical == "BLOCK" or e.under_floor
+    return (
+        e.crashed
+        or bool(e.code_failures)
+        or bool(e.enforced_drift)
+        or e.statistical == "BLOCK"
+        or e.under_floor
+    )
 
 
 def _shown(a: Action) -> str:
@@ -175,6 +187,25 @@ def test_advisory_mode_exits_0_unless_infra_and_says_what_it_authorises() -> Non
         else:
             assert authorised not in _shown(a)
             assert "(advisory, not blocking)" not in a.headline
+
+
+def test_a_new_code_failure_outranks_drift_and_every_statistical_verdict() -> None:
+    # Drift's next step is to re-baseline, which would erase the very failure being reported.
+    for e in _every_combination():
+        if e.code_failures and not (e.crashed or e.first_adoption):
+            a = decide_action(e)
+            assert (a.state, a.verdict) == ("policy_code_check", "fail")
+            assert a.exit_code == (1 if e.mode == "enforcing" else 2 if e.infra else 0)
+            assert "cassette accept" not in a.next_step
+
+
+def test_several_code_failures_are_each_named() -> None:
+    more = CodeFailure("polite", ("run-1/n", "run-2/n"), 8)
+    step = decide_action(Evidence(code_failures=(FAILURE, more))).next_step
+    assert "`tone` passed on the base and fails here on 1 of 8 cases (`run-0/n`)" in step
+    assert (
+        "`polite` passed on the base and fails here on 2 of 8 cases (`run-1/n`, `run-2/n`)" in step
+    )
 
 
 def test_a_first_adoption_pr_enforces_nothing_and_claims_no_ship() -> None:
@@ -303,6 +334,21 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
         "fail",
     ),
     "policy_drift": (replace(SHIPPED, replay_lines=DRIFT, root_drift=("respond",)), 1, "fail"),
+    "policy_code_check": (
+        replace(
+            SHIPPED,
+            gate=GateFindings(
+                "SHIP", 1, code_failures=(CodeFailure("tone", ("run-0/respond",), 8),)
+            ),
+            replay_lines=DRIFT,
+            root_drift=("respond",),
+            l2_lines=_kpi_rows(
+                TONE_SHIP, "| 🔴 new failure: tone on 1 of 8 cases: `run-0/respond` |"
+            ),
+        ),
+        1,
+        "fail",
+    ),
     "block": (BLOCKED, 1, "fail"),
     "policy_floor": (replace(SHIPPED, under_floor="Node coverage 50% is under 80%."), 1, "fail"),
     "not_checked": (
@@ -379,6 +425,17 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
     ),
     # Advisory mode.
     "advisory_block": (replace(BLOCKED, mode="advisory"), 0, "fail"),
+    "advisory_code_check": (
+        replace(
+            SHIPPED,
+            gate=GateFindings(
+                "SHIP", 1, code_failures=(CodeFailure("tone", ("run-0/respond",), 8),)
+            ),
+            mode="advisory",
+        ),
+        0,
+        "fail",
+    ),
     "advisory_inconclusive": (
         replace(UNDECIDED, mode="advisory", inconclusive_blocks=True),
         0,
@@ -501,6 +558,15 @@ def test_a_ship_on_a_served_only_run_says_nothing_re_ran() -> None:
     # nothing changed.
     assert "no node changed" not in report
     assert "A change that reaches only a masked value" in report
+
+
+def test_only_a_blocking_code_check_is_a_code_failure() -> None:
+    base = _side(8, _judged(1.0))
+    failing = kpi_stats(TONE, 1, base, _dropping(8, 1), code=True)
+    assert gate_findings([failing]).code_failures == (CodeFailure("tone", ("case-0",), 8),)
+    assert gate_findings([kpi_stats(TONE, 1, base, _dropping(8, 1))]).code_failures == ()
+    opted_out = gate_findings(gate_kpis([failing], advisory={"tone"}))
+    assert (opted_out.code_failures, opted_out.advisory_drops) == ((), ("tone",))
 
 
 def test_singular_and_plural_blocking_kpis() -> None:

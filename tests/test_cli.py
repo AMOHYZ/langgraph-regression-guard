@@ -1173,6 +1173,175 @@ def test_cli_ci_a_blocking_group_that_does_not_ship_is_no_decision(
     assert (code, outputs["verdict"]) == (1, "needs_human")
 
 
+ORDER_LOOKUP_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: skips_the_lookup
+    description: An order question no longer reaches the order lookup.
+kpis:
+  - name: order_lookup_runs
+    failure_mode: skips_the_lookup
+    node: lookup_order
+    judge: code
+    description: Every run looks up the order.
+    rubric: Did the run visit lookup_order?
+    check: {type: node_visited, node: lookup_order}
+"""
+
+
+def _order_lookup_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, questions: list[str]
+) -> None:
+    """The demo with these questions really recorded, gated on a code check."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "graph.py").write_text(DEMO_GRAPH.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "taxonomy.yaml").write_text(ORDER_LOOKUP_TAXONOMY, encoding="utf-8")
+    (tmp_path / "lgcov.yaml").write_text(
+        "graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n", encoding="utf-8"
+    )
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text(json.dumps([{"question": q} for q in questions]), encoding="utf-8")
+    assert main(["record", "--inputs", str(inputs)]) == 0
+
+
+def _skipping_the_lookup_for(marker: str) -> str:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    src = demo.replace(
+        'return {"needs_tool": "order" in state["question"].lower()}',
+        'q = state["question"].lower()\n'
+        f'    return {{"needs_tool": "order" in q and {marker!r} not in q}}',
+    )
+    assert src != demo
+    return src
+
+
+def test_cli_ci_one_new_code_failure_in_200_blocks_though_the_test_says_ship(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    questions = [f"Where is my order {i}?" for i in range(199)] + ["Where is my order 999?"]
+    _order_lookup_project(tmp_path, monkeypatch, questions)
+    (tmp_path / "graph.py").write_text(_skipping_the_lookup_for("999"), encoding="utf-8")
+    never = ("--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    code, report, outputs = _run_ci(tmp_path, *never)
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: code check failed\n")
+    assert (
+        "`order_lookup_runs` passed on the base and fails here on 1 of 200 cases "
+        "(`run-199/lookup_order`)."
+    ) in report
+    assert "Statistical verdict: SHIP" in report  # what the test says stays as it was
+    assert "| 🔴 new failure: order_lookup_runs on 1 of 200 cases" in report
+    code, report, outputs = _run_ci(tmp_path, *never, "--mode", "advisory")
+    assert (code, outputs["verdict"]) == (0, "fail")
+    assert "## 🔴 lgcov: code check failed (advisory, not blocking)\n" in report
+
+
+def test_cli_ci_a_new_code_failure_is_named_over_the_drift_it_comes_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    questions = ["Where is my order 1?", "Where is my order 999?"]
+    _order_lookup_project(tmp_path, monkeypatch, questions)
+    (tmp_path / "graph.py").write_text(_skipping_the_lookup_for("999"), encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    assert code == 1
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: code check failed\n")
+    assert "`lgcov cassette accept" not in report  # that would erase the failure
+
+
+def test_cli_ci_a_code_check_in_advisory_kpis_reports_the_drop_and_does_not_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    questions = ["Where is my order 1?", "Where is my order 999?"]
+    _order_lookup_project(tmp_path, monkeypatch, questions)
+    (tmp_path / "graph.py").write_text(_skipping_the_lookup_for("999"), encoding="utf-8")
+    (tmp_path / "lgcov.yaml").write_text(
+        "graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n"
+        "gate: {advisory_kpis: [order_lookup_runs]}\n",
+        encoding="utf-8",
+    )
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert (code, outputs["verdict"]) == (0, "needs_human")
+    assert "code check failed" not in report
+    assert "| ⚠️ new failure: order_lookup_runs on 1 of 2 cases" in report  # still reported
+
+
+def test_cli_ci_a_check_that_already_failed_on_the_base_is_not_a_new_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _order_lookup_project(tmp_path, monkeypatch, ["Where is my order?", "What are your hours?"])
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--live")
+    assert (code, outputs["verdict"]) == (0, "needs_human")  # 2 cases can't SHIP
+    assert "code check failed" not in report and "new failure" not in report
+
+
+@pytest.mark.parametrize(
+    "stop",
+    [("--on-divergence", "fail"), ("--budget-seconds", "0")],
+    ids=["on-divergence fail", "a budget hit"],
+)
+def test_cli_ci_a_run_replay_stopped_early_is_not_a_failed_code_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: tuple[str, str]
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    (tmp_path / "taxonomy.yaml").write_text(SHIPPING_TAXONOMY, encoding="utf-8")
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    doc = json.loads(baseline.read_text(encoding="utf-8"))
+    baseline.write_text(
+        json.dumps({"runs": doc["runs"] * 4}), encoding="utf-8"
+    )  # 8: enough to BLOCK
+    code, report, outputs = _run_ci(
+        tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never", *stop
+    )
+    assert (code, outputs["verdict"]) == (0, "needs_human")
+    assert report.startswith("<!-- lgcov-report -->\n## ⚠️ No decision: needs_human\n")
+    assert "lgcov did not check them." in report
+    assert "KPI regression" not in report and "code check failed" not in report
+
+
+def test_cli_ci_a_run_replay_stopped_early_is_no_case_for_a_final_kpi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    taxonomy = UNDECIDED_TAXONOMY.replace("node: respond", "node: final")
+    assert taxonomy != UNDECIDED_TAXONOMY
+    (tmp_path / "taxonomy.yaml").write_text(taxonomy, encoding="utf-8")
+    _bands(tmp_path / "calibration" / "bands.json", answer_states_order_status="blocking")
+    args = ("--taxonomy", "taxonomy.yaml", "--fail-on", "never", "--on-divergence", "fail")
+    _, report, _ = _run_ci(tmp_path, *args)
+    assert "| answer_states_order_status | 0 |" in report  # its last step isn't the final one
+    _, report, _ = _run_ci(tmp_path, *args, "--max-calls", "0")
+    assert "refusing to make" not in report  # nor is its base side judged: no wasted model call
+
+
+def test_cli_ci_a_run_replay_stopped_early_keeps_its_case_for_a_node_that_ran(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, _rewriting_classify())
+    taxonomy = UNDECIDED_TAXONOMY.replace("node: respond", "node: classify")
+    assert taxonomy != UNDECIDED_TAXONOMY
+    (tmp_path / "taxonomy.yaml").write_text(taxonomy, encoding="utf-8")
+    _bands(tmp_path / "calibration" / "bands.json", answer_states_order_status="blocking")
+    args = ("--taxonomy", "taxonomy.yaml", "--fail-on", "never", "--on-divergence", "fail")
+    _, report, _ = _run_ci(tmp_path, *args)
+    assert "Not checked (on-divergence: fail)" in report
+    assert "| answer_states_order_status | 2 |" in report  # classify ran before the stop
+
+
+def test_cli_judge_exits_1_on_a_new_code_failure_and_says_which(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    taxonomy = tmp_path / "taxonomy.yaml"
+    taxonomy.write_text(ORDER_LOOKUP_TAXONOMY, encoding="utf-8")
+    graph = tmp_path / "graph.py"
+    graph.write_text(_skipping_the_lookup_for("order"), encoding="utf-8")  # never looks it up
+    args = [*_judge_args(tmp_path), "--taxonomy", str(taxonomy), "--graph", f"{graph}:graph"]
+    assert main(args) == 1
+    assert "| 🔴 new failure: order_lookup_runs on 1 of 2 cases: `run-0/lookup_order` |" in (
+        capsys.readouterr().out
+    )
+
+
 def test_cli_ci_refuses_more_model_judge_calls_than_max_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

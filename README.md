@@ -291,7 +291,7 @@ the reviewer's next step and the exit code, including what `mode`, `approved-by`
 | Outcome | Exit | When |
 |---|---|---|
 | PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI, if there is one, is SHIP. |
-| AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, node coverage under `thresholds.min_node_coverage`, or a node in the PR's graph raised; the report names the node (a router by its function name, a node inside subgraph `sub` as `sub.inner`). A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
+| AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, a blocking code check newly fails, node coverage under `thresholds.min_node_coverage`, or a node in the PR's graph raised; the report names the node (a router by its function name, a node inside subgraph `sub` as `sub.inner`). A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
 | INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK (the KPI table shows the cases it still needs), its judge abstained, or replay left nodes not checked: a divergence with `on-divergence: fail`, or a budget hit. Shown as "⚠️ No decision: needs_human". GitHub's green tick on exit 0 is not a pass, so the comment says that and the Action adds a warning. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1. |
 | INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, a blocking KPI left with no valid judgment on a side, or the base or candidate commit moved during the run (then no verdict at all, even a BLOCK). Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
 
@@ -464,7 +464,9 @@ elsewhere):
 | flag | both point rates reach 0.80, a lower bound doesn't | stop it as INCONCLUSIVE at most |
 | advisory | anything less, or no labels | show ⚠️ rows, never fail it |
 
-- Code judges always block: they are deterministic.
+- Code judges always block: they are deterministic, so a check that passed on the base and fails
+  on the PR exits 1 on one case, whatever the paired test says. [docs/gate.md](docs/gate.md) has
+  the false-alarm risk and how to opt a check out.
 - A model judge with no labels is advisory (`gate.uncalibrated: flag` makes it a flag), and
   the report says so at the top: "⚠️ 1 of 2 judges uncalibrated: no model judge can block
   this PR. Run `lgcov calibrate`."

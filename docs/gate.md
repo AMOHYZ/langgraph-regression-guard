@@ -18,6 +18,16 @@ or slice group never goes further than its KPIs' own verdicts.
   `gate.inconclusive_blocks: true` (or `--fail-on-inconclusive`) makes it exit 1. The PR
   comment shows it as "No decision: needs_human"; [verdict-actions.md](verdict-actions.md)
   has what each outcome asks of the reviewer.
+- **A code check's new failure blocks outside these numbers.** A check that passed on the base
+  and fails on the PR exits 1 on one case, whatever the paired test says. So it has no false-alarm
+  bound: a check whose path varies between runs of an unchanged agent will block by chance, on
+  63% of PRs with 100 live runs if it varies 1% of the time. List such a check in
+  `gate.advisory_kpis`, and it reports the drop instead.
+  - A case that also failed on the base isn't new, and a run replay stopped early isn't scored.
+  - A PR that re-baselines its own cassettes moves the base, so nothing it does there is new. Its
+    comment says no decision instead.
+  - `tool_called` and `tool_not_called` can't fire this way yet: `lgcov ci` doesn't pass them the
+    run's tools, so the first always fails and the second always passes.
 - **The 2.5%** is at the default α = 0.05. With no discordant pair, SHIP reads the no-drop
   bound at α/2 instead of the CI. That is the same 2.5% at α = 0.05, and more if α is set
   higher, as the PR comment then says.

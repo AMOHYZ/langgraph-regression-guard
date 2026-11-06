@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
@@ -990,7 +990,10 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     try:
         saved = _saved_cases(Path(_policy_path(args, args.bands)).parent / "cases", l2[0])
         extra = sum(len(saved.get(s.name, [])) for s in l2[0] if s.judge != "code")
-        stats, gate = _ci_gate(args, cfg, policy.k, advisory, flagged, *l2, runs, pairs, extra)
+        stopped = frozenset(i for i, r in enumerate(replays) if r.not_checked)
+        stats, gate = _ci_gate(
+            args, cfg, policy.k, advisory, flagged, *l2, runs, pairs, extra, stopped
+        )
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
         return replace(result, harness_error=msg)
@@ -1047,10 +1050,12 @@ def _ci_gate(
     runs: list[Cassette],
     replays: list[tuple[list[Drift], list[Step]]],
     extra: int = 0,
+    stopped: Collection[int] = (),
 ) -> tuple[list[KpiStats], GateConfig]:
     """T091: the L2 gate on recorded vs replayed outputs, as `lgcov judge` runs it. `extra`:
-    model judge calls on top of the plan (T102: saved cases)."""
-    plan = _l2_plan(specs, runs, replays)
+    model judge calls on top of the plan (T102: saved cases); `stopped`: runs replay left
+    unfinished."""
+    plan = _l2_plan(specs, runs, replays, stopped)
     _, model = _l2_calls(plan, k)
     model += extra
     if model > args.max_calls:
@@ -1299,10 +1304,14 @@ def _l2_judge(spec: KPISpec, jev_model: str | None = None) -> Judge:
 _Cases = dict[str, tuple[NodeState, NodeState]]
 
 
-def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> _Cases:
-    """One case per run: the trace for code judges, else the node's own input and output."""
+def _l2_cases(spec: KPISpec, runs: list[list[Step]], stopped: Collection[int] = ()) -> _Cases:
+    """One case per run: the trace for code judges, else the node's own input and output. A
+    run in `stopped` has no whole-run case: its trace is cut off, and its last step isn't the
+    final one, so a code check would read as failed when it was never checked."""
     cases: _Cases = {}
     for i, steps in enumerate(runs):
+        if i in stopped and (spec.judge == "code" or spec.node == "final"):
+            continue
         case_id = f"run-{i}/{spec.node}"
         if spec.judge == "code":
             cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps]}})
@@ -1321,10 +1330,15 @@ def _l2_cases(spec: KPISpec, runs: list[list[Step]]) -> _Cases:
 
 
 def _l2_plan(
-    specs: list[KPISpec], runs: list[Cassette], replays: list[tuple[list[Drift], list[Step]]]
+    specs: list[KPISpec],
+    runs: list[Cassette],
+    replays: list[tuple[list[Drift], list[Step]]],
+    stopped: Collection[int] = (),
 ) -> list[tuple[KPISpec, _Cases, _Cases]]:
     base, fresh = [r.steps for r in runs], [steps for _, steps in replays]
-    return [(spec, _l2_cases(spec, base), _l2_cases(spec, fresh)) for spec in specs]
+    return [
+        (spec, _l2_cases(spec, base, stopped), _l2_cases(spec, fresh, stopped)) for spec in specs
+    ]
 
 
 def _l2_calls(plan: list[tuple[KPISpec, _Cases, _Cases]], k: int) -> tuple[int, int]:

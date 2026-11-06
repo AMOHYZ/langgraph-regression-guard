@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from lgcov.sampling import KpiStats, k_gate
+from lgcov.sampling import KpiStats, k_gate, named_cases
 from lgcov.slices import Group, failing_groups
 from lgcov.stats import Decision
 
@@ -39,6 +39,12 @@ _ROWS: dict[str, tuple[str, str]] = {
     "agent_failure": (
         "🔴 lgcov: agent failure",
         "Fix the node named below. The run stopped there, so nothing after it was checked.",
+    ),
+    "policy_code_check": (
+        "🔴 lgcov: code check failed",
+        "{code_failures}. Fix the regression. If a check can legitimately vary between runs, make "
+        "it advisory in `gate.advisory_kpis` on the base branch first: this PR can't change what "
+        "grades it.",
     ),
     "policy_drift": (
         "🔴 lgcov: drift",
@@ -94,7 +100,7 @@ _ROWS: dict[str, tuple[str, str]] = {
         "Review as usual. lgcov compared the recorded runs; it judged no KPI that can block.",
     ),
 }
-_FINDINGS = ("agent_failure", "policy_drift", "block", "policy_floor")
+_FINDINGS = ("agent_failure", "policy_code_check", "policy_drift", "block", "policy_floor")
 _SWITCHABLE = ("not_checked", "abstained", "inconclusive")  # the switch can make these fail
 _INCONCLUSIVE_NOTE = (
     "This check exits 0 because INCONCLUSIVE does not block by default. That is not a pass."
@@ -120,6 +126,15 @@ _ADVISORY_LINE = (
 
 
 @dataclass(frozen=True)
+class CodeFailure:
+    """A blocking code check that passed on the base and fails on this PR."""
+
+    kpi: str
+    cases: tuple[str, ...]
+    of: int  # the cases compared
+
+
+@dataclass(frozen=True)
 class GateFindings:
     """What the KPI gate adds to the evidence."""
 
@@ -128,6 +143,7 @@ class GateFindings:
     abstained: tuple[str, ...] = ()  # blocking KPIs whose judge didn't commit
     advisory_drops: tuple[str, ...] = ()  # advisory KPIs whose BLOCK can't act on the PR
     infra: bool = False  # a blocking KPI with no valid judgment on a side
+    code_failures: tuple[CodeFailure, ...] = ()
 
 
 def _judge_abstained(s: KpiStats) -> bool:
@@ -149,8 +165,9 @@ def gate_findings(stats: Sequence[KpiStats], groups: Sequence[Group] = ()) -> Ga
         statistical,
         k_gate(stats),
         tuple(s.kpi for s in blocking if _judge_abstained(s)),
-        tuple(s.kpi for s in stats if not s.blocking and s.decision == "BLOCK"),
+        tuple(s.kpi for s in stats if not s.blocking and (s.decision == "BLOCK" or s.new_failures)),
         any(s.outcome == "infra_error" for s in blocking),
+        tuple(CodeFailure(s.kpi, s.new_failures, len(s.cases)) for s in blocking if s.new_failures),
     )
 
 
@@ -171,6 +188,7 @@ class Evidence:
     nothing_ran: bool = False  # every node was served, so this run measured nothing
     first_adoption: bool = False  # T154: the base has no policy yet, so this PR's own is used
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
+    code_failures: tuple[CodeFailure, ...] = ()  # a policy violation, whatever the test says
     inconclusive_blocks: bool = False  # the switch: an undecided run fails the check
     mode: Mode = "enforcing"
     approved_by: tuple[str, ...] = ()  # recorded only
@@ -193,6 +211,8 @@ def _finding(e: Evidence) -> str:
     """The row of a real finding about the agent, or ''."""
     if e.crashed:
         return "agent_failure"
+    if e.code_failures:  # before drift: its next step, re-baselining, would erase the failure
+        return "policy_code_check"
     if e.enforced_drift:
         return "policy_drift"
     if e.statistical == "BLOCK":
@@ -248,6 +268,11 @@ def _details(e: Evidence) -> tuple[str, ...]:
 def decide_action(e: Evidence) -> Action:
     state = _state(e)
     fill = {
+        "code_failures": "; ".join(
+            f"`{f.kpi}` passed on the base and fails here on {len(f.cases)} of {f.of} cases "
+            f"({named_cases(f.cases)})"
+            for f in e.code_failures
+        ),
         "root": ",".join(e.enforced_drift),
         "not_checked": _code(e.not_checked),
         "abstained": _code(e.abstained),
