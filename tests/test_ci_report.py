@@ -26,10 +26,10 @@ def test_timing_line_without_judges_or_a_budget() -> None:
 
 def test_the_lint_line_and_its_findings_render_in_the_pr_comment() -> None:
     found = ("warn `c`: unreachable from START. Fix: add an edge into it.",)
-    report = render_ci_report(CiResult("root-drift", 0, lint_summary="🧹 Lint: 1 warning"))
+    report = render_ci_report(CiResult("root-drift", lint_summary="🧹 Lint: 1 warning"))
     assert "\n🧹 Lint: 1 warning\n" in report and "<details>" not in report
     report = render_ci_report(
-        CiResult("root-drift", 0, lint_summary="🧹 Lint: 1 warning", lint_lines=found)
+        CiResult("root-drift", lint_summary="🧹 Lint: 1 warning", lint_lines=found)
     )
     assert "\n🧹 Lint: 1 warning\n" in report
     assert "<summary>Lint findings</summary>" in report

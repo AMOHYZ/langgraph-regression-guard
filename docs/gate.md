@@ -15,7 +15,9 @@ or slice group never goes further than its KPIs' own verdicts.
   - Flag-band KPIs count: they must SHIP, and their BLOCK goes to a human.
   - The PR comment prints K_gate under the gate table, with this paragraph.
 - **INCONCLUSIVE makes no claim.** It exits 0 and a human decides, unless
-  `gate.inconclusive_blocks: true` (or `--fail-on-inconclusive`) makes it exit 1.
+  `gate.inconclusive_blocks: true` (or `--fail-on-inconclusive`) makes it exit 1. The PR
+  comment shows it as "No decision: needs_human"; [verdict-actions.md](verdict-actions.md)
+  has what each outcome asks of the reviewer.
 - **The 2.5%** is at the default α = 0.05. With no discordant pair, SHIP reads the no-drop
   bound at α/2 instead of the CI. That is the same 2.5% at α = 0.05, and more if α is set
   higher, as the PR comment then says.
