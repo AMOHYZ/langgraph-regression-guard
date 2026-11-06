@@ -182,7 +182,7 @@ langsmith:          # lgcov.yaml
   the commit lgcov tested or the PR's head commit. LangSmith's `evaluate()` records that
   field. If no experiment ran on either commit, the report says nothing.
 - **The key.** Put `LANGSMITH_API_KEY` in the job's `env:` from a secret.
-  - ⚠️ That job runs the PR's code, which can read the key. Until the job split (T179), only do
+  - ⚠️ That job runs the PR's code, which can read the key. Until the job split, only do
     this if PR authors are trusted: no fork PRs, no outside contributors.
   - Without it, the report says so in one line. Fork PRs get no secrets, so they always
     hit this case.
@@ -264,7 +264,7 @@ jobs:
   [The gate](#the-gate-ship-block-or-inconclusive)) and adds the table to the report, at
   most 200 model judge calls per run. `judge: jev` KPIs read `JEV_API_URL` and
   `JEV_API_KEY`: set them in the job's `env:` from secrets. ⚠️ That job runs the PR's code,
-  which can read them. Until the job split (T179), only do this if PR authors are trusted: no
+  which can read them. Until the job split, only do this if PR authors are trusted: no
   fork PRs, no outside contributors.
 - Outcomes and exit codes are in the table below.
 - The run locks the commits it compares. It records the base checkout's HEAD and the PR's
