@@ -62,7 +62,7 @@ outputs:
     value: ${{ steps.lgcov.outputs.propagated-drift-count }}
   verdict:
     description: "pass | fail | error (error: harness error, not a regression) | advisory (first adoption PR: nothing enforced yet)."
-    value: ${{ steps.lgcov.outputs.verdict }}
+    value: ${{ steps.verify.outputs.verdict || steps.lgcov.outputs.verdict }}
 
 runs:
   using: composite
@@ -259,6 +259,7 @@ runs:
         if [ "${EVENT_NAME:-}" = "pull_request" ] && [ -z "$BASE_DIR" ] && [ -z "$HARNESS_ERROR" ]; then
           HARNESS_ERROR="Could not check out the base commit, so the gate has no policy it can trust."
         fi
+        args+=(--result-out "$RUNNER_TEMP/lgcov/result.json")
         args+=(--coverage-out "$RUNNER_TEMP/lgcov/coverage.json")
         [ -n "$COVERAGE_BASELINE" ] && args+=(--coverage-baseline "$COVERAGE_BASELINE")
         [ "$LIVE" = "true" ] && args+=(--live)
@@ -281,6 +282,39 @@ runs:
           printf '%s\n' "report-path=$report" "root-drift-count=0" "propagated-drift-count=0" \
             "verdict=error" "exit-code=2" >> "$GITHUB_OUTPUT"
         fi
+
+    # T154: lgcov here comes from the Action, not the project's venv. A result that doesn't bind
+    # to the commits and the base's policy loses its verdict: the report is rewritten in place,
+    # so the comment step below posts that instead, and needs no change.
+    - name: Verify the result
+      id: verify
+      if: github.event_name == 'pull_request' && steps.lgcov.outputs.exit-code != '2'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        UV_PYTHON: ${{ inputs.python-version }}
+        REPORT_PATH: ${{ steps.lgcov.outputs.report-path }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_DIR: ${{ steps.base.outputs.dir }}
+        TAXONOMY: ${{ inputs.taxonomy }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        # Actions runs bash with -e; this step checks exit codes itself.
+        set +e -uo pipefail
+        out="$(mktemp)"
+        args=(verify-result --result "$RUNNER_TEMP/lgcov/result.json" --report "$REPORT_PATH")
+        args+=(--github-output "$out" --policy-dir "$BASE_DIR")
+        args+=(--base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" --fail-on "$FAIL_ON")
+        [ -n "$TAXONOMY" ] && args+=(--taxonomy "$TAXONOMY")
+        uvx --from "$ACTION_PATH" lgcov "${args[@]}"
+        if [ ! -s "$out" ]; then
+          # It couldn't run. No verdict, rather than the one it couldn't check.
+          printf '%s\n' "<!-- lgcov-report -->" "## ⚠️ lgcov: harness error, not a regression" "" \
+            "⚠️ Harness error, not a regression: the result could not be verified, so this PR has no verdict." > "$REPORT_PATH"
+          printf '%s\n' "exit-code=2" "verdict=error" > "$out"
+        fi
+        cat "$out" >> "$GITHUB_OUTPUT"
 
     - name: Post or update the PR comment
       uses: actions/github-script@v7
@@ -350,8 +384,8 @@ runs:
     - name: Exit with the verdict
       shell: bash
       env:
-        CODE: ${{ steps.lgcov.outputs.exit-code }}
-        VERDICT: ${{ steps.lgcov.outputs.verdict }}
+        CODE: ${{ steps.verify.outputs.exit-code || steps.lgcov.outputs.exit-code }}
+        VERDICT: ${{ steps.verify.outputs.verdict || steps.lgcov.outputs.verdict }}
         FAIL_ON: ${{ inputs.fail-on }}
       run: |
         echo "lgcov: verdict $VERDICT (fail-on: $FAIL_ON), exit ${CODE:-2}"

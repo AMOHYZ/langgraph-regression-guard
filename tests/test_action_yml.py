@@ -333,3 +333,85 @@ def test_a_push_has_no_base_and_reads_its_own_policy(tmp_path: Path) -> None:
 def test_the_run_step_is_told_the_event() -> None:
     run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
     assert _dict(run["env"])["EVENT_NAME"] == "${{ github.event_name }}"
+
+
+# T154: the verify step sits between the run and the comment, and rewrites the report in place,
+# so the comment step needs no change and a result that doesn't bind posts no verdict.
+def test_the_result_is_verified_after_the_run_and_before_the_comment() -> None:
+    names = [str(s.get("name")) for s in _steps()]
+    run, verify = names.index("Run lgcov"), names.index("Verify the result")
+    assert verify == run + 1
+    assert names[verify + 1] == "Post or update the PR comment"
+    step = _steps()[verify]
+    assert "pull_request" in str(step["if"]) and "'2'" in str(step["if"])  # 2 has no verdict
+    env = _dict(step["env"])
+    assert env["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    assert env["HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+    assert "--result-out" in _step("Run lgcov")
+
+
+def test_the_run_exits_with_the_verified_verdict() -> None:
+    verified = "${{ steps.verify.outputs.%s || steps.lgcov.outputs.%s }}"
+    exit_env = _dict(_steps()[-1]["env"])
+    assert exit_env["CODE"] == verified % ("exit-code", "exit-code")
+    assert exit_env["VERDICT"] == verified % ("verdict", "verdict")
+    output = _dict(_dict(_yaml(ROOT / "action.yml")["outputs"])["verdict"])
+    assert output["value"] == verified % ("verdict", "verdict")
+
+
+def test_fork_prs_keep_the_job_summary_fallback() -> None:
+    comment = {str(s.get("name")): s for s in _steps()}["Post or update the PR comment"]
+    script = str(_dict(comment["with"])["script"])
+    assert "core.summary.addRaw(body).write()" in script
+    assert "PRs from forks get a read-only token" in script
+
+
+def _verify_step(tmp_path: Path, fake_uvx: str) -> tuple[str, str]:
+    """Run the verify step with a fake lgcov: the outputs it set, and the report it left."""
+    _executable(tmp_path / "bin" / "uvx", fake_uvx)
+    out, report = tmp_path / "github_output", tmp_path / "report.md"
+    out.touch()
+    report.write_text("## 🟢 lgcov: pass\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "ACTION_PATH": str(tmp_path),
+        "UV_PYTHON": "3.12",
+        "REPORT_PATH": str(report),
+        "BASE_SHA": "a" * 40,
+        "HEAD_SHA": "b" * 40,
+        "BASE_DIR": "/base",
+        "TAXONOMY": "",
+        "FAIL_ON": "root-drift",
+    }
+    result = subprocess.run(
+        [*GITHUB_BASH, _step("Verify the result")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return out.read_text(encoding="utf-8"), report.read_text(encoding="utf-8")
+
+
+def test_a_result_that_cannot_be_verified_gives_no_verdict(tmp_path: Path) -> None:
+    outputs, report = _verify_step(tmp_path, "echo 'no network' >&2; exit 1\n")
+    assert "exit-code=2\n" in outputs and "verdict=error\n" in outputs
+    assert "🟢" not in report and "could not be verified" in report
+
+
+def test_the_verify_step_passes_on_what_lgcov_verified(tmp_path: Path) -> None:
+    fake = (
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--github-output" ]; then\n'
+        '    printf "exit-code=1\\nverdict=fail\\n" >> "$2"\n'
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+    )
+    outputs, report = _verify_step(tmp_path, fake)
+    assert outputs == "exit-code=1\nverdict=fail\n"
+    assert report == "## 🟢 lgcov: pass\n"  # lgcov verified it, so the step leaves it
