@@ -110,18 +110,24 @@ TRANSPORT_ERRORS = (TimeoutError, ConnectionError, httpx.TransportError)
 
 
 class NodeError(Exception):
-    """A node's own code raised during replay: the agent broke, unless `transport`."""
+    """A node's own code raised during replay: the agent broke, unless `transport`. T152:
+    `attempts`: how many calls to that node raised in this run, as under a retry policy."""
 
-    def __init__(self, node: str, original: Exception) -> None:
-        super().__init__(f"node `{node}` raised {type(original).__name__}: {original}")
+    def __init__(self, node: str, original: Exception, attempts: int = 1) -> None:
+        self.raised = f"{type(original).__name__}: {original}"
+        if attempts > 1:
+            self.raised += f" ({attempts} failed attempts in this run)"
+        super().__init__(f"node `{node}` raised {self.raised}")
         self.node = node
         self.original = original
+        self.attempts = attempts
         self.transport = isinstance(original, TRANSPORT_ERRORS)
 
 
 # T089: what replay does when a node's code matches the recording but its input doesn't.
 OnDivergence = Literal["fail", "flag", "live"]
 ON_DIVERGENCE: tuple[OnDivergence, ...] = ("fail", "flag", "live")
+How = Literal["served", "live", "diverged", "after_divergence"]
 
 
 @dataclass(frozen=True)
@@ -129,12 +135,15 @@ class Call:
     """T089: one node call in a replay. `diverged`: the first call in its run whose code
     matched the recording but whose input didn't, so it ran live; `after_divergence`: a
     call that ran live after that. T165: `rebind_skipped`: it matched a recorded step, but
-    that step's ids couldn't be fitted to this run's, so it ran live instead of being served."""
+    that step's ids couldn't be fitted to this run's, so it ran live instead of being served.
+    T152: `raised`: it raised. In a run that finished, a retry policy ran the node again or an
+    error handler took over, and what this call did before raising still happened."""
 
     node: str
-    how: Literal["served", "live", "diverged", "after_divergence"]
+    how: How
     seconds: float = 0.0
     rebind_skipped: bool = False
+    raised: bool = False
 
 
 @dataclass(frozen=True)
@@ -155,7 +164,9 @@ class RunningLoopError(RuntimeError):
         )
 
 
-class _Halted(Exception):
+class _Halted(RuntimeError):
+    # T152: LangGraph's default retry rule refuses a RuntimeError, so a node with a retry policy
+    # doesn't sleep before a halt reaches `_run`. A rule that retries anything meets it again.
     def __init__(self, halt: Halt) -> None:
         super().__init__(f"replay stopped at `{halt.node}` ({halt.why})")
         self.halt = halt
@@ -299,14 +310,16 @@ def _raised_in(exc: BaseException, routers: Mapping[CodeType, str]) -> str | Non
 
 
 @contextmanager
-def _named(name: str) -> Iterator[None]:
-    # An error from the code inside `with` is a NodeError naming the node.
+def _noting(failed: Callable[[Exception], None]) -> Iterator[None]:
+    # T152: an error from the code inside `with` goes on as it is, so a retry policy or an error
+    # handler sees what it sees outside lgcov. `_run` makes it a NodeError when it leaves the run.
     try:
         yield
-    except (GraphBubbleUp, NodeError):
-        raise  # LangGraph's own control flow, or a node further in, already named
+    except GraphBubbleUp:
+        raise  # LangGraph's own control flow
     except Exception as exc:
-        raise NodeError(name, exc) from exc
+        failed(exc)
+        raise
 
 
 _Wrap = Callable[[Callable[..., Any]], Callable[..., Any]]
@@ -327,34 +340,35 @@ def _around(spec: Any, wrap: _Wrap, awrap: _Wrap) -> Any:
     return spec.copy({"bound": bound})
 
 
-def _naming(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+def _naming(failed: Callable[[Exception], None], fn: Callable[..., Any]) -> Callable[..., Any]:
     def call(*args: Any, **kwargs: Any) -> Any:
-        with _named(name):
+        with _noting(failed):
             return fn(*args, **kwargs)
 
     return call
 
 
-def _anaming(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+def _anaming(failed: Callable[[Exception], None], fn: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(fn)  # a RunnableLambda reads the signature to see what to pass, like config
     async def call(*args: Any, **kwargs: Any) -> Any:
-        with _named(name):
+        with _noting(failed):
             return await fn(*args, **kwargs)
 
     return call
 
 
-def _attributed(graph: Any, prefix: str) -> Any:
+def _attributed(graph: Any, prefix: str, failed: Callable[[str, Exception], None]) -> Any:
     """T109: a copy of a subgraph whose nodes' errors name them `<prefix><node>`. It runs
     as it is otherwise: a subgraph's nodes are never served."""
     original = getattr(graph, "nodes", {})
     nodes = dict(original)
     for name, spec in original.items():
         if name != START and _plain(spec.bound) is not None:
-            named = f"{prefix}{name}"
+            named = partial(failed, f"{prefix}{name}")
             nodes[name] = _around(spec, partial(_naming, named), partial(_anaming, named))
         elif isinstance(spec.bound, Pregel):
-            nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{prefix}{name}.")})
+            inner = _attributed(spec.bound, f"{prefix}{name}.", failed)
+            nodes[name] = spec.copy({"bound": inner})
     return graph.copy({"nodes": nodes}) if original else graph
 
 
@@ -419,17 +433,33 @@ def _run(
 
     T168: a node that returned a Command gets its Command back when served, update and goto, so
     the run goes where it went.
+
+    T152: a node's retry policy and error handler work as they do outside lgcov. Every attempt
+    that raised is in the `Call`s, and a retry can't get a call past a halt.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     unused = [(s, _key(s.input, ignore_paths)) for s in served if s.code is not None]
     recorded = {(s.node, s.code) for s in served if s.code is not None}
     calls: list[tuple[str, Any, Any, str | None]] = []  # node, input, returned, fingerprint
     log: list[Call] = []
+    failures: list[tuple[str, Exception]] = []  # each attempt that raised: `Call`s hold no errors
     run = {"diverged": False, "live": False}  # diverged yet; on_divergence="live" took over
+    halted: Halt | None = None  # on_divergence="fail" stopped the run here
     clock = time.perf_counter if budget is None else budget.clock
 
-    def begin(name: str, code: str | None, state: Any) -> tuple[Step | None, Callable[..., Any]]:
-        # How this call runs: the step to serve, if any, and what logs the call when it's done.
+    def failed(
+        name: str, exc: Exception, how: How = "live", skipped: bool = False, seconds: float = 0.0
+    ) -> None:
+        with lock:
+            log.append(Call(name, how, seconds, skipped, raised=True))
+            failures.append((name, exc))
+
+    def begin(
+        name: str, code: str | None, state: Any
+    ) -> tuple[Step | None, Callable[..., Any], Callable[..., None]]:
+        # How this call runs: the step to serve, if any, what logs the call when it's done, and
+        # what logs it if it raises.
+        nonlocal halted
         key = _key(state, ignore_paths)
         snapshot = deepcopy(state) if key is not None else None  # before fn can mutate it
         hit: Step | None = None
@@ -451,11 +481,13 @@ def _run(
                 hit = replace(hit, output=fitted["update"], goto=fitted["goto"])
             except Ambiguous:
                 hit, skipped = None, True
-        how: Literal["served", "live", "diverged", "after_divergence"] = "served"
+        how: How = "served"
         if hit is None:
             how = "diverged" if diverged else "after_divergence" if run["diverged"] else "live"
             if diverged and on_divergence == "fail":
-                raise _Halted(Halt(name, "diverged"))
+                halted = Halt(name, "diverged")
+            if halted is not None:  # T152: a retry policy can bring this call back after the halt
+                raise _Halted(halted)
             if diverged and on_divergence == "live":
                 run["live"] = True
             if budget is not None and not budget.allows(name):
@@ -470,15 +502,15 @@ def _run(
                     calls.append((name, snapshot, out, code))
             return out
 
-        return hit, finish
+        return hit, finish, partial(failed, name, how=how, skipped=skipped)
 
     def wrap(name: str, fn: Callable[..., Any], code: str | None) -> Callable[..., Any]:
         def call(state: Any, *args: Any, **kwargs: Any) -> Any:
-            hit, finish = begin(name, code, state)
+            hit, finish, fail = begin(name, code, state)
             if hit is not None:
                 return finish(_returned(hit))
             start = clock()
-            with _named(name):
+            with _noting(lambda exc: fail(exc, seconds=clock() - start)):
                 out = fn(state, *args, **kwargs)
             return finish(out, clock() - start)
 
@@ -487,11 +519,11 @@ def _run(
     def awrap(name: str, fn: Callable[..., Any], code: str | None) -> Callable[..., Any]:
         @wraps(fn)  # a RunnableLambda reads the signature to see what to pass, like config
         async def call(state: Any, *args: Any, **kwargs: Any) -> Any:
-            hit, finish = begin(name, code, state)
+            hit, finish, fail = begin(name, code, state)
             if hit is not None:
                 return finish(_returned(hit))
             start = clock()
-            with _named(name):
+            with _noting(lambda exc: fail(exc, seconds=clock() - start)):
                 out = await fn(state, *args, **kwargs)
             return finish(out, clock() - start)
 
@@ -505,7 +537,7 @@ def _run(
         )
     for name, spec in original.items():  # T109: a subgraph's errors name its own node
         if isinstance(getattr(spec, "bound", None), Pregel):
-            nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{name}.")})
+            nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{name}.", failed)})
     routers = _routers(graph)
     runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
@@ -542,13 +574,13 @@ def _run(
                 take(chunk)
     except _Halted as stop:
         return steps, log, stop.halt
-    except (NodeError, GraphBubbleUp):
+    except GraphBubbleUp:
         raise
-    except Exception as exc:  # T109: a router raised: name it, as a node's error names the node
-        router = _raised_in(exc, routers)
-        if router is None:
+    except Exception as exc:  # the node that raised it, or T109: the router that did
+        named = next((n for n, e in failures if e is exc), None) or _raised_in(exc, routers)
+        if named is None:
             raise
-        raise NodeError(router, exc) from exc
+        raise NodeError(named, exc, sum(n == named for n, _ in failures) or 1) from exc
     return steps, log, None
 
 
@@ -613,6 +645,11 @@ class Replay:
     def rebind_skipped(self) -> tuple[str, ...]:
         """T165: nodes run live because their recorded ids couldn't be fitted to this run's."""
         return tuple(c.node for c in self.calls if c.rebind_skipped)
+
+    @property
+    def failed_attempts(self) -> tuple[str, ...]:
+        """T152: each call that raised while the run went on, by its node."""
+        return tuple(c.node for c in self.calls if c.raised)
 
 
 def replay_run(

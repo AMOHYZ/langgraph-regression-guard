@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Callable, Collection
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -360,8 +361,21 @@ def _rebind_lines(replays: list[Replay]) -> list[str]:
     ]
 
 
-def _say_rebind_skipped(replays: list[Replay]) -> None:
-    for line in _rebind_lines(replays):
+def _raised_lines(replays: list[Replay]) -> list[str]:
+    """T152: the calls that raised while the run went on. They leave no step, so nothing else
+    shows that a write in one may have happened as well as the one in the call that succeeded."""
+    raised = Counter((i, node) for i, r in enumerate(replays, 1) for node in r.failed_attempts)
+    if not raised:
+        return []
+    where = ", ".join(f"`{node}` in run {i} ({n}x)" for (i, node), n in raised.items())
+    return [
+        f"Raised, and the run went on (a retry policy or error handler): {where}. "
+        "What a failed attempt did before raising, like a write, still happened."
+    ]
+
+
+def _say_replay_notes(replays: list[Replay]) -> None:
+    for line in [*_rebind_lines(replays), *_raised_lines(replays)]:
         print(line, file=sys.stderr)
 
 
@@ -381,9 +395,8 @@ def _node_failure(prog: str, exc: NodeError) -> int:
     only); network trouble inside the node is INFRA_ERROR instead, and still names the node.
     """
     if exc.transport:
-        original = f"{type(exc.original).__name__}: {exc.original}"
         where = f"harness error (transport) in node `{exc.node}`, not a regression"
-        print(f"{prog}: {where}: {original}", file=sys.stderr)
+        print(f"{prog}: {where}: {exc.raised}", file=sys.stderr)
         return Outcome.INFRA_ERROR
     print(f"{prog}: agent failure: {exc}")
     return Outcome.AGENT_FAIL
@@ -447,7 +460,8 @@ def _replay(argv: list[str]) -> int:
         return _harness_error("lgcov replay", "replay failed outside node code", exc)
     drifts = [list(r.drifts) for r in replays]
     skipped = _rebind_lines(replays)
-    print("\n".join([*_replay_markdown(runs, drifts), *([""] if skipped else []), *skipped]))
+    notes = [*skipped, *_raised_lines(replays)]
+    print("\n".join([*_replay_markdown(runs, drifts), *([""] if notes else []), *notes]))
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
     code = drift_exit_code(args.fail_on, len(root), len(downstream))
@@ -920,7 +934,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
             for run in runs
         ]
     except NodeError as exc:
-        original = f"{type(exc.original).__name__}: {exc.original}"
+        original = exc.raised
         if exc.transport:
             return replace(partial, harness_error=original, harness_node=exc.node)
         return replace(
@@ -945,7 +959,11 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     # T089: nodes a run stopped before (divergence or budget) are INCONCLUSIVE, never a fail.
     not_checked = tuple(dict.fromkeys(n for r in replays for n in r.not_checked))
     under_floor = node_floor_miss(cov, cfg.thresholds.min_node_coverage)
-    diverged = [*_divergence_lines(replays, args.on_divergence), *_rebind_lines(replays)]
+    diverged = [
+        *_divergence_lines(replays, args.on_divergence),
+        *_rebind_lines(replays),
+        *_raised_lines(replays),
+    ]
     calls = [c for r in replays for c in r.calls]
     timing = Timing(
         0.0,
@@ -1436,7 +1454,7 @@ def _judge_cmd(argv: list[str]) -> int:
     try:
         done = [replay_run(graph, r, cfg.ignore_paths, serve=not args.live) for r in runs]
         replays = [(list(r.drifts), list(r.steps)) for r in done]
-        _say_rebind_skipped(done)
+        _say_replay_notes(done)
     except NodeError as exc:
         return _node_failure("lgcov judge", exc)
     except Exception as exc:  # replay itself: no node or router raised it
@@ -1623,7 +1641,7 @@ def _review_cmd(argv: list[str]) -> int:
         done = [replay_run(graph, run, cfg.ignore_paths, serve=True) for run in runs]
     except Exception as exc:
         return _harness_error("lgcov review", "cannot replay the graph", exc)
-    _say_rebind_skipped(done)
+    _say_replay_notes(done)
     fresh = [list(r.steps) for r in done]
     cases = _l2_cases(spec, fresh)
     if args.case_id not in cases:
