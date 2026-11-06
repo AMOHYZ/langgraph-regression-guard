@@ -19,3 +19,5 @@ or slice group never goes further than its KPIs' own verdicts.
 - **The 2.5%** is at the default α = 0.05. With no discordant pair, SHIP reads the no-drop
   bound at α/2 instead of the CI. That is the same 2.5% at α = 0.05, and more if α is set
   higher, as the PR comment then says.
+- **On a PR, these settings come from the base commit,** so a PR can't change what grades it. What
+  that does and doesn't stop is in [the trust boundary](trust-boundary.md).

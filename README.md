@@ -182,6 +182,8 @@ langsmith:          # lgcov.yaml
   the commit lgcov tested or the PR's head commit. LangSmith's `evaluate()` records that
   field. If no experiment ran on either commit, the report says nothing.
 - **The key.** Put `LANGSMITH_API_KEY` in the job's `env:` from a secret.
+  - ⚠️ That job runs the PR's code, which can read the key. Until the job split (T179), only do
+    this if PR authors are trusted: no fork PRs, no outside contributors.
   - Without it, the report says so in one line. Fork PRs get no secrets, so they always
     hit this case.
   - A LangSmith outage is a ⚠️ line.
@@ -217,6 +219,10 @@ jobs:
 
 - Each PR gets one report comment, updated in place on every push. PRs from forks get
   a read-only token, so there the report goes to the job summary instead.
+- On a PR, `lgcov.yaml`, the taxonomy and the bands are read from the base commit, so a PR
+  can't change what grades it. Its edits apply after it merges. The first PR that adds
+  `lgcov.yaml` is advisory: it uses its own policy, exits 0 and claims no SHIP. What this does
+  and doesn't stop: [docs/trust-boundary.md](docs/trust-boundary.md).
 - `root-drift` and `any-drift` fail the same PRs for now: until replay classifies
   drift by the node inputs it records, the first node to drift in each run counts
   as root.
@@ -252,7 +258,9 @@ jobs:
 - With `taxonomy:`, the run also gates the taxonomy's KPIs on the replayed outputs (see
   [The gate](#the-gate-ship-block-or-inconclusive)) and adds the table to the report, at
   most 200 model judge calls per run. `judge: jev` KPIs read `JEV_API_URL` and
-  `JEV_API_KEY`: set them in the job's `env:` from secrets.
+  `JEV_API_KEY`: set them in the job's `env:` from secrets. ⚠️ That job runs the PR's code,
+  which can read them. Until the job split (T179), only do this if PR authors are trusted: no
+  fork PRs, no outside contributors.
 - Outcomes and exit codes are in the table below.
 - The run locks the commits it compares. It records the base checkout's HEAD and the PR's
   at the start, and the report prints both:
