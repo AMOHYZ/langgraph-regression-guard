@@ -11,6 +11,7 @@
 - A node that returns `Command` is served, and a change to where it sends the run is drift (#59).
 - A node that reaches a pydantic class keeps its fingerprint across processes, so it's served when unchanged (#65).
 - The first real PR through `lgcov bench`, open_deep_research #163, scored as a pilot: one PR, one question (#61, #62, #63, #64).
+- On a PR the gate reads `lgcov.yaml`, the taxonomy and the bands from the base commit, so a PR can't change what grades it; the first adoption PR is advisory. [What this doesn't stop yet](docs/trust-boundary.md).
 
 ## 0.1.0 (2026-11-02)
 

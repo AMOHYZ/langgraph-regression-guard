@@ -66,6 +66,7 @@ class CiResult:
     root_drift: tuple[str, ...] = ()
     propagated_drift: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
+    cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
     harness_error: str = ""
     harness_node: str = ""  # T074: the network trouble surfaced inside this node
     crash: str = ""  # T074: e.g. "Node `classify` raised ValueError: ..."; an agent failure

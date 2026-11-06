@@ -119,6 +119,10 @@ EXIT_ERROR = 2
 EXIT_NOT_DRIFTED = 1
 # T166: a side of `lgcov bench` couldn't load its graph (lgcov.bench_side).
 CANT_IMPORT = 3
+# T154: the report's headline on a first adoption PR, whose policy is all its own.
+BOOTSTRAP_HEADLINE = (
+    "Advisory: policy comes from this PR and is not trusted yet; enforcement starts after merge"
+)
 
 
 def _output_hash(step: Step) -> str:
@@ -773,6 +777,83 @@ def _base_diff(base_dir: str | None, target: str, head: GraphSnapshot) -> tuple[
     return _graph_diff_lines(diff_graphs(base, head)), ""
 
 
+def _policy_path(args: argparse.Namespace, path: str) -> str:
+    """T154: where the gate reads a policy file: in the base checkout when there is one, so a
+    PR's edit to the file can't change what grades it."""
+    if not args.policy_dir:
+        return path
+    file = Path(path)
+    if file.is_absolute():
+        try:
+            file = file.relative_to(Path.cwd())
+        except ValueError:
+            return path  # outside the PR's checkout
+    return str(Path(args.policy_dir) / file)
+
+
+def _first_adoption(args: argparse.Namespace) -> bool:
+    """T154: nothing on the base says what to enforce yet: no lgcov.yaml, and no gate through
+    the Action's inputs either (a graph input and a recorded baseline)."""
+    if not args.policy_dir or Path(_policy_path(args, args.config)).is_file():
+        return False
+    baseline = Path(_policy_path(args, args.cassette_dir or "cassettes")) / "baseline.json"
+    return not (args.graph and baseline.is_file())
+
+
+def _advisory_report(body: str) -> str:
+    """T154: a first adoption PR's report: its headline, and no claim to read as a SHIP."""
+    lines = [
+        line.replace("🟢 SHIP", "would SHIP")
+        for line in body.splitlines()
+        if not line.startswith("**What SHIP and BLOCK guarantee.**")
+    ]
+    lines[1] = f"## ⚠️ {BOOTSTRAP_HEADLINE}"
+    lines[-1] = lines[-1].replace("verdict: **pass**", "verdict: **advisory**")
+    return "\n".join(lines) + "\n"
+
+
+def _moved_graph(args: argparse.Namespace, cfg: Config) -> str:
+    """T154: why a graph this PR moved won't load: the base's lgcov.yaml names the old path."""
+    if not args.policy_dir or args.graph or Path(cfg.graph_entrypoint.rpartition(":")[0]).exists():
+        return ""
+    return (
+        f"\nlgcov.yaml on the base names `{cfg.graph_entrypoint}`, and this PR has no such file. "
+        "The gate reads lgcov.yaml from the base, so land the new path first, or keep a shim "
+        "at the old one."
+    )
+
+
+def _cassettes_edited(args: argparse.Namespace, cfg: Config) -> bool:
+    """T154: this PR changed the expected outputs it is graded on. The gate still uses them,
+    or `cassette accept` could never pass in its own PR."""
+    base = _policy_path(args, cfg.cassette_dir)
+    return bool(args.policy_dir) and _tree(Path(cfg.cassette_dir)) != _tree(Path(base))
+
+
+def _policy_notes(args: argparse.Namespace, cfg: Config, cassettes_edited: bool) -> list[str]:
+    """T154: what this PR edited of the gate's own inputs, for the report."""
+
+    def text(path: str) -> bytes | None:
+        return Path(path).read_bytes() if Path(path).is_file() else None
+
+    if not args.policy_dir:
+        return []
+    files = [args.config, *([args.taxonomy] if args.taxonomy else []), args.bands]
+    edited = [f for f in files if text(f) != text(_policy_path(args, f))]
+    notes = []
+    if edited:
+        notes.append(
+            f"{_quoted(edited)}: read from the base commit, so this PR's edits apply after "
+            "it merges."
+        )
+    if cassettes_edited:
+        notes.append(
+            f"⚠️ This PR changes `{cfg.cassette_dir}`, the expected outputs this gate compares "
+            "against, and the gate used its version. Check that diff."
+        )
+    return notes
+
+
 def _ci_result(args: argparse.Namespace) -> CiResult:
     start = perf_counter()
     budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
@@ -780,10 +861,17 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     if args.harness_error:
         return CiResult(fail_on, EXIT_ERROR, harness_error=args.harness_error)
     overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
+    # T154: a fix or a new file in this PR can't help until it merges, so a broken policy says so.
+    from_base = (
+        "\nThis is read from the base commit, so this PR's edits apply after it merges."
+        if args.policy_dir
+        else ""
+    )
     try:
-        cfg = load_config(args.config, overrides)
+        cfg = load_config(_policy_path(args, args.config), overrides)
     except (OSError, ValueError) as exc:
-        return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid lgcov.yaml: {exc}")
+        msg = f"invalid lgcov.yaml: {exc}{from_base}"
+        return CiResult(fail_on, EXIT_ERROR, harness_error=msg)
     tier: Tier = args.tier or cfg.tier
     policy = tier_policy(tier, cfg.samples_per_case)
     budget.seconds = policy.budget if args.budget_seconds is None else args.budget_seconds
@@ -793,18 +881,19 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     kpi_nodes: set[str] | None = None  # T104: for lint; None: no taxonomy, no check
     if args.taxonomy:
         try:
-            every = list(load_taxonomy(args.taxonomy).kpi_specs)
+            every = list(load_taxonomy(_policy_path(args, args.taxonomy)).kpi_specs)
             kpi_nodes = {s.node for s in every}
             llm = [s.name for s in every if s.judge == "llm"]
             runs_llm = policy.llm_judges and _llm_judge is not None
             specs = every if runs_llm else [s for s in every if s.judge != "llm"]
             l2 = (specs, [_l2_judge(spec, cfg.jev_model) for spec in specs])
         except (OSError, ValueError) as exc:
-            return CiResult(fail_on, EXIT_ERROR, harness_error=f"invalid taxonomy: {exc}")
+            msg = f"invalid taxonomy: {exc}{from_base}"
+            return CiResult(fail_on, EXIT_ERROR, harness_error=msg)
         try:
-            advisory, flagged, calibration = _gate_bands(args.bands, every, cfg)
+            advisory, flagged, calibration = _gate_bands(_policy_path(args, args.bands), every, cfg)
         except (OSError, ValueError) as exc:
-            msg = f"invalid lgcov.yaml or bands.json: {exc}"
+            msg = f"invalid lgcov.yaml or bands.json: {exc}{from_base}"
             return CiResult(fail_on, EXIT_ERROR, harness_error=msg)
         llm_notes, llm_code = _llm_notes(llm, advisory, policy.llm_judges)
     try:
@@ -812,11 +901,11 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         graph = _load_graph(cfg.graph_entrypoint)
         head = snapshot_from_compiled(graph)
     except Exception as exc:
-        return CiResult(
-            fail_on, EXIT_ERROR, harness_error=_harness_message("cannot load graph", exc)
-        )
+        msg = _harness_message("cannot load graph", exc) + _moved_graph(args, cfg)
+        return CiResult(fail_on, EXIT_ERROR, harness_error=msg)
     graph_lines, graph_note = _base_diff(args.base_dir, cfg.graph_entrypoint, head)
-    partial = CiResult(fail_on, EXIT_ERROR, tuple(graph_lines), graph_note)
+    edited = _cassettes_edited(args, cfg)
+    partial = CiResult(fail_on, EXIT_ERROR, tuple(graph_lines), graph_note, cassettes_edited=edited)
     try:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -888,6 +977,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
         under_floor=under_floor,
         notes=(
+            *_policy_notes(args, cfg, edited),
             *llm_notes,
             *([note] if note else []),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
@@ -906,7 +996,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         return result
     judge_start = perf_counter()
     try:
-        saved = _saved_cases(Path(args.bands).parent / "cases", l2[0])
+        saved = _saved_cases(Path(_policy_path(args, args.bands)).parent / "cases", l2[0])
         extra = sum(len(saved.get(s.name, [])) for s in l2[0] if s.judge != "code")
         stats, gate = _ci_gate(args, cfg, policy.k, advisory, flagged, *l2, runs, pairs, extra)
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
@@ -1062,12 +1152,20 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--nightly-url", help="main's latest nightly run, linked in the report")
     ap.add_argument("--timing-out", help="write this run's timing here as JSON (T105 benchmark)")
     ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
+    ap.add_argument("--policy-dir", help="checkout of the PR's base: lgcov.yaml, taxonomy, bands")
     args = ap.parse_args(argv)
+    bootstrap = _first_adoption(args)
+    if bootstrap:
+        args.policy_dir = None  # T154: the PR's policy is all there is, so nothing is enforced
     start = _commits(args.base_dir)  # T114: before anything is loaded
     result = _locked(_ci_result(args), start, args.base_dir)
+    advisory = bootstrap and result.exit_code != EXIT_ERROR  # an error means nothing ran
+    if advisory:
+        result = replace(result, exit_code=0)
     report = Path(args.report).resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
     body = render_ci_report(result)
+    body = _advisory_report(body) if advisory else body
     report.write_text(body, encoding="utf-8")
     print(body, end="")
     if args.timing_out and result.timing:
@@ -1081,7 +1179,7 @@ def _ci(argv: list[str]) -> int:
             "report-path": report,
             "root-drift-count": len(result.root_drift),
             "tier": result.tier,
-            "verdict": verdict(result.exit_code),
+            "verdict": "advisory" if advisory else verdict(result.exit_code),
         }
         with open(args.github_output, "a", encoding="utf-8") as f:
             f.writelines(f"{k}={v}\n" for k, v in outputs.items())
@@ -1883,6 +1981,7 @@ def _selfcheck_cmd(argv: list[str]) -> int:
                 tier=None,
                 nightly_url=None,
                 bands="calibration/bands.json",
+                policy_dir=None,
             )
         )
         actual = Outcome(result.exit_code)

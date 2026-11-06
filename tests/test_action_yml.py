@@ -276,3 +276,60 @@ def test_ci_runs_the_harness_selfcheck_on_every_push() -> None:
     steps = _dict(_dict(workflow["jobs"])["selfcheck"])["steps"]
     assert isinstance(steps, list)
     assert any("lgcov selfcheck" in str(_dict(s).get("run", "")) for s in steps)
+
+
+# T154: on a PR the gate's policy comes from the base commit, and never from the PR's checkout.
+def _run_step_calls(tmp_path: Path, event: str, base_dir: str) -> list[str]:
+    """Run the `Run lgcov` step with fake lgcovs: the program it called, then its arguments."""
+    record = 'printf "%s\\n" "$0" "$@" > "$RUNNER_TEMP/called"\n'
+    _executable(tmp_path / ".venv" / "bin" / "lgcov", record)
+    _executable(tmp_path / "bin" / "uvx", record)
+    out = tmp_path / "github_output"
+    out.touch()
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "ACTION_PATH": str(tmp_path),
+        "UV_PYTHON": "3.12",
+        "EVENT_NAME": event,
+        "BASE_DIR": base_dir,
+        "HARNESS_ERROR": "",
+        "LIVE": "false",
+        "FAIL_ON_INCONCLUSIVE": "false",
+        "ON_DIVERGENCE": "flag",
+        "FAIL_ON": "root-drift",
+        **dict.fromkeys(("GRAPH", "CASSETTE_DIR", "TAXONOMY", "BUDGET_SECONDS", "TIER"), ""),
+        **dict.fromkeys(("NIGHTLY_URL", "COVERAGE_BASELINE"), ""),
+    }
+    result = subprocess.run(
+        [*GITHUB_BASH, _step("Run lgcov")], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    return (tmp_path / "called").read_text(encoding="utf-8").splitlines()
+
+
+def test_a_pr_run_reads_its_policy_from_the_base_checkout(tmp_path: Path) -> None:
+    called = _run_step_calls(tmp_path, "pull_request", "/base")
+    assert called[0] == ".venv/bin/lgcov"
+    assert called[called.index("--policy-dir") + 1] == "/base"
+    assert called[called.index("--base-dir") + 1] == "/base"
+
+
+def test_a_pr_run_with_no_base_checkout_gives_no_verdict(tmp_path: Path) -> None:
+    called = _run_step_calls(tmp_path, "pull_request", "")
+    assert called[0].endswith("/uvx")  # no project code runs for a report that says this
+    assert "--policy-dir" not in called
+    assert "gate has no policy it can trust" in called[called.index("--harness-error") + 1]
+
+
+def test_a_push_has_no_base_and_reads_its_own_policy(tmp_path: Path) -> None:
+    called = _run_step_calls(tmp_path, "push", "")
+    assert called[0] == ".venv/bin/lgcov"
+    assert "--policy-dir" not in called and "--harness-error" not in called
+
+
+def test_the_run_step_is_told_the_event() -> None:
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    assert _dict(run["env"])["EVENT_NAME"] == "${{ github.event_name }}"

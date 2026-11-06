@@ -61,7 +61,7 @@ outputs:
     description: "Nodes that drifted only after an earlier node in the same run."
     value: ${{ steps.lgcov.outputs.propagated-drift-count }}
   verdict:
-    description: "pass | fail | error (error: harness error, not a regression)."
+    description: "pass | fail | error (error: harness error, not a regression) | advisory (first adoption PR: nothing enforced yet)."
     value: ${{ steps.lgcov.outputs.verdict }}
 
 runs:
@@ -170,7 +170,7 @@ runs:
            && git worktree add --detach "$dir" "$BASE_SHA"; then
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
         else
-          echo "::warning title=lgcov::could not check out the base commit; the graph diff is skipped"
+          echo "::warning title=lgcov::could not check out the base commit; the gate gives no verdict"
         fi
 
     - name: Download main's coverage
@@ -236,6 +236,7 @@ runs:
         CASSETTE_DIR: ${{ inputs.cassette-dir }}
         TAXONOMY: ${{ inputs.taxonomy }}
         FAIL_ON: ${{ inputs.fail-on }}
+        EVENT_NAME: ${{ github.event_name }}
         BASE_DIR: ${{ steps.base.outputs.dir }}
         HARNESS_ERROR: ${{ steps.install.outputs.harness-error }}
         LIVE: ${{ inputs.live }}
@@ -253,7 +254,11 @@ runs:
         [ -n "$GRAPH" ] && args+=(--graph "$GRAPH")
         [ -n "$CASSETTE_DIR" ] && args+=(--cassette-dir "$CASSETTE_DIR")
         [ -n "$TAXONOMY" ] && args+=(--taxonomy "$TAXONOMY")
-        [ -n "$BASE_DIR" ] && args+=(--base-dir "$BASE_DIR")
+        # T154: a PR can't change what grades it, so its policy comes from the base commit.
+        [ -n "$BASE_DIR" ] && args+=(--base-dir "$BASE_DIR" --policy-dir "$BASE_DIR")
+        if [ "${EVENT_NAME:-}" = "pull_request" ] && [ -z "$BASE_DIR" ] && [ -z "$HARNESS_ERROR" ]; then
+          HARNESS_ERROR="Could not check out the base commit, so the gate has no policy it can trust."
+        fi
         args+=(--coverage-out "$RUNNER_TEMP/lgcov/coverage.json")
         [ -n "$COVERAGE_BASELINE" ] && args+=(--coverage-baseline "$COVERAGE_BASELINE")
         [ "$LIVE" = "true" ] && args+=(--live)
@@ -263,7 +268,7 @@ runs:
         [ -n "$TIER" ] && args+=(--tier "$TIER")
         [ -n "$NIGHTLY_URL" ] && args+=(--nightly-url "$NIGHTLY_URL")
         if [ -n "$HARNESS_ERROR" ]; then
-          # The project didn't install; lgcov alone is enough to render the harness report.
+          # The run can't go ahead; lgcov alone is enough to render the harness report.
           uvx --from "$ACTION_PATH" lgcov "${args[@]}" --harness-error "$HARNESS_ERROR"
         else
           .venv/bin/lgcov "${args[@]}"
