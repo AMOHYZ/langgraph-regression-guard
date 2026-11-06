@@ -6,10 +6,12 @@ import tomllib
 from collections.abc import Callable
 from importlib.metadata import EntryPoint
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
+from lgcov.cassette import replay_run
 from lgcov.cli import main
 from lgcov.judges import KPI, NodeState, Verdict
 from lgcov.slices import Group
@@ -479,6 +481,39 @@ def test_cli_replay_applies_ignore_paths_from_config(tmp_path: Path) -> None:
     assert main(["replay", "--live", "--config", str(cfg)]) == 1  # the random nonce drifts
     cfg.write_text(base + "ignore_paths: [/nonce]\n", encoding="utf-8")
     assert main(["replay", "--live", "--config", str(cfg)]) == 0
+
+
+# T177: mask_volatile_in_key reaches every command that replays.
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["replay"],
+        ["ci", "--report", "report.md", "--taxonomy", "taxonomy.yaml"],
+        ["judge", "--taxonomy", "taxonomy.yaml"],
+        [
+            *("review", "override", "--kpi", "answer_states_order_status"),
+            *("--case-id", "run-0/respond", "--judge-label", "pass", "--human-label", "fail"),
+            *("--reviewer", "ahmed", "--taxonomy", "taxonomy.yaml"),
+        ],
+    ],
+    ids=["replay", "ci", "judge", "review"],
+)
+def test_every_command_that_replays_reads_mask_volatile_in_key(
+    command: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(
+        Path(DEMO_TAXONOMY).read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (tmp_path / "lgcov.yaml").write_text(
+        "graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\nmask_volatile_in_key: true\n",
+        encoding="utf-8",
+    )
+    spy = Mock(wraps=replay_run)
+    monkeypatch.setattr("lgcov.cli.replay_run", spy)
+    main(command)
+    assert spy.call_count > 0
+    assert all(c.kwargs["mask_volatile"] is True for c in spy.call_args_list)
 
 
 # Replay serves a node from the cassette when its code fingerprint and input match.

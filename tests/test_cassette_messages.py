@@ -350,7 +350,7 @@ def test_accept_nodes_still_sees_a_real_change_in_plain_state() -> None:
 
 
 def test_an_artifact_json_can_t_hold_is_saved_as_its_repr() -> None:
-    # A paid recording must not be lost to a value replay never compares.
+    # A paid recording must not be lost to a value JSON can't hold, and it must still be served.
     tools = _returns(artifact=object())
     spy = Mock()
     loaded = Cassette.from_json(record(_agent(spy, tools=tools), PROMPT).to_json())
@@ -584,7 +584,8 @@ def test_an_agent_that_trims_its_history_replays_with_no_real_call() -> None:
     assert fresh.steps[-1].output["messages"][0].content == "saw 1"
 
 
-def test_a_worker_given_a_plain_tool_call_answers_this_run_s_id() -> None:
+@pytest.mark.parametrize("mask_volatile", [False, True])
+def test_a_worker_given_a_plain_tool_call_answers_this_run_s_id(mask_volatile: bool) -> None:
     def graph(spy: Mock, model: Node) -> Agent:
         def fan(state: MessagesState) -> list[Send] | str:
             last = state["messages"][-1]
@@ -608,7 +609,8 @@ def test_a_worker_given_a_plain_tool_call_answers_this_run_s_id() -> None:
     spy = Mock()
     cassette = Cassette.from_json(record(graph(spy, _respond), PROMPT).to_json())
     spy.reset_mock()
-    fresh = replay_run(graph(spy, _respond_reworded), cassette, serve=True)
+    pr = graph(spy, _respond_reworded)
+    fresh = replay_run(pr, cassette, serve=True, mask_volatile=mask_volatile)
     assert (fresh.drifts, _ran(spy)) == ((), [])  # served, and model's check on it passed
 
 

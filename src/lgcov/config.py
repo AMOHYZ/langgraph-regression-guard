@@ -78,6 +78,7 @@ class Config:
     taxonomy_path: str | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
     ignore_paths: tuple[str, ...] = ()  # JSON pointers into node I/O, e.g. /meta/nonce
+    mask_volatile_in_key: bool = False  # T177: the key masks `id`s, UUIDs and date-times too
     samples_per_case: int | None = None  # T073: k verdicts per case; None: the tier's (T089)
     gate: GateConfig = field(default_factory=GateConfig)
     tier: Tier = "pr"
@@ -93,6 +94,7 @@ _KEYS = (
     "ignore_paths",
     "jev_model",
     "langsmith",
+    "mask_volatile_in_key",
     "report",
     "samples_per_case",
     "taxonomy",  # alias for taxonomy_path
@@ -251,12 +253,16 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
     ignore = _str_list(d.get("ignore_paths", []), "ignore_paths")
     if not all(p.startswith("/") for p in ignore):
         raise ValueError("lgcov.yaml: 'ignore_paths' must be JSON pointers starting with '/'")
+    mask_volatile = d.get("mask_volatile_in_key", False)
+    if not isinstance(mask_volatile, bool):
+        raise ValueError("lgcov.yaml: 'mask_volatile_in_key' must be true or false")
     return Config(
         graph_entrypoint=entry,
         cassette_dir=_str(d.get("cassette_dir", "cassettes"), "cassette_dir"),
         taxonomy_path=_taxonomy_path(d),
         thresholds=_thresholds(d.get("thresholds", {})),
         ignore_paths=ignore,
+        mask_volatile_in_key=mask_volatile,
         samples_per_case=(
             None
             if "samples_per_case" not in d

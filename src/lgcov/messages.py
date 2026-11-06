@@ -9,6 +9,7 @@ values in, values out.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from langchain_core.messages import (
@@ -22,6 +23,10 @@ from langchain_core.messages import (
 
 # A saved message is LangChain's own dict form under this key, so loading gives it back.
 _SAVED = "langchain_message"
+# Why the model stopped: `stop_reason` is Anthropic's name for `finish_reason`.
+_STOPPED = ("finish_reason", "stop_reason")
+# In a default repr, the object's memory address differs on every run.
+_ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
 
 
 def fields(message: BaseMessage) -> dict[str, object]:
@@ -45,6 +50,22 @@ def fields(message: BaseMessage) -> dict[str, object]:
     return out
 
 
+def key_fields(message: BaseMessage) -> dict[str, object]:
+    """T177: what counts when a recorded step's input is matched. `fields`, plus what a node can
+    act on: a tool's artifact, additional_kwargs and why the model stopped. Read as `encode` saves
+    them, so a live message and its recording give the same values."""
+    data = message_to_dict(message)["data"]
+    acted_on = {
+        "artifact": data.get("artifact"),
+        "additional_kwargs": data["additional_kwargs"],
+        **{k: data["response_metadata"].get(k) for k in _STOPPED},
+    }
+    saved: dict[str, object] = json.loads(
+        _ADDRESS.sub(" at 0x", json.dumps(acted_on, default=repr))
+    )
+    return fields(message) | saved
+
+
 def plain(value: Any) -> Any:
     """`value` as JSON a judge can read: each message replaced by its fields."""
     if isinstance(value, BaseMessage):
@@ -63,8 +84,8 @@ def encode(value: object) -> object:
         # include_response_headers=True puts them here; they can hold cookies, and cassettes
         # get committed.
         saved["data"]["response_metadata"].pop("headers", None)
-        # What JSON can't hold, like a tool's artifact, isn't compared and must not cost the
-        # recording, so it's saved as its repr.
+        # What JSON can't hold, like a tool's artifact, must not cost the recording, so it's
+        # saved as its repr.
         return {_SAVED: json.loads(json.dumps(saved, default=repr))}
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 

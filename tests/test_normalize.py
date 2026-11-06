@@ -3,6 +3,7 @@
 import json
 from typing import Any
 
+import pytest
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -13,7 +14,7 @@ from langchain_core.messages import (
 )
 
 from lgcov.cassette import NodeIO, diff_cassettes
-from lgcov.normalize import normalize, normalize_counted
+from lgcov.normalize import key_view, normalize, normalize_counted
 
 
 def test_uuids_and_timestamps_are_masked_inside_text() -> None:
@@ -222,3 +223,89 @@ def test_diff_cassettes_sees_through_a_message_s_ids() -> None:
     base = io(_reply("hi", 1))
     assert diff_cassettes(base, io(_reply("hi", 2))) == {}
     assert diff_cassettes(base, io(_reply("bye", 2))) == {"model": "root"}
+
+
+# T177: what a recorded step's input is matched on, which is more than what's compared.
+NOTE = "run 3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b at 2026-10-27T07:15:30Z"
+
+
+def test_the_key_sees_an_id_a_uuid_and_a_date_time_that_comparing_masks() -> None:
+    raw = {"id": "ticket-1", "note": NOTE}
+    assert key_view(raw) == raw
+    assert normalize(raw) == {"id": "<id>", "note": "run <uuid> at <timestamp>"}
+
+
+@pytest.mark.parametrize(
+    "key", ["message_id", "request_id", "run_id", "span_id", "tool_call_id", "trace_id"]
+)
+def test_the_key_still_masks_the_clearly_volatile_names(key: str) -> None:
+    assert key_view({key: "x", "order_id": "42"}) == {key: "<id>", "order_id": "42"}
+
+
+def test_the_key_masks_a_tool_call_s_id_and_nothing_else_in_it() -> None:
+    # In a Send payload, say. That `id` is a tool_call_id, and rebind fits what's served to it.
+    assert key_view({"call": _call({"id": "42"})}) == {
+        "call": {"name": "search", "args": {"id": "42"}, "id": "<id>", "type": "tool_call"}
+    }
+
+
+def test_the_key_keeps_an_id_beside_any_other_type() -> None:
+    raw = {"type": "order", "name": "search", "args": {}, "id": "42"}
+    assert key_view(raw) == raw
+
+
+def test_the_key_reads_what_a_message_says_and_what_a_node_can_act_on() -> None:
+    reply = AIMessage(
+        "hi",
+        id="run-1",
+        additional_kwargs={"refusal": "no", "tool_calls": [{"id": "call_1", "type": "function"}]},
+        response_metadata={"finish_reason": "stop", "stop_reason": "end_turn", "model_name": "m"},
+        usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    )
+    assert key_view(reply) == {
+        "type": "ai",
+        "content": "hi",
+        "artifact": None,
+        "additional_kwargs": {"refusal": "no", "tool_calls": [{"id": "<id>", "type": "function"}]},
+        "finish_reason": "stop",
+        "stop_reason": "end_turn",
+    }
+
+
+def test_an_id_counts_in_a_tool_s_artifact_but_not_in_additional_kwargs() -> None:
+    def tool(value: str) -> ToolMessage:
+        return ToolMessage("r", tool_call_id="c", artifact={"id": value})
+
+    def reply(value: str) -> AIMessage:
+        return AIMessage("a", additional_kwargs={"reasoning": {"id": value}})
+
+    assert key_view(tool("1")) != key_view(tool("2"))
+    assert key_view(reply("1")) == key_view(reply("2"))
+
+
+def test_mask_volatile_masks_what_comparing_masks_in_plain_state() -> None:
+    raw = {"id": "ticket-1", "note": NOTE, "order_id": "42", "run_id": "r1"}
+    assert key_view(raw, mask_volatile=True) == normalize(raw)
+
+
+def test_mask_volatile_still_counts_a_message_s_fields_and_masks_their_text() -> None:
+    def reply(reason: str, when: str) -> AIMessage:
+        kwargs = {"created": f"at {when}"}
+        return AIMessage("a", additional_kwargs=kwargs, response_metadata={"finish_reason": reason})
+
+    def key(message: AIMessage) -> object:
+        return key_view(message, mask_volatile=True)
+
+    first = reply("stop", "2026-10-27T07:15:30Z")
+    assert key(first) == key(reply("stop", "2027-01-01T10:00:00Z"))
+    assert key(first) != key(reply("length", "2026-10-27T07:15:30Z"))
+
+
+def test_ignore_paths_reach_the_key() -> None:
+    raw = {"meta": {"nonce": 1}, "id": "ticket-1"}
+    assert key_view(raw, ["/meta/nonce"]) == {"meta": {"nonce": "<ignored>"}, "id": "ticket-1"}
+    assert key_view(raw, ["/id"]) == {"meta": {"nonce": 1}, "id": "<ignored>"}
+    assert key_view(raw, ["/meta/nonce"], mask_volatile=True) == {
+        "meta": {"nonce": "<ignored>"},
+        "id": "<id>",
+    }

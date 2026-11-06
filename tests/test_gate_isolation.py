@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 import pytest
+from fixtures.replay_audit import send_fanout
 
+from lgcov.cassette import record, runs_to_json
 from lgcov.ci_report import CiResult, render_ci_report
 from lgcov.cli import main
 from lgcov.verdict_actions import BOOTSTRAP_HEADLINE
@@ -125,6 +127,19 @@ def test_a_pr_edit_to_ignore_paths_does_not_mask_its_drift(pr: Path) -> None:
     code, report, _ = _ci(taxonomy=False)
     assert code == 1
     assert "| `respond` | root | 2/2 |" in report
+
+
+def test_a_pr_turning_on_mask_volatile_in_key_doesn_t_get_it_for_its_own_run(pr: Path) -> None:
+    # A PR that changes every task's id, and asks for ids to be masked again in the key.
+    baseline = runs_to_json([record(send_fanout.build(("a", "b"), key="id"), {})])
+    graph = "from fixtures.replay_audit.send_fanout import build\ngraph = build({}, key='id')\n"
+    _write(pr, {"graph.py": graph.format(("x", "y")), "cassettes/baseline.json": baseline})
+    _write(pr, {"lgcov.yaml": CONFIG + "mask_volatile_in_key: true\n"})
+    _write(pr.parent / "base", {"cassettes/baseline.json": baseline})
+    assert _ci(policy=False, taxonomy=False)[0] == 0
+    code, report, _ = _ci(taxonomy=False)
+    assert code == 1
+    assert "| `worker` | root |" in report
 
 
 def test_an_absolute_path_into_the_pr_checkout_still_reads_the_base(pr: Path) -> None:

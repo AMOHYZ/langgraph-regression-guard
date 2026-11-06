@@ -42,6 +42,12 @@ def test_full_file_loads_typed(tmp_path: Path) -> None:
     )
 
 
+def test_mask_volatile_in_key_is_off_unless_turned_on(tmp_path: Path) -> None:
+    assert load_config(_write(tmp_path, "graph_entrypoint: a.py:g\n")).mask_volatile_in_key is False
+    on = "graph_entrypoint: a.py:g\nmask_volatile_in_key: true\n"
+    assert load_config(_write(tmp_path, on)).mask_volatile_in_key is True
+
+
 def test_taxonomy_alias_maps_to_taxonomy_path(tmp_path: Path) -> None:
     cfg = load_config(_write(tmp_path, "graph_entrypoint: a.py:g\ntaxonomy: old.yaml\n"))
     assert cfg.taxonomy_path == "old.yaml"
@@ -97,6 +103,7 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         ({"graph_entrypoint": "no_colon"}, "graph_entrypoint"),
         ({"graph_entrypoint": "a.py:g", "thresholds": {"min_node_coverage": 101}}, "min_node"),
         ({"graph_entrypoint": "a.py:g", "ignore_paths": ["no/leading/slash"]}, "ignore_paths"),
+        ({"graph_entrypoint": "a.py:g", "mask_volatile_in_key": "yes"}, "mask_volatile_in_key"),
         ({"graph_entrypoint": "a.py:g", "cassette_dir": 3}, "cassette_dir"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": 0}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": "3"}, "samples_per_case"),

@@ -71,8 +71,8 @@ with Benjamini–Hochberg across the advisory ones. Per-slice scores are planned
 
 **Node-level memoization.** A node whose code fingerprint and masked input both match the
 recording is served from the cassette, so changed nodes run live, and so do nodes whose input
-changed in a part the mask leaves in. A change only to a masked value, such as an `id` or a
-date-time, doesn't re-run the nodes below it, so they can be served stale
+changed in a part the mask leaves in. A change only to a masked value, such as a message's id
+or usage, doesn't re-run the nodes below it, so they can be served stale
 ([known replay limits](../README.md#known-replay-limits)). A comment or docstring edit counts
 as a change for now, so that node runs live too.
 *Status: built ([PR #18](https://github.com/AMOHYZ/langgraph-regression-guard/pull/18));
@@ -129,8 +129,9 @@ column against lgcov: [bake-off.md](bake-off.md).
   there does name the inner node (`sub.inner`).
 - Name a second root in the same run: only the first node to drift is called root, so a
   later independent change reads as downstream (T162).
-- See a change that reaches a node only through a masked value or a `Store` read, or replay a
-  graph with a checkpointer or an `interrupt`: [known replay limits](../README.md#known-replay-limits).
+- See a change that reaches a node only through a message's id, usage or other metadata, or a
+  `Store` read, or replay a graph with a checkpointer or an `interrupt`:
+  [known replay limits](../README.md#known-replay-limits).
 
 ## How this was checked
 

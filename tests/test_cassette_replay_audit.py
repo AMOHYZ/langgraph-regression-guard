@@ -41,9 +41,10 @@ from lgcov.cassette import (
     Step,
     record,
     replay_run,
+    runs_from_json,
     runs_to_json,
 )
-from lgcov.cli import _divergence_lines, main
+from lgcov.cli import _divergence_lines, _load_graph, main
 from lgcov.messages import plain
 
 
@@ -102,12 +103,33 @@ def test_y_is_served_when_x_s_prompt_changes_but_its_output_doesn_t() -> None:
     assert fresh.drifts == ()
 
 
-@_finding("Y is served: its input changed only in a masked value, which the key can't see")
 @pytest.mark.parametrize("change", ["ticket", "due", "customer"])
-def test_y_is_not_served_when_its_input_changes_only_in_a_masked_value(change: str) -> None:
+def test_y_is_not_served_when_its_input_changes_only_in_an_id_a_date_time_or_a_uuid(
+    change: str,
+) -> None:
     y = Mock()
     cassette = _recorded(chain.build(f"{change} v1", y), QUESTION)
     _audit(lambda: chain.build(f"{change} v2", y), cassette, y, "x")
+
+
+def test_the_root_is_named_one_node_late_when_x_changes_only_in_an_id() -> None:
+    # T177, a known limit: the key sees the new `id` but comparing still masks it, so X shows no
+    # drift and Y is the first node that does.
+    y = Mock()
+    cassette = _recorded(chain.build("ticket v1", y), QUESTION)
+    fresh = replay_run(chain.build("ticket v2", y), cassette, serve=True)
+    assert [d.node for d in fresh.drifts] == ["outcome", "y"]
+
+
+@pytest.mark.parametrize("change", ["ticket", "due", "customer"])
+def test_mask_volatile_serves_y_when_its_input_changes_only_in_those(change: str) -> None:
+    y = Mock()
+    cassette = _recorded(chain.build(f"{change} v1", y), QUESTION)
+    y.reset_mock()
+    fresh = replay_run(chain.build(f"{change} v2", y), cassette, serve=True, mask_volatile=True)
+    assert _how(fresh) == [("x", "live"), ("y", "served"), ("outcome", "served")]
+    assert y.call_count == 0
+    assert fresh.drifts == ()
 
 
 # Fixture 2: a node visited three times, the second visit with a changed input.
@@ -161,15 +183,13 @@ def test_an_added_task_runs_live_and_the_recorded_ones_are_served() -> None:
     spy.assert_called_once_with("c")
 
 
-@_finding("tasks that differ only in `id` share one key, so each is served a recorded output")
 def test_tasks_that_differ_only_in_id_are_not_served_recorded_outputs() -> None:
     spy = Mock()
     cassette = _recorded(send_fanout.build(("a", "b", "c"), spy, "id"), {})
     _audit(lambda: send_fanout.build(("x", "y", "z"), spy, "id"), cassette, spy, "plan")
 
 
-@_finding("`lgcov replay` passes a PR that changes every task's id: no drift, exit 0")
-def test_lgcov_replay_flags_a_pr_that_changes_every_task_s_id(tmp_path: Path) -> None:
+def _a_pr_changing_every_task_s_id(tmp_path: Path) -> list[str]:
     base = record(send_fanout.build(("a", "b", "c"), key="id"), {})
     (tmp_path / "baseline.json").write_text(runs_to_json([base]), encoding="utf-8")
     (tmp_path / "graph.py").write_text(
@@ -177,7 +197,17 @@ def test_lgcov_replay_flags_a_pr_that_changes_every_task_s_id(tmp_path: Path) ->
         "graph = build(('x', 'y', 'z'), key='id')\n",
         encoding="utf-8",
     )
-    assert main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")]) == 1
+    return ["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")]
+
+
+def test_lgcov_replay_flags_a_pr_that_changes_every_task_s_id(tmp_path: Path) -> None:
+    assert main(_a_pr_changing_every_task_s_id(tmp_path)) == 1
+
+
+def test_mask_volatile_in_key_gives_lgcov_replay_the_old_matching_back(tmp_path: Path) -> None:
+    args = _a_pr_changing_every_task_s_id(tmp_path)
+    (tmp_path / "lgcov.yaml").write_text("mask_volatile_in_key: true\n", encoding="utf-8")
+    assert main([*args, "--config", str(tmp_path / "lgcov.yaml")]) == 0
 
 
 # Fixture 4: a subgraph, with a checkpointer on it, on its parent, or neither.
@@ -270,7 +300,6 @@ def test_y_is_served_when_a_duplicate_id_leaves_it_the_same_messages() -> None:
     assert spy.call_count == 0
 
 
-@_finding("Y is served: this part of a message isn't in the key, and Y reads it")
 @pytest.mark.parametrize(
     ("read", "base", "pr"),
     [
@@ -290,7 +319,32 @@ def test_y_is_served_when_a_duplicate_id_leaves_it_the_same_messages() -> None:
             "response_metadata",
             AIMessage("a", id="m1", response_metadata={"finish_reason": "stop"}),
             AIMessage("a", id="m1", response_metadata={"finish_reason": "length"}),
-            id="response_metadata",
+            id="finish_reason",
+        ),
+        pytest.param(
+            "response_metadata",
+            AIMessage("a", id="m1", response_metadata={"stop_reason": "end_turn"}),
+            AIMessage("a", id="m1", response_metadata={"stop_reason": "max_tokens"}),
+            id="stop_reason",
+        ),
+    ],
+)
+def test_y_is_not_served_when_a_message_changes_only_in_what_a_node_can_act_on(
+    read: str, base: AnyMessage, pr: AnyMessage
+) -> None:
+    spy = Mock()
+    cassette = _recorded(messages.build((base,), spy, read), ASKED)
+    _audit(lambda: messages.build((pr,), spy, read), cassette, spy, "x")
+
+
+@pytest.mark.parametrize(
+    ("read", "base", "pr"),
+    [
+        pytest.param(
+            "response_metadata",
+            AIMessage("a", id="m1", response_metadata={"model_name": "one"}),
+            AIMessage("a", id="m1", response_metadata={"model_name": "two"}),
+            id="other_response_metadata",
         ),
         pytest.param(
             "usage_metadata",
@@ -301,12 +355,30 @@ def test_y_is_served_when_a_duplicate_id_leaves_it_the_same_messages() -> None:
         pytest.param("id", _ai("a", "m1"), _ai("a", "m2"), id="message_id"),
     ],
 )
-def test_y_is_not_served_when_a_message_changes_only_where_the_key_can_t_see(
+def test_y_is_served_when_a_message_changes_only_in_what_stays_ignored(
     read: str, base: AnyMessage, pr: AnyMessage
 ) -> None:
+    # T177: ruled noise, since these change on every model call, even though Y here reads them.
     spy = Mock()
     cassette = _recorded(messages.build((base,), spy, read), ASKED)
-    _audit(lambda: messages.build((pr,), spy, read), cassette, spy, "x")
+    spy.reset_mock()
+    fresh = replay_run(messages.build((pr,), spy, read), cassette, serve=True)
+    assert _how(fresh) == [("x", "live"), ("y", "served")]
+    assert spy.call_count == 0
+    assert fresh.drifts == ()
+
+
+def test_ignore_paths_take_a_message_field_out_of_the_key() -> None:
+    def reply(value: int) -> AIMessage:
+        return AIMessage("a", id="m1", additional_kwargs={"seed": value})
+
+    spy = Mock()
+    cassette = _recorded(messages.build((reply(1),), spy), ASKED)
+    spy.reset_mock()
+    paths = ["/messages/*/additional_kwargs/seed"]
+    fresh = replay_run(messages.build((reply(2),), spy), cassette, paths, serve=True)
+    assert _how(fresh) == [("x", "live"), ("y", "served")]
+    assert spy.call_count == 0
 
 
 # Fixture 6: an interrupt, which replay has no way to resume.
@@ -554,3 +626,16 @@ def test_an_unchanged_async_graph_is_served_without_running() -> None:
     assert _how(fresh) == [("x", "served"), ("y", "served"), ("outcome", "served")]
     assert y.call_count == 0
     assert fresh.drifts == ()
+
+
+def test_a_cassette_recorded_before_the_key_changed_is_still_served() -> None:
+    # T177: a cassette holds no key. Each replay computes it from the stored input, so changing
+    # what it reads takes no new format and no re-record.
+    demo = Path(__file__).resolve().parents[1] / "examples" / "demo_agent"
+    saved = (demo / "cassettes" / "baseline.json").read_text(encoding="utf-8")
+    held = {k for run in json.loads(saved)["runs"] for step in run["steps"] for k in step}
+    assert held <= {"node", "input", "output", "code", "goto"}
+    graph = _load_graph(f"{demo / 'graph.py'}:graph")
+    done = [replay_run(graph, run, serve=True) for run in runs_from_json(saved)]
+    assert [c.how for r in done for c in r.calls] == ["served"] * 5
+    assert all(r.drifts == () for r in done)

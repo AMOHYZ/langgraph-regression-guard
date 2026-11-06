@@ -1,6 +1,8 @@
 """T165: how a LangChain message is saved, loaded and shown to a judge."""
 
 import json
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
@@ -13,8 +15,9 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from pydantic import BaseModel
 
-from lgcov.messages import decode, encode, plain
+from lgcov.messages import decode, encode, key_fields, plain
 
 
 def _round_trip(value: object) -> object:
@@ -128,3 +131,81 @@ def test_plain_shows_a_judge_what_each_message_says() -> None:
         "x": 1,
     }
     assert json.loads(json.dumps(shown)) == shown
+
+
+class _Model(BaseModel):
+    text: str
+
+
+@dataclass
+class _Row:
+    text: str
+
+
+class _Bare:
+    pass
+
+
+class _Shown:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __repr__(self) -> str:
+        return f"<Shown {self.text} at 0x10>"
+
+
+def test_key_fields_add_what_a_node_can_act_on_and_nothing_else() -> None:
+    metadata = {
+        "finish_reason": "length",
+        "stop_reason": "max_tokens",
+        "model_name": "fake",
+        "headers": {"set-cookie": "a-session-cookie"},
+    }
+    reply = AIMessage(
+        "a",
+        id="run-1",
+        additional_kwargs={"refusal": "no"},
+        response_metadata=metadata,
+        usage_metadata={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+    )
+    assert key_fields(reply) == {
+        "type": "ai",
+        "content": "a",
+        "artifact": None,
+        "additional_kwargs": {"refusal": "no"},
+        "finish_reason": "length",
+        "stop_reason": "max_tokens",
+    }
+    tool = ToolMessage("r", tool_call_id="c", artifact={"rows": 1})
+    assert key_fields(tool)["artifact"] == {"rows": 1}
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [{"rows": 1}, (1, 2), _Model(text="x"), _Row("x"), _Bare(), object(), {1, 2}],
+    ids=["dict", "tuple", "pydantic", "dataclass", "plain-object", "object", "set"],
+)
+def test_a_live_message_and_its_recording_give_the_same_key_fields(artifact: object) -> None:
+    # What's recorded is a deep copy, saved as JSON: what JSON can't hold becomes its repr, and a
+    # default repr holds a memory address. Either way the step must still be served.
+    live = ToolMessage("r", tool_call_id="c", artifact=artifact)
+    recorded = _round_trip(deepcopy(live))
+    assert isinstance(recorded, ToolMessage)
+    assert key_fields(recorded) == key_fields(live)
+
+
+def test_key_fields_cut_only_the_address_from_a_repr() -> None:
+    def tool(text: str) -> ToolMessage:
+        return ToolMessage("r", tool_call_id="c", artifact=_Shown(text))
+
+    assert key_fields(tool("one")) != key_fields(tool("two"))
+    assert key_fields(tool("one"))["artifact"] == "<Shown one at 0x>"
+
+
+def test_key_fields_read_a_chunk_as_the_message_it_becomes() -> None:
+    kwargs, metadata = {"k": 1}, {"finish_reason": "stop"}
+    chunk = AIMessageChunk(
+        content="hi", id="c1", additional_kwargs=kwargs, response_metadata=metadata
+    )
+    message = AIMessage("hi", id="m1", additional_kwargs=kwargs, response_metadata=metadata)
+    assert key_fields(chunk) == key_fields(message)

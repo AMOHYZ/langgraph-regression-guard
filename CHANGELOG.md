@@ -17,6 +17,7 @@
 - A code check that passed on the base and fails on the PR blocks, whatever the paired test says, and a run replay stopped early no longer counts as a failed check.
 - A re-baseline in a PR can't hide a code check's new failure: when a PR edits its cassettes, blocking code checks also run against the base's. A run it removes from them is named in the comment.
 - A node's retry policy and error handler see the node's own error, as they do outside lgcov: a `ValueError` no longer repeats a write, and `on-divergence: fail` now stops a node with a retry policy. Each failed attempt is a live call, and the report names the node.
+- **Behaviour change:** a node now re-runs when its input changes only in an `id`, a UUID or date-time in text, or a message's `artifact`, `additional_kwargs`, `finish_reason` or `stop_reason`. These were served stale with no drift. Existing cassettes keep working with no re-record, but more nodes can run live on a PR. To get the old matching back for ids, UUIDs and date-times, set `mask_volatile_in_key: true` in `lgcov.yaml`. To drop one field, use `ignore_paths`. [How a step is matched](docs/validation/replay-audit.md#how-a-step-is-matched).
 
 ## 0.1.0 (2026-11-02)
 
