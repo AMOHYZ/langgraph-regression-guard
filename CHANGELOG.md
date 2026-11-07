@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `lgcov round init | lock | check` lock a benchmark round's commits and cases, and an exposure ledger catches a moved SHA or a case a candidate has already seen ([docs](docs/benchmark-rounds.md)).
 - `lgcov bench` runs each side in its own process, with its own imports; a bad import exits 2 and names the side (#57).
 - `lgcov bench --keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid recording (#58).
 - `lgcov bench` shows what each side prints, named by side, like the reason a researcher failed (#60).
