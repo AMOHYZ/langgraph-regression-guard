@@ -7,8 +7,8 @@ virtualenv, the user site-packages or any folder named site-packages) counts by 
 name; any other object by its class, its repr with memory addresses removed, and the project
 functions it holds. Source is read from the file, never from a cache a same-size edit can
 leave stale, and nothing depends on paths, line numbers or the process, so a cassette replays
-from another checkout. A pydantic class counts by its members and core schema, without the
-schema's class ids.
+from another checkout. A class counts as its first use would leave it. A pydantic class
+counts by its members and core schema, without the schema's class ids.
 
 Not seen: what a node reads at run time (files, environment, network), library upgrades,
 and changes an object's repr hides. A node that uses a compiled graph, or code with no
@@ -17,8 +17,10 @@ readable source, gets no fingerprint (None) and always runs live. Code installed
 node run live: an upgrade counts as an edit, and a cassette recorded elsewhere doesn't match.
 """
 
+import contextlib
 import functools
 import hashlib
+import inspect
 import re
 import site
 import sys
@@ -27,6 +29,8 @@ from pathlib import Path
 from types import CodeType, FunctionType, MethodType, ModuleType
 
 from langgraph.pregel import Pregel
+from pydantic import BaseModel
+from pydantic.dataclasses import is_pydantic_dataclass, rebuild_dataclass
 
 _PREFIXES = (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 _LIBRARY = tuple(Path(p).resolve() for p in (*_PREFIXES, site.getusersitepackages()))
@@ -103,6 +107,23 @@ def _schema(value: object) -> object:
     }
 
 
+def _finish_building(cls: type) -> None:
+    """Leave a class as its first use would, so that use changes nothing and no edit stays hidden.
+
+    A pydantic class with a forward reference or `defer_build` builds itself at first use: until
+    then its schema is a stand-in that hides its nested models. Python 3.14 computes annotations
+    at first read and keeps them on the class: until then a TypedDict's field types are in no
+    code of the project's. A name that can't be resolved stays as it is. Depth 0: lgcov's own
+    frames aren't where the class's names live. `BaseModel`, which the walk reaches when pydantic
+    itself counts as project code, isn't a model to build."""
+    if issubclass(cls, BaseModel) and cls is not BaseModel:
+        cls.model_rebuild(raise_errors=False, _parent_namespace_depth=0)
+    elif is_pydantic_dataclass(cls):
+        rebuild_dataclass(cls, raise_errors=False, _parent_namespace_depth=0)
+    with contextlib.suppress(Exception):
+        inspect.get_annotations(cls)
+
+
 def _function(fn: FunctionType, seen: dict[int, object]) -> str:
     code = fn.__code__
     lines = Path(code.co_filename).read_text(encoding="utf-8").splitlines()
@@ -148,6 +169,7 @@ def _describe(value: object, names: frozenset[str], seen: dict[int, object]) -> 
         module = sys.modules.get(value.__module__)  # None: a graph file lgcov loaded itself
         if module is not None and not _in_project(getattr(module, "__file__", None)):
             return _name(value)
+        _finish_building(value)
         members = {k: v for k, v in vars(value).items() if k not in _CLASS_NOISE}
         if "__pydantic_core_schema__" in members:
             members["__pydantic_core_schema__"] = _schema(members["__pydantic_core_schema__"])
