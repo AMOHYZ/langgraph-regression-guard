@@ -32,6 +32,17 @@ from lgcov.attribution import (
     results_json,
     score,
 )
+from lgcov.bench_round import check as check_round
+from lgcov.bench_round import (
+    exposures,
+    ledger_lines,
+    lock_round,
+    new_round,
+    parse_ledger,
+    parse_round,
+    round_to_yaml,
+    tree_state,
+)
 from lgcov.calibration import (
     Band,
     Bands,
@@ -2404,6 +2415,84 @@ def _selfcheck_cmd(argv: list[str]) -> int:
     return 0 if all_ok else 1
 
 
+def _round_ledger(path: Path) -> str:
+    """The exposure ledger next to a round file; '' before its first row."""
+    ledger = path.with_name("exposure.jsonl")
+    return ledger.read_text(encoding="utf-8") if ledger.exists() else ""
+
+
+def _append_ledger(path: Path, lines: str) -> None:
+    with path.with_name("exposure.jsonl").open("a", encoding="utf-8") as ledger:
+        ledger.write(lines)
+
+
+def _round_lock(path: Path, now: str) -> int:
+    """T119: refuses tracked changes anywhere and untracked files in the round's folder; an
+    untracked file elsewhere only gets a warning, since it can't change what the round locks."""
+    round_ = parse_round(path.read_text(encoding="utf-8"))
+    rows = parse_ledger(_round_ledger(path))
+    folder = str(path.resolve().parent)
+    if _head(folder) is None:
+        raise ValueError(f"{folder} isn't a git checkout with a commit, so nothing can be locked")
+    status = _git_out(folder, "status", "--porcelain", "-z", "--untracked-files=all")
+    tree = tree_state(status, _git_out(folder, "rev-parse", "--show-prefix").strip())
+    if tree.tracked_changes:
+        raise ValueError(f"uncommitted changes: {', '.join(tree.tracked_changes)}")
+    if tree.untracked_in_folder:
+        raise ValueError(f"untracked in the round's folder: {', '.join(tree.untracked_in_folder)}")
+    if tree.untracked_elsewhere:
+        print(
+            f"warning: untracked, outside the round: {', '.join(tree.untracked_elsewhere)}",
+            file=sys.stderr,
+        )
+    locked, lock_rows = lock_round(round_, rows, now)
+    _append_ledger(path, ledger_lines(lock_rows))
+    path.write_text(round_to_yaml(locked), encoding="utf-8")
+    print(f"Locked round {locked.id}. Commit {path.name} and exposure.jsonl.")
+    return 0
+
+
+def _round_check(path: Path, run_id: str | None, now: str) -> int:
+    round_ = parse_round(path.read_text(encoding="utf-8"))
+    problems = check_round(round_, parse_ledger(_round_ledger(path)))
+    for problem in problems:
+        print(f"lgcov round check: {problem}", file=sys.stderr)
+    if problems:
+        return EXIT_ERROR
+    if run_id:
+        _append_ledger(path, ledger_lines(exposures(round_, run_id, now)))
+    print(f"Round {round_.id} is clean.")
+    return 0
+
+
+def _round_cmd(argv: list[str]) -> int:
+    """T119: a benchmark round: init writes a template, lock freezes it, check verifies it."""
+    ap = argparse.ArgumentParser(prog="lgcov round")
+    verbs = ap.add_subparsers(dest="verb", required=True)
+    init = verbs.add_parser("init", help="write an unfrozen round to fill in")
+    init.add_argument("--id", required=True, help="the round's id, unique in its ledger")
+    lock = verbs.add_parser("lock", help="freeze the round and record its SHAs in the ledger")
+    check = verbs.add_parser("check", help="exit 2 on a moved SHA or a re-exposed case")
+    check.add_argument("--record", metavar="RUN_ID", help="after a clean check, record this run")
+    for verb in (init, lock, check):
+        verb.add_argument("path", help="the round file; exposure.jsonl sits next to it")
+    args = ap.parse_args(argv)
+    path, now = Path(args.path), datetime.now(UTC).isoformat(timespec="seconds")
+    try:
+        if args.verb == "lock":
+            return _round_lock(path, now)
+        if args.verb == "check":
+            return _round_check(path, args.record, now)
+        if path.exists():
+            raise ValueError(f"{path} already exists")
+        path.write_text(round_to_yaml(new_round(args.id, now)), encoding="utf-8")
+        print(f"Wrote {path}. Fill in its candidates and cases, commit, then lock it.")
+        return 0
+    except (OSError, ValueError) as exc:
+        print(f"lgcov round {args.verb}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
 def _command(argv: list[str]) -> int | None:
     """Run the lgcov command argv names and return its exit code; None if it names none."""
     if argv[:1] == ["--version"]:
@@ -2429,6 +2518,8 @@ def _command(argv: list[str]) -> int | None:
         return _calibrate_cmd(argv[1:])
     if argv[:1] == ["review"]:
         return _review_cmd(argv[1:])
+    if argv[:1] == ["round"]:
+        return _round_cmd(argv[1:])
     if argv[:1] == ["bench"]:
         return _bench_cmd(argv[1:])
     if argv[:1] == ["metrics"]:
@@ -2501,6 +2592,9 @@ commands:
   taxonomy draft    draft failure modes and KPIs from traces, each pending review
   taxonomy approve  approve one drafted entry
   import langsmith  turn a LangSmith dataset's examples into lgcov cases
+  round init        write an unfrozen benchmark round to fill in
+  round lock        freeze a benchmark round and record its SHAs
+  round check       exit 2 if a locked SHA moved or a case was already exposed
   bench             score the root / propagated labels against hand-written ones
   metrics summary   summarize per-PR records: overridden blocks, label burden, cost, time
   selfcheck         run the harness on fixtures whose outcome is known

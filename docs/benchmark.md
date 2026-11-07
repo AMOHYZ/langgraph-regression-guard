@@ -246,3 +246,7 @@ From the OpenAI usage page: $0.84 in total for the 3 runs on 5 November. The pag
 | Pilot, `gpt-4.1` | $0.52 | Requests, tokens, errors |
 | `gpt-6-luna`, invalid and not scored | About $0.16 | Requests, tokens, errors |
 | `gpt-6-luna`, scored | About $0.16 | Requests, tokens, errors |
+
+## Rounds
+
+A [benchmark round](benchmark-rounds.md) locks a run's commits and cases, and an exposure ledger records which cases each candidate has seen. `lgcov round check` fails if a locked SHA moved or a case was already exposed to that candidate in another round. [The #163 round](benchmark/rounds/t101-163/lgcov-round.yaml) is locked retroactively: its runs came first.

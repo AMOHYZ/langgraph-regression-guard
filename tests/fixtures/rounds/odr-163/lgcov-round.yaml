@@ -1,0 +1,14 @@
+id: t101-163
+created_at: '2026-11-07'
+frozen: true
+candidates:
+- name: open_deep_research-163
+  repo: langchain-ai/open_deep_research
+  base_sha: f95d200654b5c4733e87375be15b92822c6c4ff8
+  head_sha: 6532a4176a93cc9bb2102b3d825dcefa560c85d9
+  locked_at: '2026-11-07'
+cases:
+- id: model-prices
+  source: docs/benchmark/open_deep_research-163.yaml#cases[0]
+- id: eu-ai-act
+  source: docs/benchmark/open_deep_research-163.yaml#cases[1]
