@@ -31,6 +31,10 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+      # T116: docs/banned-phrases.txt nowhere in the repo; the README has why-us.md's tagline.
+      - name: Docs lint
+        run: uv run python -m lgcov.docs_lint
+
       - name: Mypy (strict)
         run: uv run mypy --strict src
 
@@ -64,3 +68,6 @@ jobs:
 
       - name: Harness self-check
         run: uv run lgcov selfcheck
+
+      - name: Graph lint (T104; the demo stays clean)
+        run: uv run lgcov lint examples/demo_agent --strict

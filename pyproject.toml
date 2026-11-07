@@ -1,7 +1,7 @@
 [project]
-name = "langgraph-regression-guard"
+name = "lgcov"
 version = "0.1.0"
-description = "Catch silent regressions in LangGraph agents on every PR: cassette replay of node I/O, calibrated LLM judges, and human review."
+description = "Catch silent regressions in LangGraph agents on every PR. lgcov tells you which LangGraph node a PR actually changed and which ones only inherited the damage."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -17,6 +17,7 @@ classifiers = [
 ]
 dependencies = [
     "httpx>=0.28.1",
+    "langchain-core>=1.4.7",
     "langgraph>=1.2.16",
     "pyyaml>=6.0.3",
 ]
@@ -28,7 +29,7 @@ Issues = "https://github.com/AMOHYZ/langgraph-regression-guard/issues"
 
 [project.scripts]
 graph-diff = "lgcov.cli:main"
-lgcov = "lgcov.cli:main"
+lgcov = "lgcov.cli:lgcov_main"
 
 [build-system]
 requires = ["uv_build>=0.8.13,<1.0.0"]
@@ -54,6 +55,9 @@ python_version = "3.12"
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
+markers = [
+    "slow: runs real per-side processes; CI runs these, `-m \"not slow\"` skips them locally",
+]
 
 [dependency-groups]
 dev = [

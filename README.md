@@ -1,9 +1,9 @@
 # langgraph-regression-guard
 
-Catch silent regressions in LangGraph agents on every PR. lgcov tells you which node a
-PR actually changed and which ones only inherited the damage, gates each KPI in your
-taxonomy with a paired test, and (planned) lets a judge block only once it has earned
-that against human labels. A GitHub Action; first report in 2 minutes.
+Catch silent regressions in LangGraph agents on every PR. lgcov tells you which LangGraph
+node a PR actually changed and which ones only inherited the damage, gates each KPI in your
+taxonomy with a paired test, and lets a judge block only once it has earned that against
+human labels. A GitHub Action; first report in 2 minutes.
 
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
 
@@ -23,7 +23,7 @@ Three layers, one per level of confidence:
 - **L1 — Cassettes.** Record each node's input and output once. On every PR,
   nodes the change left alone are served from the recording and the rest re-run
   and are compared with it. The diff tells you whether a change breaks a node at
-  its root or only propagates from upstream.
+  its root or only propagates from upstream. [Known limits](#known-replay-limits).
 - **L2 — Judge gate.** Typed LLM judges and deterministic code checks score
   KPIs, each verdict with a confidence, and a paired test per KPI decides SHIP,
   BLOCK or INCONCLUSIVE: an unclear or low-confidence result goes to a human
@@ -33,7 +33,38 @@ Three layers, one per level of confidence:
   example for calibrating the judge.
 
 How this compares with Reenact, graphtrace, EvalView, AgentAssay, statgate, Kitaru and
-LangSmith, and what is built today: [docs/why-us.md](docs/why-us.md).
+LangSmith, and what is built today: [docs/why-us.md](docs/why-us.md). What has been measured
+so far, one real PR, and what lgcov missed: [docs/benchmark.md](docs/benchmark.md).
+
+## Install
+
+The package is `lgcov`, like its command. It isn't on PyPI yet. Until it is, from TestPyPI,
+with its dependencies from PyPI first (`--no-deps`: anyone can upload to TestPyPI, so
+nothing else should come from there):
+
+```bash
+pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
+pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.1.0
+```
+
+Or from GitHub, as the quickstart does. Once on PyPI: `pip install lgcov`.
+
+Maintainers: `release.yml` publishes to TestPyPI with trusted publishing (OIDC, no token).
+Set up once, before the first tag (done for 0.1.0), on test.pypi.org:
+
+1. Sign in, then **Your account → Publishing**
+   (https://test.pypi.org/manage/account/publishing/). The account needs 2FA: without
+   it, TestPyPI shows its 2FA setup page instead, and no publisher can be added.
+2. Under **Add a new pending publisher**, on the GitHub tab: TestPyPI project name `lgcov`,
+   owner `AMOHYZ`, repository name `langgraph-regression-guard`, workflow name
+   `release.yml`, environment name `testpypi`.
+3. Click **Add**. The first publish makes it the project's own publisher, so later tags
+   need nothing more on TestPyPI. A publish that fails with `invalid-publisher` found no
+   publisher there matching the claims its log prints.
+
+Then pushing a `vX.Y.Z` tag builds, makes the GitHub Release and publishes. Run by hand
+(Actions → release → Run workflow), `dry_run` (on by default) only builds the wheel and
+sdist, checks the wheel installs and runs, and uploads them as the `dist` artifact.
 
 ## Quickstart
 
@@ -45,6 +76,9 @@ Minutes to first report: 2 (clean venv, steps below pasted as-is; measured 2026-
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install "git+https://github.com/AMOHYZ/langgraph-regression-guard"
+# Or 0.1.0 from TestPyPI; dependencies from PyPI, since anyone can upload to TestPyPI:
+#   pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
+#   pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.1.0
 lgcov --version
 
 # 1. A graph to guard: the demo agent (or point graph_entrypoint at your own).
@@ -74,10 +108,9 @@ graph_entrypoint: graph.py:graph   # required, "<file.py>:<attr>"
 cassette_dir: cassettes
 taxonomy_path: taxonomy.yaml       # optional; `taxonomy:` is an alias
 thresholds:
-  min_node_coverage: 80            # percent, 0..100
-  max_drifted_nodes: 3             # optional; omit for no limit
-  fail_on: [fail]
+  min_node_coverage: 80            # percent; under it `lgcov ci` exits 1 (default 0: off)
 ignore_paths: [/meta/nonce]        # JSON pointers into node I/O
+mask_volatile_in_key: false        # true: replay also masks ids, UUIDs and date-times; see below
 gate:                              # the L2 KPI gate; see "The gate" below
   margin: 0.05                     # δ; a KPI's own `margin:` in taxonomy.yaml wins
 ```
@@ -89,8 +122,15 @@ Precedence: CLI flag > file > default.
 `lgcov replay` and `lgcov ci` (the Action) treat a node as unchanged, and serve
 its recorded output without running it, when two things match the recording:
 
-- **Its input**, with volatile fields and `ignore_paths` masked as in the
-  comparison. A node downstream of a change gets a new input, so it re-runs.
+- **Its input**, with volatile fields and `ignore_paths` masked. By default the mask hides
+  the values of `message_id`, `request_id`, `run_id`, `span_id`, `tool_call_id` and `trace_id`
+  at any depth, and a tool call's `id`. In a message, what counts is its type, content, name,
+  status, tool call names and args, `artifact`, `additional_kwargs`, and `finish_reason` or
+  `stop_reason`. A node downstream of a change re-runs if the change reaches what the mask
+  leaves in, including an `id` in plain state or a UUID or date-time in text. A change only to
+  a masked value still matches, so that node can be served from the cassette. If your state
+  gets a new id or time on every run, `mask_volatile_in_key: true` masks `id` values, UUIDs and
+  date-times too, and `ignore_paths` drops a single field.
 - **Its code fingerprint**: the node function's source, defaults and closure
   values, plus the values of the module-level names it uses, following the
   functions, classes and modules of your project the same way. Library code
@@ -101,6 +141,85 @@ Everything else runs live: changed nodes, nodes that are not plain functions
 inputs. What a node reads at run time (files, environment variables, network) and
 dependency upgrades are not part of the fingerprint: pass `--live` to either
 command to re-run every node.
+
+#### Known replay limits
+
+From the [replay audit](docs/validation/replay-audit.md#matrix). With `--live` nothing is
+served, which rules out the first two.
+
+- **Masked changes can be served stale.** After a change only to a message's id, usage or other
+  metadata, or a key like `run_id`, the nodes below it are served and show no drift. That's
+  accepted, since these change on every model call. `mask_volatile_in_key` adds `id` values,
+  UUIDs and date-times to the list. [Row 5a](docs/validation/replay-audit.md#matrix).
+- **Reads from a LangGraph `Store`, `config` or `runtime` aren't in the key**, so a changed
+  `Store` value can be served stale. A documented limit. Replay passes no `config` or runtime
+  context of its own. [Row 7d](docs/validation/replay-audit.md#matrix) and
+  [how a step is matched](docs/validation/replay-audit.md#how-a-step-is-matched).
+- **A change only to an `id`, UUID or date-time is named one node late.** The comparison still
+  masks these, so the node that changed shows no drift, and the first node whose output changes
+  because of it is called the root. [Rows 1a and 3a](docs/validation/replay-audit.md#matrix).
+- **A parent graph with a checkpointer, or a run that hits an `interrupt`, ends in an error**
+  (`ValueError` or `TypeError`, exit 2). Planned: an `unsupported` result. Rows
+  [4a, 6a and 6b](docs/validation/replay-audit.md#matrix).
+
+Served vs `--live` on the demo, measured: [docs/benchmark-speed.md](docs/benchmark-speed.md) (`make bench-speed`).
+
+Root vs propagated attribution, measured: `lgcov bench DIR` records each benchmark's cases
+on base, replays head, and scores lgcov's labels against hand-written ones, precision /
+recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). Each side runs in its
+own process with its own imports, and a bench file can add `pythonpath: [src]` for a src
+layout. `--keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid
+recording. For now its rows are
+three demo fixtures in `tests/fixtures/bench/`; a pilot on one real PR has its own section
+in [docs/benchmark.md](docs/benchmark.md#real-prs). A miss on a
+hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden. The
+mutation operators for injecting known regressions into open_deep_research, each with the
+KPI that should catch it and its root and propagated labels, are in
+[docs/mutations.yaml](docs/mutations.yaml); nothing applies them yet.
+
+### Cases from a LangSmith dataset
+
+`lgcov import langsmith` turns a LangSmith dataset's examples into the cases `lgcov record
+--inputs` takes. It's read-only: it makes GET requests and nothing else.
+
+- **The key:** it comes from `LANGSMITH_API_KEY`.
+- **Region or self-hosting:** set `LANGSMITH_ENDPOINT` for an EU or self-hosted LangSmith.
+
+With the key set:
+
+```bash
+lgcov import langsmith --dataset support-qa --out cases.json
+lgcov record --inputs cases.json
+```
+
+- **`cases.json`** holds each example's inputs, oldest first.
+- **`cases.langsmith.json`**, written beside it, holds each example's id and reference
+  outputs, in the same order.
+- **`--limit N`** imports at most N examples, and **`--split NAME`** imports only that
+  split.
+- **Without the key**, it imports nothing and exits 2.
+
+The PR report links the LangSmith experiment that ran on the commit it checked:
+
+```yaml
+langsmith:          # lgcov.yaml
+  dataset: support-qa
+  link: true        # false: no link, and no LangSmith call at all
+```
+
+- **Which experiment.** It's the newest one on that dataset whose `metadata.git.commit` is
+  the commit lgcov tested or the PR's head commit. LangSmith's `evaluate()` records that
+  field. If no experiment ran on either commit, the report says nothing.
+- **The key.** Put `LANGSMITH_API_KEY` in the job's `env:` from a secret.
+  - ⚠️ With one job, that job runs the PR's code, which can read the key. Only do this if PR
+    authors are trusted: no fork PRs, no outside contributors. With
+    [two jobs](#two-jobs-so-the-prs-code-cant-touch-the-verdict), it goes in the job that decides.
+  - Without it, the report says so in one line. Fork PRs get no secrets, so they always
+    hit this case.
+  - A LangSmith outage is a ⚠️ line.
+  - Neither changes the exit code.
+- **In a public repo,** the link in the PR comment reveals your LangSmith workspace id.
+  Opening it needs a LangSmith login.
 
 ## Use in your repo
 
@@ -130,13 +249,21 @@ jobs:
 
 - Each PR gets one report comment, updated in place on every push. PRs from forks get
   a read-only token, so there the report goes to the job summary instead.
+- On a PR, `lgcov.yaml`, the taxonomy and the bands are read from the base commit, so a PR
+  can't change what grades it. Its edits apply after it merges. The first PR that adds
+  `lgcov.yaml` is advisory: it uses its own policy, exits 0 and claims no SHIP. Before the
+  comment is posted, `lgcov verify-result` checks the result against the commits and that
+  policy. On a mismatch no verdict is posted and the run exits 2. What this does and doesn't
+  stop: [docs/trust-boundary.md](docs/trust-boundary.md).
 - `root-drift` and `any-drift` fail the same PRs for now: until replay classifies
   drift by the node inputs it records, the first node to drift in each run counts
   as root.
 - The report includes coverage of the replayed runs, e.g. `Coverage: Nodes 75% (−25% vs
   main) · Edges 60% (±0)`, and lists nodes main reached that this PR doesn't. Pushes to
   `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
-  baseline yet". A missing or unreadable baseline is a warning, never a failure.
+  baseline yet". A missing or unreadable baseline is a warning, never a failure. Node
+  coverage under `thresholds.min_node_coverage` fails the run (exit 1), and the report
+  lists the nodes no run reached.
 - Unchanged nodes are served from the cassette; `live: true` runs every node live.
 - A node whose code is unchanged but whose input no longer matches the recording has
   diverged. `on-divergence: flag` (the default) runs it live and marks what ran after
@@ -144,6 +271,9 @@ jobs:
   the run not checked. `budget-seconds` stops starting live node calls once the run is
   projected to take longer, and the nodes it stops before are not checked either. A node
   not checked is INCONCLUSIVE: never a fail, never a harness error.
+- A node's retry policy and error handler work as they do outside lgcov. Each attempt that
+  raised counts as a live call and the report names the node, because what the attempt did
+  before raising, like a write, still happened.
 - The report ends with where the time went, e.g. `⏱ 42 s · agent 31 s (3 live / 1 served)
   · judges 9 s (12 calls, 1.4k tokens) · budget 90 s`.
 - Two tiers. `pr` (the default) serves unchanged nodes, judges each case once, skips
@@ -163,34 +293,132 @@ jobs:
 - With `taxonomy:`, the run also gates the taxonomy's KPIs on the replayed outputs (see
   [The gate](#the-gate-ship-block-or-inconclusive)) and adds the table to the report, at
   most 200 model judge calls per run. `judge: jev` KPIs read `JEV_API_URL` and
-  `JEV_API_KEY`: set them in the job's `env:` from secrets.
+  `JEV_API_KEY`: set them in the job's `env:` from secrets. ⚠️ With one job, that job runs
+  the PR's code, which can read them. Only do this if PR authors are trusted: no fork PRs, no
+  outside contributors. With [two jobs](#two-jobs-so-the-prs-code-cant-touch-the-verdict), they
+  go in the job that decides.
 - Outcomes and exit codes are in the table below.
+- The run locks the commits it compares. It records the base checkout's HEAD and the PR's
+  at the start, and the report prints both:
+  "🔒 Locked for this run: base `88a0be8`, candidate `fec0c00`."
+  - If either moves before the run ends, the run gives no verdict: INFRA_ERROR.
+  - The lock sees commits only. Uncommitted changes at the start add "⚠️ uncommitted
+    changes, not covered by the lock", a warning that never fails the run.
+  - A move and a move back between the two reads goes unseen.
+  - Outside a git checkout the run isn't locked, and the report says so.
+  - `lgcov judge` locks the candidate the same way. Its base is the cassette in that
+    checkout.
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
   `cassette-dir`, `taxonomy` (turns on the KPI gate; `taxonomy_path` isn't read here),
   `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `tier`,
-  `python-version`, `github-token`, `live`. Outputs: `report-path`, `root-drift-count`,
-  `propagated-drift-count`, `verdict`.
+  `python-version`, `github-token`, `live`, `mode`, `approved-by`, `ci-status`, `phase`. Outputs:
+  `report-path`, `root-drift-count`, `propagated-drift-count`, `verdict` (`pass`, `fail`,
+  `needs_human` or `error`).
 - Runs on Linux and macOS runners.
+
+### Two jobs, so the PR's code can't touch the verdict
+
+The workflow above runs the PR's code in the job that posts the verdict, so that code can read any
+key in the job and interfere with the result. The `phase` input splits it in two:
+
+```yaml
+name: lgcov
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  lgcov-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: AMOHYZ/langgraph-regression-guard@v0
+        with:
+          phase: candidate  # runs the PR's code and decides nothing
+  lgcov:
+    needs: lgcov-candidate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    env:
+      JEV_API_URL: ${{ secrets.JEV_API_URL }}
+      JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}  # empty on a push: that commit
+      - uses: AMOHYZ/langgraph-regression-guard@v0
+        with:
+          phase: evaluate  # decides from what the other job uploaded; installs no project
+```
+
+- **Require the `lgcov` check.** The candidate job passes whatever it finds.
+- **Keep `if: ${{ !cancelled() }}`.** GitHub counts a skipped required check as passing, so without
+  it, a PR whose code kills the candidate job would pass.
+- **Give both jobs the same inputs.** A different `tier` gives no verdict, and so does a
+  candidate job checked out at another commit: use a plain `actions/checkout` there.
+- **Keys.** The judge keys and `LANGSMITH_API_KEY` go in the job that decides. A changed node that
+  calls a model needs its key in the candidate job, where the PR's code can read it. That is your
+  call, for trusted authors only. With no key the node raises, which reads as an agent failure and
+  exits 1, as on a fork PR.
+- **Other setup.** Steps your project needs before it runs, like a database, go in the candidate job.
+- **The Action's version.** It has to be one with `phase`. An older one warns about the unknown input
+  and runs the whole gate in each job, so the job on the base would pass without looking at the PR.
+- **The artifact.** `lgcov-candidate` holds each run's live outputs for a day, and anyone who can
+  read the repo's Actions can download it. Treat those outputs as you do a committed cassette.
+- **What this can't stop.** The candidate job's upload is the PR's code's word for what it did, so
+  code written to attack the gate can still report a clean run. A same-repo author can also edit the
+  workflow itself. [docs/trust-boundary.md](docs/trust-boundary.md) has the full list.
 
 ### Outcomes
 
+[docs/verdict-actions.md](docs/verdict-actions.md) gives every outcome's PR comment headline,
+the reviewer's next step and the exit code, including what `mode`, `approved-by` and
+`ci-status` change.
+
 | Outcome | Exit | When |
 |---|---|---|
-| PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI is SHIP. |
-| AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, or a node in the PR's graph raised; the report names the node. A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
-| INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK (shown as ⚠️ `needs_human`, with the cases it still needs), or replay left nodes not checked: a divergence with `on-divergence: fail`, or a budget hit. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1, never 2. |
-| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, or a blocking KPI left with no valid judgment on a side. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
+| PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI, if there is one, is SHIP. |
+| AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, a blocking code check newly fails (even if a re-baseline in the PR hides it), node coverage under `thresholds.min_node_coverage`, or a node in the PR's graph raised; the report names the node (a router by its function name, a node inside subgraph `sub` as `sub.inner`). A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
+| INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK (the KPI table shows the cases it still needs), its judge abstained, or replay left nodes not checked: a divergence with `on-divergence: fail`, or a budget hit. Shown as "⚠️ No decision: needs_human". GitHub's green tick on exit 0 is not a pass, so the comment says that and the Action adds a warning. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1. |
+| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, a blocking KPI left with no valid judgment on a side, or the base or candidate commit moved during the run (then no verdict at all, even a BLOCK), or a candidate job that left no result the job deciding can use. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
 
-A regression found in the same run wins over a judge's infra error: exit 1.
-
-Known limit: an exception in a router (a conditional-edge function) or inside a
-subgraph isn't attributed to a node yet, so it counts as INFRA_ERROR (T109).
+A regression found in the same run wins over a judge's infra error: exit 1. An infra error
+wins over INCONCLUSIVE: exit 2. With `mode: advisory`, every exit 1 becomes 0, and an infra
+error still exits 2.
 
 `lgcov selfcheck` checks this classification. It runs the harness on fixtures whose
-outcome is known (`tests/fixtures/selfcheck/`: a real refactor that must PASS, a prompt
-change and a crashing node that must be AGENT_FAIL with the right root, and a missing
-cassette that must be INFRA_ERROR), prints expected vs actual, and exits 1 on any
-mismatch. CI runs it as its own job on every push.
+outcome is known (`tests/fixtures/selfcheck/`: a real refactor that must PASS; a prompt
+change, a crashing node, a crashing router and a crashing node inside a subgraph that
+must be AGENT_FAIL with the right root; and a missing cassette that must be
+INFRA_ERROR), prints expected vs actual, and exits 1 on any mismatch. CI runs it as its
+own job on every push.
+
+### Lint the graph
+
+`lgcov lint` reads the graph's shape before anything runs and prints one line per
+finding (severity, node, a one-line fix), then `🧹 Lint: N warnings`:
+
+- warn: a node unreachable from START; a router or an edge naming a node that doesn't
+  exist; a node no run in `<cassette_dir>/baseline.json` reached.
+- info: a node no KPI in the taxonomy names.
+
+```bash
+lgcov lint examples/demo_agent  # a folder: its graph.py, cassettes/ and taxonomy.yaml
+```
+
+Warnings never block: it exits 0, or 1 with `--strict`. `lgcov ci` runs it before replay
+and puts the 🧹 line in the PR comment, with the findings under it. LangGraph's
+`compile()` already refuses a router or an edge naming a node that doesn't exist, so on
+a compiled graph those two checks only catch a snapshot that skipped it.
 
 ## Judge KPIs locally (L2)
 
@@ -212,6 +440,31 @@ lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
 - `samples_per_case` in `lgcov.yaml` sets k; `--samples` overrides it. The demo's
   `fake` judge has a seeded flaky mode, so its table shows a real ⚠️ row.
 
+### Draft a taxonomy from traces
+
+Draft, don't trust: every proposed failure mode needs a human approval before it can gate.
+
+```bash
+lgcov taxonomy draft --description team.md --traces traces/*.json \
+  --out docs/taxonomy.draft.yaml --client my_llm.py:Drafter
+lgcov taxonomy approve skips_order_lookup --reviewer ahmed  # one entry at a time
+lgcov taxonomy check docs/taxonomy.draft.yaml               # exit 1 while one is pending
+```
+
+- A trace is `{"id", "nodes", "tools", "failure": {"node", "kind", "note"}}`; one with no
+  `failure` passed. Failing traces are grouped by exact signature (`failure.node` and
+  `failure.kind`), one failure mode per group.
+- The client writes each mode's and KPI's text. lgcov ships none: `--client` names a
+  class or function, in your file, that makes one with a `propose` method.
+- lgcov picks the judge: `code` when a tool or node check tells the group from the
+  passing traces (a tool every passing trace calls and none of the group does, say),
+  `jev` otherwise.
+- Every entry is `review: pending`, with `evidence` (the trace ids) and a one-line `why`.
+  Approving a failure mode approves its KPIs too, and records the reviewer.
+- Run again, it adds only new signatures and keeps every entry already in the file.
+- A pending entry makes `lgcov taxonomy check`, `lgcov judge` and `lgcov ci` refuse the
+  file.
+
 ### The gate: SHIP, BLOCK or INCONCLUSIVE
 
 Each case is judged on base and on the PR, so its two scores pair up: d = PR − base, with
@@ -220,18 +473,35 @@ a case's k samples averaged first. Per KPI, against a non-inferiority margin δ:
 - **BLOCK** (exit 1): the whole 95% CI of Δ is below 0, Δ ≤ −δ, and the adjusted p is
   under α. A BLOCK the judge isn't confident of (mean confidence under 0.7) is
   INCONCLUSIVE instead.
-- **SHIP** (exit 0): the CI's low end is above −δ, so any drop is smaller than δ.
-- **INCONCLUSIVE** (exit 0, or 1 with the switch): neither. A ⚠️ row says how many more
-  cases it needs: N* is the number needed to detect Δ at α and the set power (Kotawala
-  2026, Eq. 6, for paired binary outcomes).
+- **SHIP** (exit 0): the CI's low end is above −δ, so any drop is smaller than δ. With no
+  discordant pair (every case scored the same on both sides, as replay makes an unchanged
+  KPI), the drop is at most 3.69/n (−ln(α/2)/n, times the score range for graded KPIs), so
+  identical sides SHIP from 74 cases at δ = 0.05.
+- **INCONCLUSIVE** (exit 0, or 1 with the switch): neither; or a NaN; or a zero-width CI
+  with Δ ≠ 0 (every case moved the same way, so there's no spread to judge by). A ⚠️ row
+  says how many more cases it needs: N* is the number needed to detect Δ at α and the set
+  power (Kotawala 2026, Eq. 6, for paired binary outcomes), or the 74 identical cases.
+
+What SHIP and BLOCK guarantee, in one paragraph: [docs/gate.md](docs/gate.md). The PR
+comment prints it under the gate table.
 
 How it's computed:
 
 - A binary KPI with k = 1 gets an exact McNemar test; graded scores or k > 1 get a paired
   sign-flip test (exact up to 20 cases). The CI is a seeded BCa bootstrap; MDE is the
-  smallest drop this many cases detects.
+  smallest drop this many cases detects, two-sided like the CI.
+- Finding a drop and ruling one out take different numbers of cases. At p = 0.80, ρ = 0.3,
+  α = 0.05 and power 0.8, detecting a true 0.05 drop takes 765 (`required_n`, which sizes
+  N*); showing the PR is at most 0.05 worse, when it isn't worse at all, takes 704
+  (`ni_required_n`). 765 is a detection number, not a non-inferiority or harm one.
+- ρ, the correlation of base and PR outcomes per case, comes from their 2×2 table of
+  pass/fail (`rho_from_2x2`), never from two baseline runs. It is undefined when a side
+  never varies, and then it drops out of σ_d.
 - p is adjusted with Holm across the blocking KPIs and Benjamini–Hochberg across the
   advisory ones, so adding KPIs doesn't add false alarms. Advisory KPIs never fail a PR.
+  Holm's family is K_gate: every KPI the run judges that `gate` and the bands leave
+  blocking, counted before any judging, so one with no paired case still counts, as p = 1.
+  The table's footnote prints it.
 - The old outcome names stay as aliases: `pass` = SHIP, `fail` = BLOCK, `needs_human` =
   INCONCLUSIVE; `infra_error` stays its own path.
 
@@ -242,9 +512,95 @@ gate:                          # lgcov.yaml; these are the defaults
   margin: 0.05                 # δ; a KPI's own `margin:` in taxonomy.yaml wins
   advisory_kpis: []            # or blocking_kpis: [...]; by default every KPI blocks
   inconclusive_blocks: false   # true: INCONCLUSIVE exits 1, like --fail-on-inconclusive
+  uncalibrated: advisory       # a model judge with no labels; or flag (T063)
 ```
 
+Per node and slice. The report never gives only a mean: after the KPI table it has one table
+per node, a row per slice (the KPIs' failure mode) and the node's total when it has more than
+one, each pooling its blocking judges' paired cases into one test. The overall verdict is the
+worst group's. A group is thin, "⚠️ thin (n=6, need 93)", when it has fewer cases than it needs
+to detect a drop of its margin at power 0.8 (with no discordant pair, the identical cases that
+rule one out), and a thin group can't block on its own: its BLOCK is INCONCLUSIVE. Nor does a
+group go further than its KPIs: its BLOCK stands only when one of them blocks on its own,
+Holm-corrected ("⚠️ pooled drop, no KPI blocks on its own" otherwise), and its SHIP only when
+every one of them SHIPs. A KPI's own BLOCK still blocks. `report.group_by: [node, slice]` in
+`lgcov.yaml` chooses the grouping; `[]` turns it off. Graph-structural coverage criteria are
+future work.
+
 Planned: sequential stopping (mSPRT), to stop judging once a KPI's verdict is clear.
+
+### Calibrate judges against human labels
+
+`lgcov calibrate` compares each judge with human labels: every CSV under
+`calibration/labels/` (columns `case_id, judge_id, judge_label, human_label`, plus optional
+`judge_confidence` and `question_form`) and the overrides in `calibration/overrides.jsonl`.
+Name CSVs to read those instead; `--taxonomy` gives each KPI's labels (default `pass` /
+`fail`).
+
+```bash
+lgcov calibrate   # the demo: 40 synthetic labels in calibration/labels/demo.csv
+```
+
+- A failure is the positive class. TPR: the share of human-failed cases the judge catches;
+  TNR: the share of human-passed cases it clears. Both with Wilson 95% intervals.
+- Cohen's κ with a seeded bootstrap interval, and the labels needed for κ ±0.10.
+- With confidences: the Brier score, accuracy at each confidence the judge actually gives
+  (the pile-up at 1.00 on its own), one temperature per question form (never pooled), and
+  from 50 labels on, the P(fail) cutoff with the best cross-validated balanced accuracy.
+- An override counts as a label only when it names its KPI and the judge's label; older
+  overrides are skipped and counted.
+
+It also writes each judge's band to `calibration/bands.json`, kept in the repo so a band
+moves in a reviewed diff. `lgcov judge` and `lgcov ci` read it (`--bands` to point
+elsewhere):
+
+| band | when | what the judge can do to a PR |
+|---|---|---|
+| blocking | the lower bounds of the TPR and TNR intervals both reach 0.80 | BLOCK it |
+| flag | both point rates reach 0.80, a lower bound doesn't | stop it as INCONCLUSIVE at most |
+| advisory | anything less, or no labels | show ⚠️ rows, never fail it |
+
+- Code judges always block: they are deterministic, so a check that passed on the base and fails
+  on the PR exits 1 on one case, whatever the paired test says. [docs/gate.md](docs/gate.md) has
+  the false-alarm risk and how to opt a check out.
+- A model judge with no labels is advisory (`gate.uncalibrated: flag` makes it a flag), and
+  the report says so at the top: "⚠️ 1 of 2 judges uncalibrated: no model judge can block
+  this PR. Run `lgcov calibrate`."
+- Blocking takes at least 16 human-failed and 16 human-passed cases with no disagreement:
+  at 16/16 the Wilson lower bound is 0.806. In practice, start as Hamel Husain recommends,
+  with about 100 diverse traces ([AI Evals FAQ](https://hamel.dev/blog/posts/evals-faq/)).
+- `jev_model:` in `lgcov.yaml` pins the model Jev judges call (default `jev-latest`), and
+  bands.json records the one the labels came from. When they differ, the Jev judges' bands
+  drop to flag, with a warning, until `lgcov calibrate` runs again.
+- The demo's 40 synthetic labels land on flag on purpose: 18 of 20 failures caught, 19 of 20
+  passes cleared, an overconfident question form, and 107 labels needed for κ ±0.10.
+
+#### Overrides move bands, through git
+
+1. A PR's report shows a verdict you disagree with, say `answer_states_order_status` passing
+   `run-0/respond`.
+2. Override it:
+
+   ```bash
+   lgcov review override --kpi answer_states_order_status --case-id run-0/respond \
+     --judge-label pass --human-label fail --reviewer you --note "drops the order status"
+   ```
+
+   The override is saved to `calibration/overrides.jsonl` as a label; when you disagree with
+   the judge, the case goes to `calibration/cases/<kpi>.jsonl` too; and the bands are
+   recalculated, printing any move: "Judge `answer_states_order_status`: flag → advisory
+   (n 42 → 43, lower TPR 0.61 → 0.58)."
+3. Commit `calibration/` with the PR. Its report lists the band changes against main under
+   "Judge calibration". Nothing is committed for you.
+4. The next PR gates with the new bands, and every PR re-judges the saved cases: "the judge
+   agrees with the human on 1 of 3 saved cases", with ⚠️ "judge drifting from human labels"
+   when that falls under half of at least 4. Saved cases check the judge; they never change
+   the gate.
+
+- A band moves up only once the judge has 16 agreed failures and 16 agreed passes; it moves
+  down at once.
+- One label per case and reviewer: overriding the same case again replaces your earlier
+  override, while a second reviewer's counts on its own.
 
 ## Development
 
@@ -253,14 +609,12 @@ cp .env.example .env   # fill in JEV_API_URL / JEV_API_KEY for L2/L3
 uv sync
 uv run pytest          # offline: fake judge, no network calls
 uv run graph-diff old.json new.json   # node/edge diff of two graph snapshots
+uv run python -m lgcov.docs_lint      # docs/banned-phrases.txt and the tagline; CI and pre-commit run it
 ```
 
 ## Roadmap
 
-- Judges you can trust: Cohen's kappa with a confidence interval, and TPR/TNR
-  against human labels, per KPI.
 - Sequential stopping (mSPRT) for the KPI gate.
-- Self-improvement loop: reviewer overrides feed back into judge calibration.
 
 ## License
 

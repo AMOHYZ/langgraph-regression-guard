@@ -7,6 +7,7 @@ import pytest
 from lgcov.config import (
     Config,
     GateConfig,
+    LangSmithConfig,
     Thresholds,
     TierPolicy,
     load_config,
@@ -29,18 +30,22 @@ def test_full_file_loads_typed(tmp_path: Path) -> None:
         "graph_entrypoint: app/graph.py:graph\n"
         "cassette_dir: cassettes\n"
         "taxonomy_path: taxonomy.yaml\n"
-        "thresholds: {min_node_coverage: 80, max_drifted_nodes: 3, fail_on: [fail, infra_error]}\n"
+        "thresholds: {min_node_coverage: 80}\n"
         "ignore_paths: [/meta/nonce]\n",
     )
     assert load_config(path) == Config(
         graph_entrypoint="app/graph.py:graph",
         cassette_dir="cassettes",
         taxonomy_path="taxonomy.yaml",
-        thresholds=Thresholds(
-            min_node_coverage=80.0, max_drifted_nodes=3, fail_on=("fail", "infra_error")
-        ),
+        thresholds=Thresholds(min_node_coverage=80.0),
         ignore_paths=("/meta/nonce",),
     )
+
+
+def test_mask_volatile_in_key_is_off_unless_turned_on(tmp_path: Path) -> None:
+    assert load_config(_write(tmp_path, "graph_entrypoint: a.py:g\n")).mask_volatile_in_key is False
+    on = "graph_entrypoint: a.py:g\nmask_volatile_in_key: true\n"
+    assert load_config(_write(tmp_path, on)).mask_volatile_in_key is True
 
 
 def test_taxonomy_alias_maps_to_taxonomy_path(tmp_path: Path) -> None:
@@ -79,7 +84,7 @@ def test_unknown_key_lists_valid_keys(tmp_path: Path) -> None:
 
 def test_unknown_threshold_key_lists_valid_keys() -> None:
     raw = {"graph_entrypoint": "a.py:g", "thresholds": {"min_cov": 1}}
-    with pytest.raises(ValueError, match=r"min_cov.*fail_on.*max_drifted_nodes.*min_node_coverage"):
+    with pytest.raises(ValueError, match=r"min_cov.*valid keys: \['min_node_coverage'\]"):
         parse_config(raw)
 
 
@@ -89,30 +94,34 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         load_config(missing)
     cfg = load_config(missing, {"graph_entrypoint": "a.py:graph"})
     assert cfg == Config(graph_entrypoint="a.py:graph")
-    assert cfg.thresholds == Thresholds(
-        min_node_coverage=0.0, max_drifted_nodes=None, fail_on=("fail",)
-    )
+    assert cfg.thresholds == Thresholds(min_node_coverage=0.0)
 
 
 @pytest.mark.parametrize(
     ("raw", "field"),
     [
         ({"graph_entrypoint": "no_colon"}, "graph_entrypoint"),
-        ({"graph_entrypoint": "a.py:g", "thresholds": {"fail_on": ["oops"]}}, "fail_on"),
         ({"graph_entrypoint": "a.py:g", "thresholds": {"min_node_coverage": 101}}, "min_node"),
-        ({"graph_entrypoint": "a.py:g", "thresholds": {"max_drifted_nodes": -1}}, "max_drifted"),
         ({"graph_entrypoint": "a.py:g", "ignore_paths": ["no/leading/slash"]}, "ignore_paths"),
+        ({"graph_entrypoint": "a.py:g", "mask_volatile_in_key": "yes"}, "mask_volatile_in_key"),
         ({"graph_entrypoint": "a.py:g", "cassette_dir": 3}, "cassette_dir"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": 0}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": "3"}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "samples_per_case": True}, "samples_per_case"),
         ({"graph_entrypoint": "a.py:g", "tier": "weekly"}, "tier"),
+        ({"graph_entrypoint": "a.py:g", "gate": {"uncalibrated": "blocking"}}, "uncalibrated"),
+        ({"graph_entrypoint": "a.py:g", "jev_model": ""}, "jev_model"),
+        ({"graph_entrypoint": "a.py:g", "report": {"group_by": ["kpi"]}}, "group_by"),
         ({"graph_entrypoint": "a.py:g", "gate": {"alpha": 0}}, "alpha"),
         ({"graph_entrypoint": "a.py:g", "gate": {"power": 1}}, "power"),
         ({"graph_entrypoint": "a.py:g", "gate": {"margin": -0.1}}, "margin"),
         ({"graph_entrypoint": "a.py:g", "gate": {"inconclusive_blocks": "yes"}}, "inconclusive"),
         ({"graph_entrypoint": "a.py:g", "gate": {"advisory_kpis": "tone"}}, "advisory_kpis"),
         ({"graph_entrypoint": "a.py:g", "gate": {"holm": True}}, "valid keys"),
+        ({"graph_entrypoint": "a.py:g", "langsmith": {"dataset": ""}}, "langsmith.dataset"),
+        ({"graph_entrypoint": "a.py:g", "langsmith": {"link": "no"}}, "langsmith.link"),
+        ({"graph_entrypoint": "a.py:g", "langsmith": {"project": "x"}}, "valid keys"),
+        ({"graph_entrypoint": "a.py:g", "langsmith": "support-qa"}, "'langsmith' must be"),
         (
             {
                 "graph_entrypoint": "a.py:g",
@@ -124,6 +133,23 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
 )
 def test_bad_values_name_the_field(raw: dict[str, object], field: str) -> None:
     with pytest.raises(ValueError, match=field):
+        parse_config(raw)
+
+
+# No command ever read T080's fail_on or max_drifted_nodes; a file that still sets one is
+# told what does that job.
+@pytest.mark.parametrize(
+    ("key", "value", "instead"),
+    [
+        ("fail_on", ["fail", "needs_human"], "gate.inconclusive_blocks"),
+        ("max_drifted_nodes", 3, "--fail-on"),
+    ],
+)
+def test_removed_threshold_keys_say_what_does_their_job(
+    key: str, value: object, instead: str
+) -> None:
+    raw = {"graph_entrypoint": "a.py:g", "thresholds": {"min_node_coverage": 80, key: value}}
+    with pytest.raises(ValueError, match=f"thresholds.{key}.*{instead}"):
         parse_config(raw)
 
 
@@ -176,3 +202,32 @@ def test_tier_policy() -> None:
     assert tier_policy("pr", 5).k == 1
     assert tier_policy("nightly", None) == TierPolicy(False, 3, None, True)
     assert tier_policy("nightly", 5).k == 5
+
+
+def test_gate_uncalibrated_and_the_pinned_jev_model() -> None:
+    # T063: what a judge with no labels may do, and the Jev model labels were made with.
+    cfg = parse_config({"graph_entrypoint": "a.py:g"})
+    assert (cfg.gate.uncalibrated, cfg.jev_model) == ("advisory", None)
+    raw = {
+        "graph_entrypoint": "a.py:g",
+        "jev_model": "jev-2026-10",
+        "gate": {"uncalibrated": "flag"},
+    }
+    cfg = parse_config(raw)
+    assert (cfg.gate.uncalibrated, cfg.jev_model) == ("flag", "jev-2026-10")
+
+
+def test_report_groups_by_node_and_slice_by_default() -> None:
+    # T090: the report breaks KPI results down; it never shows only a mean.
+    assert parse_config({"graph_entrypoint": "a.py:g"}).group_by == ("node", "slice")
+    raw = {"graph_entrypoint": "a.py:g", "report": {"group_by": ["slice"]}}
+    assert parse_config(raw).group_by == ("slice",)
+
+
+# T103: the LangSmith dataset whose experiments the PR report links, read-only.
+def test_langsmith_names_the_dataset_and_links_unless_told_not_to() -> None:
+    cfg = parse_config({"graph_entrypoint": "a.py:g", "langsmith": {"dataset": "support-qa"}})
+    assert cfg.langsmith == LangSmithConfig(dataset="support-qa", link=True)
+    off = {"dataset": "support-qa", "link": False}
+    assert parse_config({"graph_entrypoint": "a.py:g", "langsmith": off}).langsmith.link is False
+    assert parse_config({"graph_entrypoint": "a.py:g"}).langsmith == LangSmithConfig()

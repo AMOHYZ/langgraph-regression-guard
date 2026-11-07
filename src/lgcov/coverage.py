@@ -172,5 +172,17 @@ def format_coverage_line(head: CoverageSnapshot, base: CoverageSnapshot | None) 
     return f"Nodes {nodes} · Edges {edges}"
 
 
+def node_floor_miss(head: CoverageSnapshot, floor: float) -> str:
+    """'' when node coverage meets `floor` (thresholds.min_node_coverage), else the report's
+    line saying not. Compared as the report rounds it, so 'Nodes 80%' meets an 80% floor."""
+    if round(head.node_pct, 1) >= floor:
+        return ""
+    never = ", ".join(f"`{n}`" for n in head.never_hit_nodes)
+    return (
+        f"Node coverage {_pct_text(head.node_pct)} is under the {floor:g}% floor "
+        f"(`thresholds.min_node_coverage`); never run: {never}"
+    )
+
+
 def _pct(hit: int, total: int) -> float:
     return 100.0 * hit / total if total else 100.0

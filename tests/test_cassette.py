@@ -351,6 +351,16 @@ def test_on_divergence_fail_stops_the_run_and_leaves_the_rest_not_checked() -> N
     assert [d.node for d in r.drifts] == ["a"]  # b and c weren't checked: not drift
 
 
+def test_compared_run_says_what_replay_run_says_from_the_steps_alone() -> None:
+    # T179: so a job that can't run the graph can do this with steps another job reports.
+    from lgcov.cassette import ON_DIVERGENCE, compared_run, replay_run
+
+    cassette = record(_chain(1), {"x": 0})
+    for on_divergence in ON_DIVERGENCE:
+        r = replay_run(_chain(2), cassette, serve=True, on_divergence=on_divergence)
+        assert compared_run(cassette, r.steps, r.calls, r.halt) == r
+
+
 def test_on_divergence_live_runs_the_rest_of_the_run_live() -> None:
     from lgcov.cassette import replay_run
 
@@ -393,3 +403,89 @@ def test_unservable_counts_recorded_steps_whose_code_changed() -> None:
     cassette = record(_chain(1), {"x": 0})
     assert unservable(_chain(1), [cassette]) == 0
     assert unservable(_chain(2), [cassette, cassette]) == 2  # a, in each run
+
+
+# T109: an error in a router or inside a subgraph names it, like an error in a node.
+def _routed(router: Callable[[S], str]) -> CompiledStateGraph[S]:
+    g = StateGraph(S)
+    g.add_node("a", _noop)
+    g.add_node("b", _noop)
+    g.add_edge(START, "a")
+    g.add_conditional_edges("a", router, ["b"])
+    g.add_edge("b", END)
+    return g.compile()
+
+
+def test_a_router_that_raises_is_a_node_error_naming_the_router() -> None:
+    from lgcov.cassette import NodeError
+
+    def pick(state: S) -> str:
+        raise KeyError("route")
+
+    with pytest.raises(NodeError) as info:
+        replay(_routed(pick), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.transport) == ("pick", False)
+    assert isinstance(info.value.original, KeyError)
+
+
+def test_a_router_returning_an_unmapped_key_is_a_node_error_naming_the_router() -> None:
+    from lgcov.cassette import NodeError
+
+    def pick(state: S) -> str:
+        return "c"  # not in its mapping ["b"]: LangGraph raises KeyError after pick returns
+
+    with pytest.raises(NodeError) as info:
+        replay(_routed(pick), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.transport) == ("pick", False)
+    assert isinstance(info.value.original, KeyError)
+
+
+def test_naming_a_router_never_reads_the_agents_own_objects() -> None:
+    from lgcov.cassette import NodeError
+
+    class Client:
+        @property
+        def path(self) -> str:
+            raise RuntimeError("no base URL set")  # reading it would be a second crash
+
+        def ask(self) -> str:
+            raise ValueError("bad reply")
+
+    def pick(state: S) -> str:
+        return Client().ask()
+
+    with pytest.raises(NodeError) as info:
+        replay(_routed(pick), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.original.args) == ("pick", ("bad reply",))
+
+
+def test_a_router_that_times_out_is_still_a_transport_error() -> None:
+    from lgcov.cassette import NodeError
+
+    def pick(state: S) -> str:
+        raise TimeoutError("provider timed out")
+
+    with pytest.raises(NodeError) as info:
+        replay(_routed(pick), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.transport) == ("pick", True)
+
+
+def test_a_node_inside_a_subgraph_that_raises_is_named_subgraph_dot_node() -> None:
+    from lgcov.cassette import NodeError
+
+    def inner(state: S) -> S:
+        raise ValueError("bad draft")
+
+    sub = StateGraph(S)
+    sub.add_node("inner", inner)
+    sub.add_edge(START, "inner")
+    sub.add_edge("inner", END)
+    g = StateGraph(S)
+    g.add_node("a", _noop)
+    g.add_node("sub", sub.compile())
+    g.add_edge(START, "a")
+    g.add_edge("a", "sub")
+    g.add_edge("sub", END)
+    with pytest.raises(NodeError) as info:
+        replay(g.compile(), Cassette({"x": 1}, []))
+    assert (info.value.node, info.value.transport) == ("sub.inner", False)

@@ -1,0 +1,12 @@
+# T101a synthetic fixture. Nodes inside a subgraph are named <subgraph node>.<inner node>.
+graph: graph.py:graph
+base_patch: linear/base.py
+head_patch: linear/head.py
+cases:
+  - {question: "Where is my order?"}
+  - {question: "What are your hours?"}
+expected:
+  root: [b]
+  propagated: [c]
+notes: The PR edits b's prompt; c only drifts because b's output did.
+hard_cases: []

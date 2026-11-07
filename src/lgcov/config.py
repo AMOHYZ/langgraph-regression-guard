@@ -10,14 +10,11 @@ from typing import Literal
 import yaml
 
 DEFAULT_PATH = "lgcov.yaml"
-FAIL_ON_VALUES = ("fail", "infra_error", "needs_human")  # judge_gate.GateOutcome minus "pass"
 
 
 @dataclass(frozen=True)
 class Thresholds:
-    min_node_coverage: float = 0.0  # percent, 0..100
-    max_drifted_nodes: int | None = None  # None = no limit
-    fail_on: tuple[str, ...] = ("fail",)
+    min_node_coverage: float = 0.0  # percent, 0..100; under it `lgcov ci` exits 1 (0 = off)
 
 
 @dataclass(frozen=True)
@@ -30,6 +27,7 @@ class GateConfig:
     blocking_kpis: tuple[str, ...] | None = None  # None: every KPI not in advisory_kpis
     advisory_kpis: tuple[str, ...] = ()
     inconclusive_blocks: bool = False  # True: an INCONCLUSIVE blocking KPI exits 1, not 0
+    uncalibrated: Literal["advisory", "flag"] = "advisory"  # T063: a model judge with no labels
 
     def advisory(self, kpis: Collection[str]) -> frozenset[str]:
         """The advisory KPIs among a taxonomy's. A name the taxonomy doesn't have is an error."""
@@ -42,6 +40,14 @@ class GateConfig:
         if self.blocking_kpis is None:
             return frozenset(self.advisory_kpis)
         return frozenset(k for k in kpis if k not in self.blocking_kpis)
+
+
+@dataclass(frozen=True)
+class LangSmithConfig:
+    """T103: the LangSmith dataset whose experiment on this commit the PR report links."""
+
+    dataset: str | None = None  # None: `lgcov ci` makes no LangSmith call
+    link: bool = True  # False: no link, and no LangSmith call at all
 
 
 # T089: pr runs on every push, cheap and within a budget; nightly runs everything, live.
@@ -72,9 +78,13 @@ class Config:
     taxonomy_path: str | None = None
     thresholds: Thresholds = field(default_factory=Thresholds)
     ignore_paths: tuple[str, ...] = ()  # JSON pointers into node I/O, e.g. /meta/nonce
+    mask_volatile_in_key: bool = False  # T177: the key masks `id`s, UUIDs and date-times too
     samples_per_case: int | None = None  # T073: k verdicts per case; None: the tier's (T089)
     gate: GateConfig = field(default_factory=GateConfig)
     tier: Tier = "pr"
+    jev_model: str | None = None  # T063: the Jev model judges use; labels are only good for it
+    group_by: tuple[str, ...] = ("node", "slice")  # T090: report.group_by
+    langsmith: LangSmithConfig = field(default_factory=LangSmithConfig)  # T103
 
 
 _KEYS = (
@@ -82,13 +92,22 @@ _KEYS = (
     "gate",
     "graph_entrypoint",
     "ignore_paths",
+    "jev_model",
+    "langsmith",
+    "mask_volatile_in_key",
+    "report",
     "samples_per_case",
     "taxonomy",  # alias for taxonomy_path
     "taxonomy_path",
     "thresholds",
     "tier",
 )
-_THRESHOLD_KEYS = ("fail_on", "max_drifted_nodes", "min_node_coverage")
+_THRESHOLD_KEYS = ("min_node_coverage",)
+# T080 keys no command ever read; a file that still sets one is told what does that job.
+_REMOVED_THRESHOLD_KEYS = {
+    "fail_on": "a blocking KPI's BLOCK always fails; gate.inconclusive_blocks fails INCONCLUSIVE",
+    "max_drifted_nodes": "--fail-on (root-drift, any-drift or never) picks the drift that fails",
+}
 _GATE_KEYS = (
     "advisory_kpis",
     "alpha",
@@ -96,6 +115,7 @@ _GATE_KEYS = (
     "inconclusive_blocks",
     "margin",
     "power",
+    "uncalibrated",
 )
 
 
@@ -123,30 +143,19 @@ def _positive_int(value: object, key: str) -> int:
     return value
 
 
-def _nonneg_int(value: object, key: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"lgcov.yaml: '{key}' must be a non-negative integer")
-    return value
-
-
 def _thresholds(raw: object) -> Thresholds:
     if not isinstance(raw, dict):
         raise ValueError("lgcov.yaml: 'thresholds' must be a mapping")
+    for key, instead in _REMOVED_THRESHOLD_KEYS.items():
+        if key in raw:
+            raise ValueError(
+                f"lgcov.yaml: 'thresholds.{key}' was removed, as no command read it: {instead}"
+            )
     _check_keys(raw, _THRESHOLD_KEYS, "lgcov.yaml: thresholds")
     cov = raw.get("min_node_coverage", 0.0)
     if isinstance(cov, bool) or not isinstance(cov, int | float) or not 0 <= cov <= 100:
         raise ValueError("lgcov.yaml: 'min_node_coverage' must be a number in 0..100")
-    fail_on = _str_list(raw.get("fail_on", ["fail"]), "fail_on")
-    bad = sorted(set(fail_on) - set(FAIL_ON_VALUES))
-    if bad:
-        raise ValueError(f"lgcov.yaml: 'fail_on' values {bad} not in {list(FAIL_ON_VALUES)}")
-    max_drifted = raw.get("max_drifted_nodes")
-    capped = None if max_drifted is None else _nonneg_int(max_drifted, "max_drifted_nodes")
-    return Thresholds(
-        min_node_coverage=float(cov),
-        max_drifted_nodes=capped,
-        fail_on=fail_on,
-    )
+    return Thresholds(min_node_coverage=float(cov))
 
 
 def _probability(value: object, key: str) -> float:
@@ -171,6 +180,9 @@ def _gate(raw: object) -> GateConfig:
     inconclusive_blocks = raw.get("inconclusive_blocks", False)
     if not isinstance(inconclusive_blocks, bool):
         raise ValueError("lgcov.yaml: 'gate.inconclusive_blocks' must be true or false")
+    uncalibrated = raw.get("uncalibrated", "advisory")
+    if uncalibrated not in ("advisory", "flag"):
+        raise ValueError("lgcov.yaml: 'gate.uncalibrated' must be advisory or flag")
     return GateConfig(
         alpha=_probability(raw.get("alpha", 0.05), "alpha"),
         power=_probability(raw.get("power", 0.8), "power"),
@@ -178,7 +190,29 @@ def _gate(raw: object) -> GateConfig:
         blocking_kpis=blocking_kpis,
         advisory_kpis=advisory_kpis,
         inconclusive_blocks=inconclusive_blocks,
+        uncalibrated="flag" if uncalibrated == "flag" else "advisory",
     )
+
+
+def _group_by(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, dict):
+        raise ValueError("lgcov.yaml: 'report' must be a mapping")
+    _check_keys(raw, ("group_by",), "lgcov.yaml: report")
+    by = _str_list(raw.get("group_by", ["node", "slice"]), "report.group_by")
+    if not set(by) <= {"node", "slice"}:
+        raise ValueError("lgcov.yaml: 'report.group_by' takes node and slice only")
+    return tuple(g for g in ("node", "slice") if g in by)
+
+
+def _langsmith(raw: object) -> LangSmithConfig:
+    if not isinstance(raw, dict):
+        raise ValueError("lgcov.yaml: 'langsmith' must be a mapping")
+    _check_keys(raw, ("dataset", "link"), "lgcov.yaml: langsmith")
+    link = raw.get("link", True)
+    if not isinstance(link, bool):
+        raise ValueError("lgcov.yaml: 'langsmith.link' must be true or false")
+    dataset = raw.get("dataset")
+    return LangSmithConfig(None if dataset is None else _str(dataset, "langsmith.dataset"), link)
 
 
 def _tier(value: object) -> Tier:
@@ -219,12 +253,16 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
     ignore = _str_list(d.get("ignore_paths", []), "ignore_paths")
     if not all(p.startswith("/") for p in ignore):
         raise ValueError("lgcov.yaml: 'ignore_paths' must be JSON pointers starting with '/'")
+    mask_volatile = d.get("mask_volatile_in_key", False)
+    if not isinstance(mask_volatile, bool):
+        raise ValueError("lgcov.yaml: 'mask_volatile_in_key' must be true or false")
     return Config(
         graph_entrypoint=entry,
         cassette_dir=_str(d.get("cassette_dir", "cassettes"), "cassette_dir"),
         taxonomy_path=_taxonomy_path(d),
         thresholds=_thresholds(d.get("thresholds", {})),
         ignore_paths=ignore,
+        mask_volatile_in_key=mask_volatile,
         samples_per_case=(
             None
             if "samples_per_case" not in d
@@ -232,6 +270,9 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         ),
         gate=_gate(d.get("gate", {})),
         tier=_tier(d.get("tier", "pr")),
+        jev_model=None if "jev_model" not in d else _str(d["jev_model"], "jev_model"),
+        group_by=_group_by(d.get("report", {})),
+        langsmith=_langsmith(d.get("langsmith", {})),
     )
 
 

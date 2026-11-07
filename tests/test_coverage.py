@@ -1,6 +1,7 @@
 """T052/T083: node/edge coverage from execution traces, and its trend vs main."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from lgcov.coverage import (
     format_coverage_delta,
     format_coverage_line,
     format_delta,
+    node_floor_miss,
     snapshot_coverage,
 )
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
@@ -106,6 +108,23 @@ def test_coverage_line_without_a_baseline_says_no_baseline_yet() -> None:
 def test_coverage_line_with_a_baseline_shows_the_trend() -> None:
     line = format_coverage_line(_linear([["a"]]), _linear([["a", "b"]]))
     assert line == "Nodes 75% (−25% vs main) · Edges 33.3% (−66.7% vs main)"
+
+
+# thresholds.min_node_coverage: `lgcov ci` fails a run whose node coverage is under it.
+def test_node_floor_miss_names_the_floor_and_the_nodes_never_run() -> None:
+    cov = _linear([["a"]])  # 75%: b never runs
+    assert node_floor_miss(cov, 0) == ""
+    assert node_floor_miss(cov, 75) == ""
+    assert node_floor_miss(cov, 80) == (
+        "Node coverage 75% is under the 80% floor (`thresholds.min_node_coverage`); never run: `b`"
+    )
+
+
+def test_node_floor_is_compared_as_the_report_rounds_it() -> None:
+    # 2 of 3 nodes is 66.67%, shown as 66.7%: it meets a 66.7% floor, as the report reads.
+    cov = replace(_linear([["a"]]), nodes_total=3, nodes_hit=2)
+    assert node_floor_miss(cov, 66.7) == ""
+    assert node_floor_miss(cov, 66.8).startswith("Node coverage 66.7% is under the 66.8% floor")
 
 
 def test_node_hit_on_main_and_missed_on_the_pr_is_newly_uncovered() -> None:

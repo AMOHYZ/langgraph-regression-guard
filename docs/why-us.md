@@ -1,9 +1,10 @@
 # Why lgcov
 
 lgcov tells you which LangGraph node a PR actually changed and which ones only inherited
-the damage, gates each KPI in your taxonomy with a paired test, and (planned) lets a
-judge block only once it has earned that against human labels. First report in 2
-minutes (L1 only, measured 27 Oct 2026). Other tools as of 31 Oct 2026.
+the damage, gates each KPI in your taxonomy with a paired test, and lets a judge block
+only once it has earned that against human labels. On real agents that attribution is a
+[pilot so far](benchmark.md#real-prs): one PR. First report in 2 minutes (L1 only, measured
+27 Oct 2026). Other tools as of 31 Oct 2026; Kitaru and LangSmith as of 5 Nov.
 
 ## The problem
 
@@ -18,41 +19,48 @@ nothing checked what the new prompts did to the nodes downstream.
 
 ## What lgcov does differently
 
-**(a) Root vs propagated drift, per node.** When a PR changes an agent, lgcov names the
-node that drifted on its own input (root) and separates it from the nodes that only
-drifted because something upstream did (propagated). In the
-[PR #163 taxonomy](taxonomy.yaml), the rewritten supervisor prompt is root drift, and the
-unsupported claims it causes in `final_report` are propagated.
-*Status: built.* `diff_cassettes` classifies root and propagated drift from recorded node
-inputs, and the PR comment lists each drifted node as root or downstream. Reenact records
-each LangGraph node boundary in its trajectory and shows them to its judges, but it gates
-per scenario, at the first call that diverges from the recording. EvalView names a root
-tool call. None of the tools below labels graph nodes root or propagated between base and
-PR. Benchmark in progress (T101).
+**(a) Root vs propagated drift, per node.** When a PR changes an agent, the PR comment calls
+the first node to drift in each run root, and the nodes that drift after it downstream
+(propagated). On [open_deep_research #163](benchmark.md#real-prs), `write_research_brief`
+writes the rewritten supervisor prompt into the state. lgcov named it root and
+`final_report_generation` propagated, as [the human labels](benchmark/open_deep_research-163.yaml)
+do. It also called `research_supervisor` propagated, though that subgraph holds the other
+labelled roots and is scored as one node.
+*Status: built, and a pilot on real PRs.* Root precision is 1 of 1 on that one PR, with a 95%
+Wilson interval of 0.21 to 1.00, so it proves no precision claim. Recall is capped at about
+1/5 to 1/6, because a second root in the same run reads as downstream (T162).
+The [replay audit](validation/replay-audit.md) checks the replay this rests on, not these
+labels, and a change replay can't see can give no drift, so no root.
+`diff_cassettes` classifies by each node's recorded input, but only tests call it so far. A
+noise check, base against base on a real model, is planned (T173). Reenact records each
+LangGraph node boundary in its trajectory and shows them to its judges, but it gates per
+scenario, at the first call that diverges from the recording; lgcov's rule is the same
+first-divergence idea, labelled per graph node. EvalView names a root tool call. None of the
+tools below labels graph nodes root or propagated between base and PR.
 
 **(c) Judges that earn the right to block.** A KPI's judge may block a PR only once the
 lower bounds of the 95% intervals of its TPR and TNR against human labels both clear
-0.80. Below that it advises, with the number of labels it still needs printed next to
-it.
-*Status: planned.* Built today: a BLOCK the judge isn't confident of (mean confidence
-under 0.7) goes to a human as INCONCLUSIVE, and any KPI can be made advisory in
-`lgcov.yaml`. Reenact sets a criterion blocking or advisory from its raw agreement with
+0.80. Below that it flags or advises, with the number of labels it still needs printed
+next to it.
+*Status: built (T063, [PR #32](https://github.com/AMOHYZ/langgraph-regression-guard/pull/32)):
+`lgcov calibrate` gives TPR and TNR with Wilson intervals, and a judge's band follows their
+lower bounds.* Reenact sets a criterion blocking or advisory from its raw agreement with
 human labels, and graphtrace reports Cohen's kappa per criterion; neither gates on
 interval bounds of TPR and TNR.
 
 **(e) Calibration that lives in the repo.** A reviewer's override is a label versioned in
 git, and the next PR re-estimates the judge's κ, TPR and TNR from those labels and moves
 the judge between advising and blocking. No hosted service.
-*Status: half built.* `review.apply_decision` saves an override as a labelled example in
-a calibration file in the repo; nothing reads it back into a judge yet. Kitaru also
-calibrates evaluators from human judgments, on a Kitaru server you run or on its managed
-cloud.
+*Status: built (T102, [PR #33](https://github.com/AMOHYZ/langgraph-regression-guard/pull/33)):
+`lgcov review override` saves a label, the judge's band moves on the next PR, and saved
+cases re-judge the judge.* Kitaru also
+calibrates evaluators from human judgments, on a Kitaru server you run.
 
 **Paired statistics, done properly.** This is standard technique, not a differentiator.
 Each case's base and PR scores are paired: an exact McNemar test for binary KPIs, a
 sign-flip test otherwise. Δ gets a BCa bootstrap CI, a non-inferiority margin δ decides
-SHIP, BLOCK or INCONCLUSIVE, and an INCONCLUSIVE KPI shows the cases it needs (N*, from
-Kotawala 2026, Eq. 6).
+SHIP, BLOCK or INCONCLUSIVE, and an INCONCLUSIVE KPI shows the cases it needs to detect Δ
+(N*, from Kotawala 2026, Eq. 6).
 *Status: built ([PR #26](https://github.com/AMOHYZ/langgraph-regression-guard/pull/26),
 [PR #27](https://github.com/AMOHYZ/langgraph-regression-guard/pull/27)).* The design
 follows [statgate](https://github.com/yashchimata/statgate) (see [NOTICE](../NOTICE)),
@@ -61,15 +69,21 @@ verdicts. What lgcov adds: one test per taxonomy KPI, each tied to the graph nod
 reads, with the root drift node next to its verdict, and Holm across the blocking KPIs
 with Benjamini–Hochberg across the advisory ones. Per-slice scores are planned (T090).
 
-**Node-level memoization.** A node whose code fingerprint and input both match the
-recording is served from the cassette, so only changed nodes, and nodes whose input
-changed because of them, run live.
+**Node-level memoization.** A node whose code fingerprint and masked input both match the
+recording is served from the cassette, so changed nodes run live, and so do nodes whose input
+changed in a part the mask leaves in. A change only to a masked value, such as a message's id
+or usage, doesn't re-run the nodes below it, so they can be served stale
+([known replay limits](../README.md#known-replay-limits)). A comment or docstring edit counts
+as a change for now, so that node runs live too.
 *Status: built ([PR #18](https://github.com/AMOHYZ/langgraph-regression-guard/pull/18));
-speed benchmark coming (T105).* Not novel: Reenact, graphtrace,
+measured on the demo in [benchmark-speed.md](benchmark-speed.md).* Not novel: Reenact, graphtrace,
 [docker-agent](https://github.com/docker/docker-agent) and LangSmith's pytest cache
 replay recorded calls too. lgcov's unit is the graph node.
 
 ## Related tools
+
+LangSmith, Opik, Kitaru, Langfuse, Braintrust, promptfoo and DeepEval, scored column by
+column against lgcov: [bake-off.md](bake-off.md).
 
 - [Reenact](https://github.com/Manas-33/Reenact) (0.2.0, MIT): records model, tool and
   MCP calls once and replays the current code against them offline. On divergence it
@@ -90,23 +104,34 @@ replay recorded calls too. lgcov's unit is the graph node.
   against a non-inferiority margin, SHIP / BLOCK / INCONCLUSIVE, power analysis and
   sequential early stopping, as a GitHub Action with a sticky comment, for any eval
   results. lgcov's `stats.py` follows its design.
-- [Kitaru](https://github.com/zenml-io/kitaru) (ZenML, 0.27.3, Apache-2.0): records or
+- [Kitaru](https://github.com/zenml-io/kitaru) (ZenML, 0.27.6, Apache-2.0): records or
   imports production runs as sessions and replays them against a change, with tool calls
   answered from the recording. Human judgments calibrate evaluators, and experiments on
-  frozen cohorts gate in CI. Self-hosted server or managed cloud.
+  frozen cohorts gate in CI. Self-hosted server, with a paid
+  [hosted AI engineer](https://www.zenml.io/product/kitaru) on top.
 - [LangSmith](https://docs.langchain.com/langsmith/pytest) (LangChain): a pytest plugin
-  whose `LANGSMITH_TEST_CACHE` replays recorded HTTP calls, and
+  whose `LANGSMITH_TEST_CACHE` replays recorded HTTP calls, a
+  [CI example](https://github.com/langchain-ai/cicd-pipeline-example) that runs evals on each
+  PR against fixed thresholds, and
   [Engine](https://docs.langchain.com/langsmith/engine), which turns production traces
-  into issues, evaluators and offline examples.
+  into issues, evaluators and offline examples. Engine's
+  [fix validation](https://docs.langchain.com/langsmith/engine-fix-validation) (private beta)
+  replays an issue's traces on a baseline deployment and on a PR preview, with a verdict per
+  trace.
 
 ## What lgcov does not do (yet)
 
 - Agents not built on LangGraph.
 - A hosted dashboard: the report lives in the PR comment, the job summary and files.
 - A taxonomy without human review: KPIs come from failure modes a person has checked.
-- Attribute a crash in a router or a subgraph to a node: it counts as a harness error
-  for now (T109). Subgraphs and `ToolNode`s always run live instead of being served.
-- (c), and the read-back half of (e), above.
+- Serve a subgraph or a `ToolNode` from the cassette: they always run live. Drift
+  inside a subgraph is blamed on the subgraph node (`sub`), not its inner node; a crash
+  there does name the inner node (`sub.inner`).
+- Name a second root in the same run: only the first node to drift is called root, so a
+  later independent change reads as downstream (T162).
+- See a change that reaches a node only through a message's id, usage or other metadata, or a
+  `Store` read, or replay a graph with a checkpointer or an `interrupt`:
+  [known replay limits](../README.md#known-replay-limits).
 
 ## How this was checked
 
@@ -118,14 +143,18 @@ On 31 Oct 2026, from each tool's README and, where named, its source:
   labels sets blocking or advisory).
 - evalview 0.8.1: `core/root_cause.py` (deterministic root-tool attribution) and
   `core/types.py` (`VarianceConfig`: 10 runs, 0.8 pass rate).
-- graphtrace 0.1.0, agentassay 0.2.3, statgate 0.1.1 and kitaru 0.27.3: their READMEs.
-  LangSmith: its pytest and Engine docs. docker-agent: its record and replay docs.
+- graphtrace 0.1.0, agentassay 0.2.3 and statgate 0.1.1: their READMEs. docker-agent: its
+  record and replay docs.
 - open_deep_research at PR #163's merge commit (`6532a41`): `tests/evaluators.py`,
   `tests/run_evaluate.py` and `.github/workflows/` (two Claude review workflows, no test
   run).
-- lgcov: `cassette.py` (`replay_steps`, `diff_cassettes`), `fingerprint.py`, `stats.py`
+- lgcov: `cassette.py` (`replay_steps`), `fingerprint.py`, `stats.py`
   (`paired_test`, `holm`), `sampling.py` (`gate_kpis`) and `review.py`
   (`apply_decision`).
+- Re-read on 5 Nov 2026: kitaru 0.27.6's README; LangSmith's pytest, Engine and fix validation
+  docs and its CI example; open_deep_research's `deep_researcher.py` at `6532a41`
+  (`write_research_brief` builds the supervisor's prompt); and lgcov's `cli.py` (`_run_root`)
+  and `fingerprint.py`.
 - Not compared live: Reenact records LangChain chat-model and tool calls through
   callbacks, and the demo agent's fake LLM is plain Python, so Reenact would record
   nothing on demo PR #7. A fair run needs the demo to call a LangChain chat model.

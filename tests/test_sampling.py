@@ -11,6 +11,7 @@ from lgcov.sampling import (
     gate_exit_code,
     gate_kpis,
     judge_samples,
+    k_gate,
     kpi_stats,
     render_gate_table,
     usage_tokens,
@@ -103,7 +104,8 @@ def test_tokens_are_unknown_unless_some_judgment_reports_usage() -> None:
 def test_flakiness_alone_never_fails_the_gate() -> None:
     cases = _cases(*[["pass", "fail", "pass"]] * 4)  # same flaky cases on base and new
     stats = kpi_stats(KPI_, 3, base=cases, new=cases)
-    assert (stats.outcome, stats.flakiness) == ("pass", 1.0)
+    # T150: never a fail; 4 identical cases are too few to rule out a drop of the margin
+    assert (stats.outcome, stats.flakiness) == ("needs_human", 1.0)
     assert stats.flaky_cases == ("run-0", "run-1", "run-2", "run-3")
 
 
@@ -164,7 +166,7 @@ def test_a_kpi_with_mostly_infra_samples_shows_judge_unreliable() -> None:
 
     cases = _cases(["pass", "timeout", "conn"])  # 2 of 3 judgments didn't run
     stats = kpi_stats(KPI_, 3, base=cases, new=cases)
-    assert stats.outcome == "pass" and stats.judge_unreliable
+    assert stats.outcome == "needs_human" and stats.judge_unreliable  # T150: 1 case
     assert "| ⚠️ judge unreliable: grounded (4 of 6 judgments didn't run) | | | | | |" in (
         render_kpi_table([stats])
     )
@@ -208,7 +210,7 @@ def test_holm_stops_a_borderline_kpi_from_blocking() -> None:
     gated = gate_kpis([grounded, kpi_stats(POLITE, 1, same, same)])
     assert [(s.kpi, s.decision, s.outcome) for s in gated] == [
         ("grounded", "INCONCLUSIVE", "needs_human"),
-        ("polite", "SHIP", "pass"),
+        ("polite", "INCONCLUSIVE", "needs_human"),  # T150: 60 identical cases, under 74
     ]
     assert gated[0].p_adjusted == pytest.approx(0.0625)  # Holm with m = 2
     assert gate_exit_code(gated) == 0
@@ -240,6 +242,133 @@ def test_gate_table_row_has_n_rates_delta_ci_p_margin_mde_n_star_verdict_and_roo
     assert lines[:3] == [
         "| KPI | n | base | PR | Δ (95% CI) | p adj. | δ | MDE | N* | verdict | root |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
-        "| grounded | 200 | 100% | 90% | -0.10 [-0.14, -0.06] | <0.001 | 0.05 | 0.05 | 71 "
+        "| grounded | 200 | 100% | 90% | -0.10 [-0.14, -0.06] | <0.001 | 0.05 | 0.06 | 71 "
         "| 🔴 BLOCK | `respond` |",  # run-50 didn't change: its root isn't this KPI's
     ]
+
+
+# T063 PR B: a flag-band judge can stop a PR only as INCONCLUSIVE.
+def test_a_flag_band_caps_a_block_at_inconclusive_and_still_counts_as_blocking() -> None:
+    base, new = _drop(200, 20)
+    [flagged] = gate_kpis([kpi_stats(KPI_, 1, base, new)], flagged={"grounded"})
+    assert (flagged.decision, flagged.outcome, flagged.blocking) == ("BLOCK", "needs_human", True)
+    assert gate_exit_code([flagged]) == 0
+    assert gate_exit_code([flagged], inconclusive_blocks=True) == 1
+    table = "\n".join(render_gate_table([flagged]))
+    assert "| grounded (flag) |" in table
+    assert "⚠️ INCONCLUSIVE (judge band: flag)" in table
+
+
+# T150: identical sides are evidence of no drop once the 3.69/n bound is under the margin.
+def test_identical_sides_under_74_cases_say_how_many_they_need() -> None:
+    same = _cases(*[["pass"]] * 50)
+    stats = kpi_stats(KPI_, 1, same, same)
+    assert (stats.decision, stats.outcome) == ("INCONCLUSIVE", "needs_human")
+    table = "\n".join(render_gate_table([stats]))
+    assert "| 0.05 | — | 74 | ⚠️ INCONCLUSIVE |" in table
+    assert "| ⚠️ underpowered: need 24 more cases for grounded (N*=74) |" in table
+    hundred = _cases(*[["pass"]] * 100)
+    shipped = kpi_stats(KPI_, 1, hundred, hundred)
+    assert (shipped.decision, shipped.outcome) == ("SHIP", "pass")
+
+
+# T114: Holm's m is K_gate, the blocking KPIs the run judges, fixed before any p is seen.
+TONE = KPI.binary("tone", "the answer keeps a calm tone", "Is the tone calm?")
+
+
+def test_k_gate_one_blocks_where_k_gate_three_cannot() -> None:
+    base, new = _drop(60, 6)  # exact McNemar p = 2 / 2**6 = 0.031
+    same = _cases(*[["pass"]] * 60)
+    kpis = [kpi_stats(KPI_, 1, base, new), *(kpi_stats(k, 1, same, same) for k in (POLITE, TONE))]
+    one = gate_kpis(kpis, advisory={"polite", "tone"})  # lgcov.yaml's gate.advisory_kpis
+    three = gate_kpis(kpis)
+    assert (k_gate(one), one[0].decision) == (1, "BLOCK")
+    assert one[0].p_adjusted == pytest.approx(0.03125)
+    assert (k_gate(three), three[0].decision) == (3, "INCONCLUSIVE")
+    assert three[0].p_adjusted == pytest.approx(0.09375)
+    assert "Holm across the K_gate = 3 blocking KPIs" in "\n".join(render_gate_table(three))
+
+
+def test_a_blocking_kpi_with_no_paired_case_still_counts_in_k_gate() -> None:
+    base, new = _drop(60, 6)
+    unpaired = kpi_stats(POLITE, 1, {}, {})  # its node never ran: no case on either side
+    gated = gate_kpis([kpi_stats(KPI_, 1, base, new), unpaired])
+    assert (k_gate(gated), gated[0].decision, gated[1].decision) == (2, "INCONCLUSIVE", None)
+    assert gated[0].p_adjusted == pytest.approx(0.0625)  # Holm with m = 2, not 1
+
+
+def test_the_gate_table_says_what_ship_and_block_guarantee() -> None:
+    base, new = _drop(60, 6)
+    same = _cases(*[["pass"]] * 60)
+    gated = gate_kpis([kpi_stats(KPI_, 1, base, new), kpi_stats(POLITE, 1, same, same)])
+    assert render_gate_table(gated)[-1] == (
+        "**What SHIP and BLOCK guarantee.** SHIP needs every blocking KPI (K_gate = 2) to pass "
+        "its own non-inferiority test: its 95% CI rules out a drop of δ. Since all of them "
+        "must pass, a wrong SHIP is no likelier than one KPI's wrong pass, 2.5% (one side of "
+        "the 95% CI), however many KPIs there are. That makes SHIP an intersection-union "
+        "test, which needs no multiplicity correction. BLOCK is a claim about one KPI, and "
+        "every blocking KPI is another chance of a false alarm, so BLOCK p-values are "
+        "Holm-corrected across all K_gate = 2: the chance of even one false BLOCK stays at "
+        "α = 0.05. A node or slice group never goes further than its KPIs' own verdicts."
+    )
+    looser = render_gate_table(gated, alpha=0.1)[-1]  # the no-drop bound's side is α/2
+    assert "one KPI's wrong pass, 5% (α/2), however" in looser and "α = 0.1." in looser
+    [advisory] = gate_kpis([kpi_stats(KPI_, 1, base, new)], advisory={"grounded"})
+    assert render_gate_table([advisory])[-1] == (
+        "No KPI blocks this PR (K_gate = 0), so the gate makes no SHIP or BLOCK claim."
+    )
+
+
+def _scored(score: float) -> Sample:
+    return Sample(score >= 0.5, 1.0, 0.0, score=score)
+
+
+def _dropping(n: int, drops: int) -> tuple[dict[str, list[Sample]], dict[str, list[Sample]]]:
+    base = {f"c{i}": [_scored(1.0)] for i in range(n)}
+    new = {f"c{i}": [_scored(0.0 if i < drops else 1.0)] for i in range(n)}
+    return base, new
+
+
+def test_a_code_judge_names_the_cases_that_newly_fail_and_only_those() -> None:
+    base = {
+        "new": [_scored(1.0)],
+        "old": [_scored(0.0)],
+        "fixed": [_scored(0.0)],
+        "ok": [_scored(1.0)],
+    }
+    new = {
+        "new": [_scored(0.0)],
+        "old": [_scored(0.0)],
+        "fixed": [_scored(1.0)],
+        "ok": [_scored(1.0)],
+    }
+    assert kpi_stats(KPI_, 1, base, new, code=True).new_failures == ("new",)
+    # A model judge's drop stays the paired test's to weigh.
+    assert kpi_stats(KPI_, 1, base, new).new_failures == ()
+
+
+@pytest.mark.parametrize(
+    ("n", "decision"), [(8, "INCONCLUSIVE"), (200, "SHIP")], ids=["small suite", "large suite"]
+)
+def test_a_new_code_failure_fails_the_gate_whatever_the_test_says(n: int, decision: str) -> None:
+    stats = kpi_stats(KPI_, 1, *_dropping(n, 1), code=True)
+    assert stats.decision == decision
+    assert gate_exit_code([stats]) == 1
+    [advisory] = gate_kpis([stats], advisory={"grounded"})
+    assert gate_exit_code([advisory], inconclusive_blocks=True) == 0  # the opt-out
+    assert gate_exit_code([kpi_stats(KPI_, 1, *_dropping(n, 1))]) == 0  # a model judge
+
+
+def test_the_gate_table_shows_a_new_failure_the_rounded_rates_hide() -> None:
+    stats = kpi_stats(KPI_, 1, *_dropping(200, 1), code=True)
+    table = "\n".join(render_gate_table([stats]))
+    assert "| grounded | 200 | 100% | 100% |" in table  # 99.5% rounds up
+    assert "| 🔴 new failure: grounded on 1 of 200 cases: `c0` |" in table
+    [advisory] = gate_kpis([stats], advisory={"grounded"})
+    assert "| ⚠️ new failure: grounded on 1 of 200 cases: `c0` |" in "\n".join(
+        render_gate_table([advisory])
+    )
+    many = kpi_stats(KPI_, 1, *_dropping(200, 5), code=True)
+    assert "on 5 of 200 cases: `c0`, `c1`, `c2` and 2 more |" in "\n".join(
+        render_gate_table([many])
+    )

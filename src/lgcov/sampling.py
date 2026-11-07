@@ -28,6 +28,7 @@ from lgcov.stats import (
     decide,
     holm,
     holm_adjusted,
+    no_drop_cases,
     paired_test,
 )
 
@@ -135,6 +136,10 @@ class KpiStats:
     p_adjusted: float | None = None  # Holm (blocking) or Benjamini-Hochberg (advisory)
     decision: Decision | None = None  # None: no paired case to decide on
     roots: tuple[str, ...] = ()  # nodes that drifted first in the runs whose score changed
+    band: str = "blocking"  # T063: blocking, flag (BLOCK capped at INCONCLUSIVE) or advisory
+    cases: tuple[tuple[tuple[float, ...], tuple[float, ...]], ...] = ()  # T090: paired scores
+    score_range: float = 1.0  # T150: the KPI's highest score minus its lowest
+    new_failures: tuple[str, ...] = ()  # code judges: cases that passed on base, fail here
 
     @property
     def flakiness(self) -> float:
@@ -179,6 +184,7 @@ def kpi_stats(
             [b_scores[c] for c in pairs], [n_scores[c] for c in pairs], alpha, power
         )
     changed = [c for c in pairs if fmean(b_scores[c]) != fmean(n_scores[c])]
+    new_failures = [c for c in changed if code and fmean(n_scores[c]) < fmean(b_scores[c])]
     roots = sorted({case_roots[c] for c in changed if c in case_roots}) if case_roots else []
     confidence = {c.case_id: c.confidence for c in new_cases}
     outcome: GateOutcome = "infra_error" if infra else "needs_human"  # unless pairs decide
@@ -204,6 +210,7 @@ def kpi_stats(
         infra=infra,
         outcome=outcome,
         paired=paired,
+        cases=tuple((tuple(b_scores[c]), tuple(n_scores[c])) for c in pairs),
         ms_total=ms_total,
         ms_mean=ms_total / len(samples) if samples else 0.0,
         tokens_total=tokens_total,
@@ -213,8 +220,16 @@ def kpi_stats(
         confidence=fmean(confidence[c] for c in pairs) if pairs else 0.0,
         margin=margin,
         roots=tuple(roots),
+        new_failures=tuple(new_failures),
+        score_range=max(kpi.score_map.values()) - min(kpi.score_map.values()),
     )
     return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence)[0]
+
+
+def k_gate(stats: Sequence[KpiStats]) -> int:
+    """T114: the blocking KPIs the run judges, as lgcov.yaml and the bands leave them; Holm
+    runs across exactly these, so one with no paired case still counts, as p = 1."""
+    return sum(1 for s in stats if s.blocking)
 
 
 def gate_kpis(
@@ -222,30 +237,52 @@ def gate_kpis(
     advisory: Collection[str] = (),
     alpha: float = 0.05,
     min_confidence: float = 0.7,
+    flagged: Collection[str] = (),
 ) -> list[KpiStats]:
-    """T091: Holm across the blocking KPIs, Benjamini-Hochberg across the advisory ones,
-    then each KPI's decision against its margin. An advisory KPI never fails the gate."""
-    gated = [replace(s, blocking=s.kpi not in advisory) for s in stats]
+    """T091: Holm across the blocking KPIs (T114: all K_gate of them, paired or not),
+    Benjamini-Hochberg across the advisory ones, then each KPI's decision against its margin.
+    An advisory KPI never fails the gate, and (T063) a flagged one, a judge whose band is
+    flag, stops it at most as INCONCLUSIVE."""
+
+    def band(kpi: str) -> str:
+        return "advisory" if kpi in advisory else "flag" if kpi in flagged else "blocking"
+
+    gated = [replace(s, blocking=s.kpi not in advisory, band=band(s.kpi)) for s in stats]
     for blocking, adjust, reject in (
         (True, holm_adjusted, holm),
         (False, benjamini_hochberg_adjusted, benjamini_hochberg),
     ):
         family = [(i, s.paired) for i, s in enumerate(gated) if s.blocking == blocking and s.paired]
         pvalues = [r.p for _, r in family]
-        for (i, r), p_adj, significant in zip(
-            family, adjust(pvalues), reject(pvalues, alpha), strict=True
+        if blocking:  # T114: m = K_gate, fixed before any p is seen; the missing ones are p = 1
+            pvalues += [1.0] * (k_gate(gated) - len(family))
+        for (i, r), p_adj, significant in zip(  # not strict: it stops before the padding
+            family, adjust(pvalues), reject(pvalues, alpha), strict=False
         ):
             s = gated[i]
-            decision = decide(r.delta, r.ci, s.margin, significant)
-            outcome = gate_outcome(decision, s.confidence, min_confidence, blocking)
+            decision = decide(
+                r.delta,
+                r.ci,
+                s.margin,
+                significant,
+                discordant=r.discordant,
+                n=r.n,
+                scale=s.score_range,
+                alpha=alpha,
+            )
+            capped = s.band == "flag"
+            outcome = gate_outcome(decision, s.confidence, min_confidence, blocking, capped)
             gated[i] = replace(s, p_adjusted=p_adj, decision=decision, outcome=outcome)
     return gated
 
 
 def gate_exit_code(stats: Sequence[KpiStats], inconclusive_blocks: bool = False) -> Outcome:
     """T091: AGENT_FAIL when a blocking KPI is BLOCK (or INCONCLUSIVE, with
-    inconclusive_blocks); else INFRA_ERROR when one had no paired case for infra errors."""
+    inconclusive_blocks) or has a code check that newly fails, whatever its verdict; else
+    INFRA_ERROR when one had no paired case for infra errors."""
     outcomes = {s.outcome for s in stats if s.blocking}
+    if any(s.blocking and s.new_failures for s in stats):
+        return Outcome.AGENT_FAIL
     if "fail" in outcomes or (inconclusive_blocks and "needs_human" in outcomes):
         return Outcome.AGENT_FAIL
     return Outcome.INFRA_ERROR if "infra_error" in outcomes else Outcome.PASS
@@ -278,11 +315,18 @@ def _tokens(s: KpiStats) -> str:
     return f"{_num(s.tokens_mean)} ({s.tokens_total:,} total)"
 
 
+def named_cases(cases: Sequence[str], shown: int = 3) -> str:
+    """The first few of these cases, in code spans: `a`, `b`, `c` and 2 more."""
+    named = ", ".join(f"`{c}`" for c in cases[:shown])
+    return f"{named} and {len(cases) - shown} more" if len(cases) > shown else named
+
+
 def _verdict(s: KpiStats) -> str:
     if s.decision is None:
         return "⚠️ infra error" if s.outcome == "infra_error" else "⚠️ INCONCLUSIVE (no pairs)"
     if s.blocking and s.decision == "BLOCK" and s.outcome == "needs_human":
-        return "⚠️ INCONCLUSIVE (low judge confidence)"
+        why = "judge band: flag" if s.band == "flag" else "low judge confidence"
+        return f"⚠️ INCONCLUSIVE ({why})"
     return f"{_ICONS[s.outcome]} {s.decision}"
 
 
@@ -300,7 +344,7 @@ def render_gate_table(
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for s in stats:
-        name = s.kpi if s.blocking else f"{s.kpi} (advisory)"
+        name = s.kpi if s.band == "blocking" else f"{s.kpi} ({s.band})"
         roots = ", ".join(f"`{n}`" for n in s.roots) or "—"
         r = s.paired
         if r is None:
@@ -309,21 +353,52 @@ def render_gate_table(
             )
             continue
         mde = "—" if r.sd < 1e-9 else f"{r.mde:.2f}"  # no spread seen: nothing to size it by
+        needed = r.required_n
+        if r.discordant == 0:  # T150: identical sides SHIP from this many cases
+            needed = no_drop_cases(s.margin, alpha, s.score_range)
         lines.append(
             f"| {name} | {r.n} | {_pct(r.base_rate)} | {_pct(r.new_rate)} "
             f"| {r.delta:+.2f} [{r.ci[0]:+.2f}, {r.ci[1]:+.2f}] | {_p(s.p_adjusted)} "
-            f"| {s.margin:.2f} | {mde} | {r.required_n or '—'} | {_verdict(s)} | {roots} |"
+            f"| {s.margin:.2f} | {mde} | {needed or '—'} | {_verdict(s)} | {roots} |"
         )
-        if s.decision == "INCONCLUSIVE" and r.required_n is not None and r.n < r.required_n:
-            need = f"need {r.required_n - r.n} more cases for {s.kpi} (N*={r.required_n})"
+        if s.decision == "INCONCLUSIVE" and needed is not None and r.n < needed:
+            need = f"need {needed - r.n} more cases for {s.kpi} (N*={needed})"
             lines.append(f"| ⚠️ underpowered: {need} |" + " |" * 10)
+        if s.new_failures:  # the rates above can round this away
+            icon = "🔴" if s.blocking else "⚠️"
+            many = f"{len(s.new_failures)} of {r.n} cases"
+            what = f"{s.kpi} on {many}: {named_cases(s.new_failures)}"
+            lines.append(f"| {icon} new failure: {what} |" + " |" * 10)
     lines += [
         "",
-        "Cases paired base vs PR. p adj.: Holm across blocking KPIs, Benjamini-Hochberg across "
-        "advisory ones. δ: non-inferiority margin. MDE: smallest drop this n detects. N*: "
-        f"cases needed to detect Δ (α {alpha:g}, power {power:g}).",
+        f"Cases paired base vs PR. p adj.: Holm across the K_gate = {k_gate(stats)} blocking "
+        "KPIs, Benjamini-Hochberg across advisory ones. δ: non-inferiority margin. MDE: "
+        "smallest drop this n detects. N*: "
+        f"cases needed to detect Δ (α {alpha:g}, power {power:g}); with no discordant pair, "
+        "the identical cases that rule out a drop of δ.",
+        "",
+        _guarantee(k_gate(stats), alpha),
     ]
     return lines
+
+
+def _guarantee(k: int, alpha: float) -> str:
+    """T114: what SHIP and BLOCK claim, in plain words; docs/gate.md has it too."""
+    if k == 0:
+        return "No KPI blocks this PR (K_gate = 0), so the gate makes no SHIP or BLOCK claim."
+    # The CI decide() reads is always 95%; with no discordant pair, the no-drop bound's side
+    # is alpha / 2, the larger of the two above alpha = 0.05.
+    side = "2.5% (one side of the 95% CI)" if alpha <= 0.05 else f"{alpha / 2 * 100:g}% (α/2)"
+    return (
+        f"**What SHIP and BLOCK guarantee.** SHIP needs every blocking KPI (K_gate = {k}) to "
+        "pass its own non-inferiority test: its 95% CI rules out a drop of δ. Since all of "
+        f"them must pass, a wrong SHIP is no likelier than one KPI's wrong pass, {side}, "
+        "however many KPIs there are. That makes SHIP an intersection-union test, which "
+        "needs no multiplicity correction. BLOCK is a claim about one KPI, and every blocking "
+        "KPI is another chance of a false alarm, so BLOCK p-values are Holm-corrected across "
+        f"all K_gate = {k}: the chance of even one false BLOCK stays at α = {alpha:g}. A node "
+        "or slice group never goes further than its KPIs' own verdicts."
+    )
 
 
 def render_kpi_table(stats: Sequence[KpiStats]) -> list[str]:

@@ -54,3 +54,21 @@ def test_override_saves_labelled_example(tmp_path: Path) -> None:
     assert apply_decision(d, BASE, NEW, cal) == BASE
     row = json.loads(cal.read_text().strip())
     assert row["human_label"] == 1.0 and row["output"] == {"a": "v2:hi"}
+
+
+def test_override_records_the_judge_it_corrects(tmp_path: Path) -> None:
+    # T063: what `lgcov calibrate` needs to count an override as a label; T102 builds on it.
+    cal = tmp_path / "cal.jsonl"
+    d = ReviewDecision(
+        node="answer",
+        action="override",
+        reviewer="ahmed",
+        label=1.0,
+        kpi="grounded",
+        judge_label="fail",
+        case_id="run-0/answer",
+    )
+    assert ReviewDecision.from_json(d.to_json()) == d
+    apply_decision(d, BASE, NEW, cal)
+    row = json.loads(cal.read_text().strip())
+    assert (row["kpi"], row["judge_label"], row["case_id"]) == ("grounded", "fail", "run-0/answer")

@@ -9,9 +9,15 @@
 #
 # Audit findings: PR #163 rewrote the supervisor prompt (lead_researcher_prompt), wired
 # think_tool into supervisor/supervisor_tools and the researcher, and changed what
-# reaches final_report. Nothing ran the 6-judge eval suite on that PR automatically.
+# reaches final_report_generation. Nothing ran the 6-judge eval suite on that PR
+# automatically.
 #
-# Node and tool names come from the audit notes; check them against the repo's graph.
+# Names checked against langchain-ai/open_deep_research at 6532a41 (PR #163, squash-merged
+# 6 Aug 2025), src/open_deep_research/: supervisor and supervisor_tools are nodes of the
+# research_supervisor subgraph; researcher is a node of researcher_subgraph, which
+# supervisor_tools invokes once per ConductResearch call; ConductResearch is a tool class
+# in state.py, and think_tool, new in #163, a @tool in utils.py; final_report_generation
+# writes the report.
 # Validate with: lgcov taxonomy check docs/taxonomy.yaml
 version: 1
 system: open_deep_research
@@ -25,9 +31,9 @@ failure_modes:
     evidence:
       - PR #163 wired think_tool into supervisor/supervisor_tools and the researcher
   - id: final_report_unsupported_claims
-    description: Upstream changes make final_report state claims the gathered notes don't support.
+    description: Upstream changes make final_report_generation state claims the gathered notes don't support.
     evidence:
-      - PR #163 changed nodes upstream of final_report; no eval ran on push
+      - PR #163 changed nodes upstream of final_report_generation; no eval ran on push
 kpis:
   - name: supervisor_delegates
     failure_mode: supervisor_bad_delegation
@@ -45,7 +51,7 @@ kpis:
     check: {type: tool_called, tool: think_tool}
   - name: report_claims_supported
     failure_mode: final_report_unsupported_claims
-    node: final
+    node: final_report_generation  # not final: the end state clears the notes
     judge: jev
     description: Every claim in the final report is backed by the gathered research notes.
     rubric: Is every claim in the report supported by the research notes it was written from?

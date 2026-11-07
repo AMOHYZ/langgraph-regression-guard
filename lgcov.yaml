@@ -3,5 +3,4 @@ graph_entrypoint: examples/demo_agent/graph.py:graph
 cassette_dir: examples/demo_agent/cassettes
 thresholds:
   min_node_coverage: 0
-  fail_on: [fail]
 ignore_paths: []
