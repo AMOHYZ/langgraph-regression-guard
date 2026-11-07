@@ -33,7 +33,8 @@ Three layers, one per level of confidence:
   example for calibrating the judge.
 
 How this compares with Reenact, graphtrace, EvalView, AgentAssay, statgate, Kitaru and
-LangSmith, and what is built today: [docs/why-us.md](docs/why-us.md).
+LangSmith, and what is built today: [docs/why-us.md](docs/why-us.md). What has been measured
+so far, one real PR, and what lgcov missed: [docs/benchmark.md](docs/benchmark.md).
 
 ## Install
 
@@ -169,8 +170,8 @@ recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). Each side
 own process with its own imports, and a bench file can add `pythonpath: [src]` for a src
 layout. `--keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid
 recording. For now its rows are
-three synthetic fixtures in `tests/fixtures/bench/`; a pilot on one real PR has its own section
-in docs/benchmark.md. A miss on a
+three demo fixtures in `tests/fixtures/bench/`; a pilot on one real PR has its own section
+in [docs/benchmark.md](docs/benchmark.md#real-prs). A miss on a
 hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden. The
 mutation operators for injecting known regressions into open_deep_research, each with the
 KPI that should catch it and its root and propagated labels, are in
