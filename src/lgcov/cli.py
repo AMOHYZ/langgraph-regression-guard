@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import importlib
 import importlib.machinery
 import importlib.util
 import json
@@ -115,6 +116,8 @@ from lgcov.sampling import (
 )
 from lgcov.slices import Group, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
+from lgcov.synthetic import Agent, Case, aa_arms, every_case
+from lgcov.synthetic_score import build_report, render_section, replace_section, report_json
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
 from lgcov.verdict_actions import CI_STATUSES, MODES, CodeFailure, gate_findings
 
@@ -1980,22 +1983,66 @@ def _bench_one(b: Benchmark, keep: Path | None = None) -> Result:
     )
 
 
+def _synthetic_agents() -> Sequence[Agent]:
+    """T121: the suite's agents live in examples/, which isn't in the wheel."""
+    sys.path.insert(0, str(Path.cwd()))
+    agents: Sequence[Agent] = importlib.import_module("examples.synthetic_agents").AGENTS
+    return agents
+
+
+def _lgcov_root(case: Case) -> set[str]:
+    """What `lgcov ci` would call root: replay the edited agent, serving what it left alone."""
+    done = replay_run(case.graph, case.base, (), serve=True)
+    root = _run_root(case.base, list(done.drifts))
+    return {root} if root else set()
+
+
+def _bench_synthetic(out: Path, results: Path) -> int:
+    """T121: offline, so it costs nothing. A report, not a gate: it exits 0 whatever the scores."""
+    try:
+        agents = _synthetic_agents()
+    except ModuleNotFoundError as exc:
+        print(f"lgcov bench: --synthetic needs a repo checkout's examples/: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    cases = [case for agent in agents for case in every_case(agent)]
+    aa = [(agent.name, arm) for agent in agents for arm in aa_arms(agent)]
+    report = build_report(cases, _lgcov_root, aa, datetime.now(UTC).date().isoformat())
+    section = render_section(report)
+    doc = out.read_text(encoding="utf-8") if out.exists() else ""
+    for path, text in ((out, replace_section(doc, section)), (results, report_json(report))):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    print(section, end="")
+    return 0
+
+
 def _bench_cmd(argv: list[str]) -> int:
     """T101a: lgcov's root / propagated labels against hand-written ones, one benchmark file
     each. A report, not a gate: it exits 0 whatever the scores. T166: it exits 2 if a side's
     graph can't be imported, after the other benchmarks have run and the report is written."""
     ap = argparse.ArgumentParser(prog="lgcov bench")
-    ap.add_argument("dir", nargs="?", default="docs/benchmark", help="benchmark files (*.yaml)")
+    ap.add_argument("dir", nargs="?", help="benchmark files (*.yaml); default docs/benchmark")
     ap.add_argument("--only", action="append", default=[], help="run this one (file name)")
     ap.add_argument("--out", default="docs/benchmark.md", help="write the table here")
-    ap.add_argument("--json", default="docs/benchmark-results.json", help="and the numbers")
+    ap.add_argument("--json", help="and the numbers; default docs/benchmark-results.json")
+    ap.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="T121: score the synthetic suite instead, and replace only that section of --out",
+    )
     ap.add_argument(
         "--keep-runs",
         metavar="DIR",
         help="save each side's runs in DIR/<benchmark>/{base,head}.json as each one finishes",
     )
     args = ap.parse_args(argv)
-    folder = Path(args.dir)
+    if args.synthetic:
+        if args.dir or args.only or args.keep_runs:
+            print("lgcov bench: --synthetic takes only --out and --json", file=sys.stderr)
+            return EXIT_ERROR
+        return _bench_synthetic(Path(args.out), Path(args.json or "docs/benchmark-synthetic.json"))
+    args.json = args.json or "docs/benchmark-results.json"
+    folder = Path(args.dir or "docs/benchmark")
     files = [f for f in sorted(folder.glob("*.yaml")) if not args.only or f.stem in args.only]
     if not files:
         print(f"lgcov bench: no benchmark files (*.yaml) to run in {folder}", file=sys.stderr)

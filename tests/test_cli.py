@@ -11,10 +11,13 @@ from unittest.mock import Mock
 import pytest
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
+from examples.synthetic_agents import AGENTS
 from lgcov.cassette import replay_run
-from lgcov.cli import main
+from lgcov.cli import _lgcov_root, main
 from lgcov.judges import KPI, NodeState, Verdict
 from lgcov.slices import Group
+from lgcov.synthetic import Case, every_case
+from lgcov.synthetic_score import METHODS, rates, votes_for
 
 
 def test_cli_prints_added_and_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -2456,3 +2459,80 @@ def test_cli_ci_makes_no_langsmith_call_with_link_false(
     section = "{dataset: support-qa, link: false}"
     code, report = _ci_langsmith(tmp_path, monkeypatch, fake, section=section, key=False)
     assert (code, fake.calls) == (0, []) and "LangSmith" not in report
+
+
+def test_bench_synthetic_writes_its_section_and_keeps_the_rest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    md, results = tmp_path / "benchmark.md", tmp_path / "results.json"
+    md.write_text("# B\n\n## Real PRs\n\nby hand\n", encoding="utf-8")
+    code = main(["bench", "--synthetic", "--out", str(md), "--json", str(results)])
+    assert code == 0
+    doc = md.read_text(encoding="utf-8")
+    assert doc.index("## Synthetic") < doc.index("## Real PRs") and "by hand" in doc
+    raw = json.loads(results.read_text(encoding="utf-8"))
+    assert raw["cases"] >= 50
+    assert raw["all_edits"][0]["method"] == "lgcov root"
+    assert "## Synthetic" in capsys.readouterr().out
+
+
+def test_bench_synthetic_scores_lgcovs_real_root_not_the_first_divergence(tmp_path: Path) -> None:
+    results = tmp_path / "results.json"
+    main(["bench", "--synthetic", "--out", str(tmp_path / "b.md"), "--json", str(results)])
+    raw = json.loads(results.read_text(encoding="utf-8"))
+    roots = {row["method"]: row["cases"] for row in raw["all_edits"]}
+    assert roots["lgcov root"]["recall"]["of"] == roots["first divergence"]["recall"]["of"] == 31
+
+
+@pytest.mark.parametrize("extra", [["--only", "x"], ["--keep-runs", "x"], ["some/dir"]])
+def test_bench_synthetic_refuses_what_only_the_fixture_bench_takes(
+    extra: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["bench", "--synthetic", *extra]) == 2
+    assert "--synthetic" in capsys.readouterr().err
+
+
+def test_bench_synthetic_outside_a_checkout_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("lgcov.cli._synthetic_agents", Mock(side_effect=ModuleNotFoundError("x")))
+    assert main(["bench", "--synthetic", "--out", str(tmp_path / "b.md")]) == 2
+    assert "repo checkout" in capsys.readouterr().err
+
+
+def test_bench_without_synthetic_keeps_its_default_results_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["bench", str(BENCH), "--only", "linear", "--out", "b.md"]) == 0
+    assert (tmp_path / "docs" / "benchmark-results.json").exists()
+
+
+def _real_suite() -> list[Case]:
+    return [case for agent in AGENTS for case in every_case(agent)]
+
+
+def test_on_the_real_suite_the_first_divergence_ties_lgcovs_root_on_every_score() -> None:
+    cases = _real_suite()
+    assert rates([votes_for(_lgcov_root, c) for c in cases]) == rates(
+        [votes_for(METHODS["first divergence"], c) for c in cases]
+    )
+
+
+def test_on_the_real_suite_the_diff_matches_or_beats_lgcov_on_recall_and_coverage() -> None:
+    single = [c for c in _real_suite() if c.truth.edit_kind == "node_body"]
+    ours = rates([votes_for(_lgcov_root, c) for c in single])
+    diff = rates([votes_for(METHODS["edited node from the diff"], c) for c in single])
+    for mine, theirs in ((ours.recall, diff.recall), (ours.coverage, diff.coverage)):
+        assert mine.value is not None and theirs.value is not None and mine.value <= theirs.value
+
+
+def test_every_single_node_miss_lgcov_makes_is_parent_only_naming_of_a_subgraph() -> None:
+    misses = [
+        (c.truth.edited_node, _lgcov_root(c))
+        for c in _real_suite()
+        if c.truth.edit_kind == "node_body"
+        and c.truth.activated
+        and c.truth.edited_node not in _lgcov_root(c)
+    ]
+    assert misses and all(found == ("sub.inner", {"sub"}) for found in misses)

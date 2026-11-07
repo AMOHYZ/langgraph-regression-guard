@@ -1,19 +1,25 @@
 """T121: scoring the synthetic suite: pure rates on small hand-made votes, then the real suite."""
 
+import json
 from dataclasses import replace
 from functools import cache
 
-from examples.synthetic_agents import AGENTS, FANOUT
+from examples.synthetic_agents import AGENTS, DEMO, FANOUT
 from lgcov.cassette import Cassette, Step, record
-from lgcov.synthetic import Case, GroundTruth, every_case, generate
+from lgcov.synthetic import Case, GroundTruth, aa_arms, every_case, generate
 from lgcov.synthetic_score import (
     METHODS,
     Rate,
+    Report,
     Vote,
+    build_report,
     by_edit,
     end_to_end_flags,
     first_divergence,
     rates,
+    render_section,
+    replace_section,
+    report_json,
     votes_for,
 )
 
@@ -133,3 +139,88 @@ def test_the_edited_node_method_on_the_suite_has_full_recall_and_coverage() -> N
 def test_end_to_end_ignores_a_changed_fingerprint_when_the_answer_is_the_same() -> None:
     a, last = Step("a", {"x": 1}), Step("z", {"answer": "same"}, code="old")
     assert not end_to_end_flags(_case([a, last], [Step("a", {"x": 2}), replace(last, code="new")]))
+
+
+def _lgcov(case: Case) -> set[str]:
+    return first_divergence(case)  # a stand-in: the real root needs the CLI's replay
+
+
+def _report() -> Report:
+    return build_report(
+        _suite(), _lgcov, [("demo", r) for r in aa_arms(DEMO, reruns=1)], "2026-01-02"
+    )
+
+
+def test_a_report_counts_cases_and_distinct_edits() -> None:
+    report = _report()
+    assert (report.cases, report.edits, report.agents) == (72, 24, 3)
+    assert report.labels == {"regressed": 31, "benign": 24, "inert": 17}
+
+
+def test_the_narrow_rows_leave_out_only_the_router_and_fan_out_edits() -> None:
+    narrow = [c for c in _suite() if c.truth.edit_kind == "node_body"]
+    assert {c.operator for c in _suite()} - {c.operator for c in narrow} == {
+        "router_flip",
+        "send_fan_out_drop",
+    }
+    expected = rates([votes_for(METHODS["first divergence"], c) for c in narrow])
+    row = next(r for r in _report().single_node if r.method == "first divergence")
+    assert row.cases == expected
+
+
+def test_the_section_shows_every_method_the_false_flags_and_both_counts() -> None:
+    section = render_section(_report())
+    assert section.startswith("## Synthetic\n")
+    assert "72 cases from 24 distinct edits" in section
+    for method in ("lgcov root", *METHODS):
+        assert f"| {method} |" in section
+    assert "False flag" in section
+    assert "One vote per edit" in section
+
+
+def test_the_section_says_what_the_user_needs_to_know_plainly() -> None:
+    section = render_section(_report())
+    assert "edited node from the diff matches or beats lgcov" in section.lower()
+    assert "T182" in section
+    assert "parent-only naming counts as a miss" in section
+    assert "wiring test, noise rate set by us, not a real-world flip estimate" in section
+
+
+def test_a_rate_with_nothing_to_count_shows_a_dash() -> None:
+    row = next(r for r in _report().all_edits if r.method == "end-to-end")
+    assert row.cases.precision.value is None
+    assert "| end-to-end | — |" in render_section(_report())
+
+
+def test_the_json_holds_the_numbers() -> None:
+    raw = json.loads(report_json(_report()))
+    assert (raw["cases"], raw["edits"]) == (72, 24)
+    first = raw["all_edits"][0]
+    assert first["method"] == "lgcov root"
+    assert set(first["cases"]) == {"precision", "recall", "coverage", "false_flag"}
+    assert raw["aa"][0]["agent"] == "demo"
+
+
+REAL = "# T\n\n## Demo\n\nx\n\n## Real PRs\n\nkeep\n"
+HELD = "# T\n\n## Demo\n\nx\n\n## Synthetic\n\nTODO(T121)\n\n## Real PRs\n\nkeep\n"
+
+
+def test_a_new_section_goes_before_real_prs() -> None:
+    assert replace_section(REAL, "## Synthetic\n\nnew\n") == (
+        "# T\n\n## Demo\n\nx\n\n## Synthetic\n\nnew\n\n## Real PRs\n\nkeep\n"
+    )
+
+
+def test_a_section_already_there_is_replaced_and_nothing_else_moves() -> None:
+    assert replace_section(HELD, "## Synthetic\n\nnew\n") == (
+        "# T\n\n## Demo\n\nx\n\n## Synthetic\n\nnew\n\n## Real PRs\n\nkeep\n"
+    )
+
+
+def test_writing_the_section_twice_changes_nothing() -> None:
+    once = replace_section(REAL, "## Synthetic\n\nnew\n")
+    assert replace_section(once, "## Synthetic\n\nnew\n") == once
+
+
+def test_a_doc_with_no_real_prs_gets_the_section_at_its_end() -> None:
+    assert replace_section("# T\n", "## Synthetic\n\nnew\n") == "# T\n\n## Synthetic\n\nnew\n"
