@@ -5,15 +5,36 @@ on:
   push:
     branches: [main]  # T083: main's runs upload the coverage baseline PRs compare against
 
-permissions:
-  contents: read
-  pull-requests: write
-  actions: read  # T083: download main's coverage artifact
-
 jobs:
-  report:
+  # T179: this job runs the PR's code, and only uploads what it did.
+  candidate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # T078: dogfood the composite Action from this checkout; settings come from lgcov.yaml.
       - uses: ./
+        with:
+          phase: candidate
+
+  # T179: this job decides, and no PR's code runs in it: on the base's checkout, `uses: ./` is the
+  # base's action.yml. So a change to the Action only reaches this job on the PR after it merges.
+  report:
+    needs: candidate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read  # T083: download main's coverage artifact
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      - uses: ./
+        with:
+          phase: evaluate

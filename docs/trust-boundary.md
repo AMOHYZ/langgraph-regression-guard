@@ -97,8 +97,9 @@ token in `.git/config`, or if its job that decides can be skipped.
 5. **The workflow file.** On `pull_request`, GitHub runs the workflow as the PR left it. A same-repo
    author can edit it to drop the gate, to point `uses:` at another ref, or to run the PR's code in the
    job holding the keys, and that run happens before any review. This repo's own workflow has
-   `uses: ./`, so it also runs the PR's `action.yml`. An evaluator triggered by `workflow_run` runs from
-   the default branch, so it would close this for that job; it isn't built.
+   `uses: ./`, so its candidate job runs the PR's `action.yml`, and its job that decides runs the
+   base's. An evaluator triggered by `workflow_run` runs from the default branch, so it would close
+   this for that job; it isn't built.
 6. **Gaming the test.** Code that recognises a recorded input and returns the recorded output
    passes, and a model judge reads the PR's outputs, so they can try to talk it round. That is for a
    reviewer to catch.
