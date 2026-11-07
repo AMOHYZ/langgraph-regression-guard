@@ -101,6 +101,7 @@ from lgcov.langsmith import (
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
 from lgcov.messages import plain
+from lgcov.metrics import format_summary, parse_records, summarize
 from lgcov.normalize import normalize
 from lgcov.review import ReviewDecision, apply_decision
 from lgcov.sampling import (
@@ -1695,6 +1696,23 @@ _REVIEW_USAGE = (
 )
 
 
+def _metrics_cmd(argv: list[str]) -> int:
+    """T156: summarize the per-PR records in a JSONL file."""
+    if argv[:1] != ["summary"]:
+        print("usage: lgcov metrics summary FILE", file=sys.stderr)
+        return EXIT_ERROR
+    ap = argparse.ArgumentParser(prog="lgcov metrics summary")
+    ap.add_argument("file", help="the per-PR records, one JSON object per line")
+    args = ap.parse_args(argv[1:])
+    try:
+        records = parse_records(Path(args.file).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"lgcov metrics summary: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print(format_summary(summarize(records)))
+    return 0
+
+
 def _review_cmd(argv: list[str]) -> int:
     """T102: override a judge's verdict on one case. The override is a label; when the
     human disagrees, the case is saved so the judge is re-checked on it on every PR; and
@@ -2199,6 +2217,8 @@ def _command(argv: list[str]) -> int | None:
         return _review_cmd(argv[1:])
     if argv[:1] == ["bench"]:
         return _bench_cmd(argv[1:])
+    if argv[:1] == ["metrics"]:
+        return _metrics_cmd(argv[1:])
     if argv[:1] == ["coverage"]:
         return _coverage_cmd(argv[1:])
     if argv[:1] == ["ci"]:
@@ -2268,6 +2288,7 @@ commands:
   taxonomy approve  approve one drafted entry
   import langsmith  turn a LangSmith dataset's examples into lgcov cases
   bench             score the root / propagated labels against hand-written ones
+  metrics summary   summarize per-PR records: overridden blocks, label burden, cost, time
   selfcheck         run the harness on fixtures whose outcome is known
 
 options:
