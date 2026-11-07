@@ -13,10 +13,19 @@ import yaml
 
 from examples.demo_agent.graph import graph as demo_graph
 from examples.demo_agent.mutations import MUTATIONS, NOT_ON_DEMO, build, outcome_ok
-from examples.synthetic_agents import AGENTS, DEMO, fanout, subgraph
-from lgcov.cassette import Cassette, Step, record, runs_from_json
+from examples.synthetic_agents import AGENTS, DEMO, FANOUT, fanout, subgraph
+from lgcov.cassette import Cassette, Step, record, replay_run, runs_from_json
 from lgcov.snapshot import snapshot_from_compiled
-from lgcov.synthetic import Case, Label, Mutation, every_case, generate
+from lgcov.synthetic import (
+    Agent,
+    Case,
+    Label,
+    Mutation,
+    aa_arms,
+    every_case,
+    generate,
+    same_run,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = runs_from_json((ROOT / "examples/demo_agent/cassettes/baseline.json").read_text("utf-8"))
@@ -240,7 +249,7 @@ def test_with_no_edit_the_other_graphs_record_the_same_run(agent: ModuleType) ->
         base = record(agent.graph, {"question": question})
         assert agent.outcome_ok(base)
         for _ in range(20):  # the fan-out's workers run in parallel: their order mustn't flip
-            assert record(agent.build(), {"question": question}) == base
+            assert same_run(record(agent.build(), {"question": question}), base)
 
 
 @cache
@@ -280,7 +289,7 @@ def test_the_suite_is_not_one_answer_per_edit() -> None:
 
 def test_every_edit_in_the_suite_is_replayable_from_its_case() -> None:
     for case in _suite():
-        assert record(case.graph, case.base.inputs) == case.pr
+        assert same_run(record(case.graph, case.base.inputs), case.pr)
 
 
 def test_a_question_whose_base_fails_its_outcome_check_stops_the_suite() -> None:
@@ -302,3 +311,70 @@ def test_the_suites_counts() -> None:
         "benign": 24,
         "inert": 17,
     }
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_a_rerun_with_no_edit_never_flips_in_the_deterministic_arms(agent: Agent) -> None:
+    arms = {result.arm: result for result in aa_arms(agent, reruns=3)}
+    for arm in ("re-record", "served replay"):
+        assert arms[arm].runs == 3 * len(agent.questions)
+        assert (arms[arm].drifted, arms[arm].outcome_flips) == (0, 0)
+        assert (arms[arm].flip_rate, arms[arm].outcome_flip_rate) == (0.0, 0.0)
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_served_replay_reports_no_drift_on_an_unedited_agent(agent: Agent) -> None:
+    for question in agent.questions:
+        base = record(agent.graph, {"question": question})
+        assert replay_run(agent.graph, base, (), serve=True).drifts == ()
+
+
+def test_only_the_demo_has_a_noise_arm() -> None:
+    assert [a.name for a in AGENTS if a.noisy is not None] == ["demo"]
+    assert "seeded noise" not in {result.arm for result in aa_arms(FANOUT, reruns=1)}
+
+
+def test_the_noise_arm_flips_at_the_counts_we_pin_and_says_what_it_is() -> None:
+    noise = next(result for result in aa_arms(DEMO) if result.arm == "seeded noise")
+    assert noise.note == "wiring test, noise rate set by us, not a real-world flip estimate"
+    assert (noise.runs, noise.drifted, noise.outcome_flips) == (30, 5, 4)
+
+
+def test_noise_can_change_a_run_without_failing_its_outcome() -> None:
+    noise = next(result for result in aa_arms(DEMO) if result.arm == "seeded noise")
+    assert 0 < noise.outcome_flips < noise.drifted
+
+
+def test_the_noise_arm_gives_the_same_numbers_every_time() -> None:
+    assert aa_arms(DEMO) == aa_arms(DEMO)
+
+
+def test_the_suite_and_the_a_a_arms_open_no_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a synthetic run tried to reach the network")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    for agent in AGENTS:
+        every_case(agent)
+        aa_arms(agent, reruns=2)
+
+
+def _reordered(run: Cassette) -> Cassette:
+    head, *workers, tail = run.steps
+    return Cassette(run.inputs, [head, *reversed(workers), tail])
+
+
+def test_parallel_workers_finishing_in_another_order_is_not_a_different_run() -> None:
+    base = record(FANOUT.graph, {"question": ORDER})
+    assert _reordered(base) != base and same_run(_reordered(base), base)
+    head, _, *rest = base.steps
+    assert not same_run(Cassette(base.inputs, [head, Step("worker_a", {"parts": []}), *rest]), base)
+
+
+def test_a_fan_out_that_only_finished_in_another_order_is_labelled_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = record(FANOUT.graph, {"question": ORDER})
+    monkeypatch.setattr("lgcov.synthetic.record", lambda graph, inputs: _reordered(base))
+    mutation = Mutation("plan", "no edit", FANOUT.graph)
+    assert generate("x", (mutation,), (base,), FANOUT.outcome_ok, 0).truth.label == "inert"

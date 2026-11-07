@@ -3,6 +3,7 @@ docs/mutations.yaml. That file's entries name open_deep_research's nodes, so onl
 carry over. Each edit changes the agent's code, and the fake LLM keeps the re-run offline."""
 
 from collections.abc import Callable
+from random import Random
 from types import FunctionType
 from typing import Any, Literal
 
@@ -186,3 +187,11 @@ MORE_MUTATIONS: dict[str, tuple[Mutation, ...]] = {
         ),
     ),
 }
+
+NOISE_RATE = 0.2  # ours, for the A/A wiring test: it says nothing about a real model
+
+
+def noisy_graph(seed: int) -> Any:
+    """The unedited agent, except that its fake model sometimes keeps too little of the prompt."""
+    window = 12 if Random(seed).random() < NOISE_RATE else 40
+    return build(answer=_respond_with(fake_llm=_model(window)))

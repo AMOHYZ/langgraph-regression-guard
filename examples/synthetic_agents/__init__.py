@@ -18,6 +18,7 @@ DEMO = Agent(
         for operator in demo.MUTATIONS
     },
     demo.outcome_ok,
+    demo.noisy_graph,
 )
 FANOUT = Agent("fanout", fanout.graph, QUESTIONS, fanout.MUTATIONS, fanout.outcome_ok)
 SUBGRAPH = Agent("subgraph", subgraph.graph, QUESTIONS, subgraph.MUTATIONS, subgraph.outcome_ok)
