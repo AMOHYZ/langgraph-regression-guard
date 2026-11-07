@@ -49,6 +49,7 @@ from lgcov.calibration import (
     uncalibrated_line,
     upsert_case,
 )
+from lgcov.candidate import CandidateRun, FreshRun, candidate_to_json, parse_candidate
 from lgcov.cassette import (
     ON_DIVERGENCE,
     TRANSPORT_ERRORS,
@@ -60,6 +61,7 @@ from lgcov.cassette import (
     Replay,
     Step,
     accept_nodes,
+    compared_run,
     record,
     replay_run,
     runs_from_json,
@@ -75,6 +77,7 @@ from lgcov.config import (
     GateConfig,
     LangSmithConfig,
     Tier,
+    TierPolicy,
     load_config,
     tier_policy,
 )
@@ -891,12 +894,25 @@ def _policy_notes(args: argparse.Namespace, cfg: Config, cassettes_edited: bool)
     return notes
 
 
-def _ci_result(args: argparse.Namespace) -> CiResult:
-    start = perf_counter()
-    budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
-    fail_on: FailOn = args.fail_on
-    if args.harness_error:
-        return CiResult(fail_on, harness_error=args.harness_error)
+@dataclass(frozen=True)
+class _GatePolicy:
+    """T179: what a gate run reads before either half of it starts, from the base on a PR."""
+
+    cfg: Config
+    tier: Tier
+    rules: TierPolicy
+    budget: float | None  # seconds for live node calls
+    l2: tuple[list[KPISpec], list[Judge]] | None = None
+    advisory: frozenset[str] = frozenset()
+    flagged: frozenset[str] = frozenset()
+    llm_code: int = 0
+    llm_notes: tuple[str, ...] = ()
+    calibration: tuple[str, ...] = ()
+    kpi_nodes: frozenset[str] | None = None  # T104: for lint; None: no taxonomy, no check
+
+
+def _gate_policy(args: argparse.Namespace) -> _GatePolicy | str:
+    """lgcov.yaml, the taxonomy and the bands; a string says why they can't be read."""
     overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
     # T154: a fix or a new file in this PR can't help until it merges, so a broken policy says so.
     from_base = (
@@ -907,76 +923,131 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     try:
         cfg = load_config(_policy_path(args, args.config), overrides)
     except (OSError, ValueError) as exc:
-        msg = f"invalid lgcov.yaml: {exc}{from_base}"
-        return CiResult(fail_on, harness_error=msg)
+        return f"invalid lgcov.yaml: {exc}{from_base}"
     tier: Tier = args.tier or cfg.tier
-    policy = tier_policy(tier, cfg.samples_per_case)
-    budget.seconds = policy.budget if args.budget_seconds is None else args.budget_seconds
-    l2, advisory, flagged, llm_code = None, frozenset[str](), frozenset[str](), 0
-    llm_notes: list[str] = []
-    calibration: list[str] = []
-    kpi_nodes: set[str] | None = None  # T104: for lint; None: no taxonomy, no check
-    if args.taxonomy:
-        try:
-            every = list(load_taxonomy(_policy_path(args, args.taxonomy)).kpi_specs)
-            kpi_nodes = {s.node for s in every}
-            llm = [s.name for s in every if s.judge == "llm"]
-            runs_llm = policy.llm_judges and _llm_judge is not None
-            specs = every if runs_llm else [s for s in every if s.judge != "llm"]
-            l2 = (specs, [_l2_judge(spec, cfg.jev_model) for spec in specs])
-        except (OSError, ValueError) as exc:
-            msg = f"invalid taxonomy: {exc}{from_base}"
-            return CiResult(fail_on, harness_error=msg)
-        try:
-            advisory, flagged, calibration = _gate_bands(_policy_path(args, args.bands), every, cfg)
-        except (OSError, ValueError) as exc:
-            msg = f"invalid lgcov.yaml or bands.json: {exc}{from_base}"
-            return CiResult(fail_on, harness_error=msg)
-        llm_notes, llm_code = _llm_notes(llm, advisory, policy.llm_judges)
+    rules = tier_policy(tier, cfg.samples_per_case)
+    budget = rules.budget if args.budget_seconds is None else args.budget_seconds
+    if not args.taxonomy:
+        return _GatePolicy(cfg, tier, rules, budget)
+    try:
+        every = list(load_taxonomy(_policy_path(args, args.taxonomy)).kpi_specs)
+        llm = [s.name for s in every if s.judge == "llm"]
+        runs_llm = rules.llm_judges and _llm_judge is not None
+        specs = every if runs_llm else [s for s in every if s.judge != "llm"]
+        l2 = (specs, [_l2_judge(spec, cfg.jev_model) for spec in specs])
+    except (OSError, ValueError) as exc:
+        return f"invalid taxonomy: {exc}{from_base}"
+    try:
+        advisory, flagged, calibration = _gate_bands(_policy_path(args, args.bands), every, cfg)
+    except (OSError, ValueError) as exc:
+        return f"invalid lgcov.yaml or bands.json: {exc}{from_base}"
+    llm_notes, llm_code = _llm_notes(llm, advisory, rules.llm_judges)
+    return _GatePolicy(
+        cfg,
+        tier,
+        rules,
+        budget,
+        l2,
+        advisory,
+        flagged,
+        llm_code,
+        tuple(llm_notes),
+        tuple(calibration),
+        frozenset(s.node for s in every),
+    )
+
+
+def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget) -> CandidateRun:
+    """T179: the half of a gate run that runs the PR's code: it loads the graph and replays the
+    runs. Nothing here judges, compares or decides."""
+    cfg = policy.cfg
+    budget.seconds = policy.budget
     try:
         # Exception: importing user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
         head = snapshot_from_compiled(graph)
     except Exception as exc:
         msg = _harness_message("cannot load graph", exc) + _moved_graph(args, cfg)
-        return CiResult(fail_on, harness_error=msg)
+        return CandidateRun(harness_error=msg)
     graph_lines, graph_note = _base_diff(args.base_dir, cfg.graph_entrypoint, head)
-    edited = _cassettes_edited(args, cfg)
-    partial = CiResult(fail_on, tuple(graph_lines), graph_note, cassettes_edited=edited)
+    run = CandidateRun(
+        tier=policy.tier, head=head, graph_lines=tuple(graph_lines), graph_note=graph_note
+    )
     try:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
+        return replace(run, harness_error=_harness_message("cannot read baseline", exc))
+    kpi_nodes = None if policy.kpi_nodes is None else set(policy.kpi_nodes)
     found = lint(head, routers_of(graph), {s.node for r in runs for s in r.steps}, kpi_nodes)
-    partial = replace(  # T104: before replay; warnings only, it never blocks
-        partial, lint_summary=summary(found), lint_lines=tuple(f.line() for f in found)
+    run = replace(  # T104: before replay; warnings only, it never blocks
+        run, lint_summary=summary(found), lint_lines=tuple(f.line() for f in found)
     )
-    serve = policy.serve and not args.live
+    serve = policy.rules.serve and not args.live
     budget.expected_live = unservable(graph, runs) if serve else sum(len(r.steps) for r in runs)
     agent_start = perf_counter()
     try:
         replays = [
-            _replay_under(cfg, graph, run, serve, args.on_divergence, budget) for run in runs
+            _replay_under(cfg, graph, recorded, serve, args.on_divergence, budget)
+            for recorded in runs
         ]
     except NodeError as exc:
         original = exc.raised
         if exc.transport:
-            return replace(partial, harness_error=original, harness_node=exc.node)
-        return replace(
-            partial,
-            crash=f"Node `{exc.node}` raised {original}",
-            root_drift=(exc.node,),
-        )
+            return replace(run, harness_error=original, harness_node=exc.node)
+        return replace(run, crash=f"Node `{exc.node}` raised {original}", crash_node=exc.node)
     except Exception as exc:  # replay itself: no node or router raised it
-        msg = _harness_message("replay failed outside node code", exc)
+        return replace(run, harness_error=_harness_message("replay failed outside node code", exc))
+    return replace(
+        run,
+        fresh=tuple(FreshRun(r.steps, r.calls, r.halt) for r in replays),
+        agent_seconds=perf_counter() - agent_start,
+        budget_hit=budget.hit,
+    )
+
+
+def _evaluate(
+    args: argparse.Namespace, policy: _GatePolicy, run: CandidateRun, start: float
+) -> CiResult:
+    """T179: the half of a gate run that decides. It only reads: what the other half ran, the
+    PR's cassette and the base's policy. So it needs no project install, and with the other half
+    in another job, the PR's code never runs where this does."""
+    fail_on: FailOn = args.fail_on
+    cfg, l2 = policy.cfg, policy.l2
+    if run.head is None:
+        return CiResult(fail_on, harness_error=run.harness_error)
+    edited = _cassettes_edited(args, cfg)
+    partial = CiResult(
+        fail_on,
+        run.graph_lines,
+        run.graph_note,
+        cassettes_edited=edited,
+        lint_summary=run.lint_summary,
+        lint_lines=run.lint_lines,
+    )
+    if run.harness_error:
+        return replace(partial, harness_error=run.harness_error, harness_node=run.harness_node)
+    if run.crash:
+        return replace(partial, crash=run.crash, root_drift=(run.crash_node,))
+    try:
+        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
+    if len(run.fresh) != len(runs):
+        msg = (
+            "The candidate job's result doesn't match this PR's cassette: "
+            f"{len(run.fresh)} runs replayed, {len(runs)} recorded."
+        )
         return replace(partial, harness_error=msg)
-    agent = perf_counter() - agent_start
+    replays = [
+        compared_run(recorded, fresh.steps, fresh.calls, fresh.halt, cfg.ignore_paths)
+        for recorded, fresh in zip(runs, run.fresh, strict=True)
+    ]
     pairs = [(list(r.drifts), list(r.steps)) for r in replays]
     drifts = [d for d, _ in pairs]
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
     # T083: coverage of the runs replay just did; nothing executes again for it.
-    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in pairs], args.commit)
+    cov = snapshot_coverage(run.head, [[s.node for s in steps] for _, steps in pairs], args.commit)
     if args.coverage_out:
         Path(args.coverage_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.coverage_out).write_text(cov.to_json(), encoding="utf-8")
@@ -992,11 +1063,11 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     calls = [c for r in replays for c in r.calls]
     timing = Timing(
         0.0,
-        agent,
+        run.agent_seconds,
         live=sum(1 for c in calls if c.how != "served"),
         served=sum(1 for c in calls if c.how == "served"),
-        budget=budget.seconds,
-        budget_hit=budget.hit,
+        budget=policy.budget,
+        budget_hit=run.budget_hit,
     )
     base_runs, base_notes = _base_runs(args, cfg) if edited else (list[Cassette](), list[str]())
     paired, removed = _pair_with_base(runs, base_runs, cfg.ignore_paths)
@@ -1017,14 +1088,14 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
             *_policy_notes(args, cfg, edited),
             *base_notes,
             *_removed_note(removed, cfg.cassette_dir),
-            *llm_notes,
+            *policy.llm_notes,
             *([note] if note else []),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
             *_langsmith_notes(cfg.langsmith, args.commit),
         ),
-        tier=tier,
+        tier=policy.tier,
         not_checked=not_checked,
-        timing=replace(timing, total=perf_counter() - start),
+        timing=replace(timing, total=run.seconds + perf_counter() - start),
     )
     try:
         changes = _calibration_changes(args, l2[0] if l2 else [], cfg)
@@ -1039,7 +1110,16 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         extra = sum(len(saved.get(s.name, [])) for s in l2[0] if s.judge != "code")
         stopped = frozenset(i for i, r in enumerate(replays) if r.not_checked)
         stats, gate = _ci_gate(
-            args, cfg, policy.k, advisory, flagged, *l2, runs, pairs, extra, stopped
+            args,
+            cfg,
+            policy.rules.k,
+            policy.advisory,
+            policy.flagged,
+            *l2,
+            runs,
+            pairs,
+            extra,
+            stopped,
         )
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
@@ -1056,15 +1136,92 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     hidden = _hidden_failures(*l2, stats, [steps for _, steps in pairs], paired, stopped)
     return replace(
         result,
-        gate=replace(findings, infra=findings.infra or bool(llm_code), hidden_failures=hidden),
+        gate=replace(
+            findings, infra=findings.infra or bool(policy.llm_code), hidden_failures=hidden
+        ),
         l2_lines=(
-            *calibration,
-            *([""] if calibration and stats else []),
+            *policy.calibration,
+            *([""] if policy.calibration and stats else []),
             *(_l2_tables(stats, groups, gate) if stats else ()),
         ),
-        timing=replace(judged, total=perf_counter() - start),
+        timing=replace(judged, total=run.seconds + perf_counter() - start),
         calibration_lines=(*changes, *_rejudge(saved, l2[0], l2[1])),
     )
+
+
+def _read_candidate(path: str, tier: str) -> CandidateRun:
+    """T179: what the candidate job left. That job runs the PR's code, so the file is only that
+    code's word, and one this job can't use gives no verdict."""
+    try:
+        run = parse_candidate(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        msg = "The candidate job left no result, so this PR has no verdict. Its log says why."
+        return CandidateRun(harness_error=msg)
+    except Exception as exc:  # that code wrote this file, so anything can come out of it
+        return CandidateRun(
+            harness_error=_harness_message("The candidate job's result can't be read", exc)
+        )
+    if run.head is None:
+        return run
+    here = _head(".") or ""
+    if run.commit != here:
+        msg = (
+            f"The candidate job ran on `{run.commit[:7]}`, and this job reads the PR at "
+            f"`{here[:7]}`: use a plain `actions/checkout` in the candidate job."
+        )
+        return CandidateRun(harness_error=msg)
+    if run.tier != tier:
+        msg = (
+            f"The candidate job ran tier `{run.tier}`, and this job's is `{tier}`: give both jobs "
+            "the same inputs."
+        )
+        return CandidateRun(harness_error=msg)
+    return run
+
+
+def _ci_result(args: argparse.Namespace) -> CiResult:
+    start = perf_counter()
+    budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
+    fail_on: FailOn = args.fail_on
+    if args.harness_error:
+        return CiResult(fail_on, harness_error=args.harness_error)
+    policy = _gate_policy(args)
+    if isinstance(policy, str):
+        return CiResult(fail_on, harness_error=policy)
+    if not args.candidate_in:
+        return _evaluate(args, policy, _run_candidate(args, policy, budget), start)
+    try:
+        return _evaluate(args, policy, _read_candidate(args.candidate_in, policy.tier), start)
+    except Exception as exc:  # the PR's code wrote that file, so it can break what reads it
+        msg = _harness_message("The candidate job's result can't be evaluated", exc)
+        return CiResult(fail_on, harness_error=msg)
+
+
+def _write_candidate(args: argparse.Namespace, start: Commits) -> int:
+    """T179: `--candidate-out`: only the half that runs the PR's code. Nothing it finds changes
+    this exit code, since `--candidate-in` decides in another job."""
+    began = perf_counter()
+    budget = Budget(None, perf_counter)
+    policy = args.harness_error or _gate_policy(args)
+    run = (
+        CandidateRun(harness_error=policy)
+        if isinstance(policy, str)
+        else _run_candidate(args, policy, budget)
+    )
+    refused = moved(start, _commits(args.base_dir))
+    if refused:
+        run = CandidateRun(harness_error=refused)
+    commit = start.candidate or ""
+    try:
+        text = candidate_to_json(replace(run, commit=commit, seconds=perf_counter() - began))
+    except (TypeError, ValueError) as exc:
+        msg = _harness_message("this run's steps can't be saved", exc)
+        text = candidate_to_json(CandidateRun(commit, harness_error=msg))
+    out = Path(args.candidate_out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    print(f"lgcov: what this run did is at {out}; the job with --candidate-in decides it.")
+    return 0
 
 
 def _llm_notes(
@@ -1195,12 +1352,18 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--mode", choices=MODES, default="enforcing", help=_MODE_HELP)
     ap.add_argument("--approved-by", default="", help=_APPROVED_BY_HELP)
     ap.add_argument("--ci-status", choices=CI_STATUSES, default="", help=_CI_STATUS_HELP)
+    ap.add_argument("--candidate-out", help="only run the PR's code; write what it did here")
+    ap.add_argument("--candidate-in", help="only decide, from what --candidate-out wrote")
     args = ap.parse_args(argv)
+    if args.candidate_out and args.candidate_in:
+        ap.error("--candidate-out and --candidate-in are the two halves of a run; pass one")
     policy = _policy_hashes(args)  # T154: the base's, before the PR's code can touch them
     bootstrap = _first_adoption(args)
     if bootstrap:
         args.policy_dir = None  # T154: the PR's policy is all there is, so nothing is enforced
     start = _commits(args.base_dir)  # T114: before anything is loaded
+    if args.candidate_out:
+        return _write_candidate(args, start)
     result = replace(
         _locked(_ci_result(args), start, args.base_dir),
         first_adoption=bootstrap,
@@ -1213,7 +1376,10 @@ def _ci(argv: list[str]) -> int:
     report.parent.mkdir(parents=True, exist_ok=True)
     body = render_ci_report(result)
     report.write_text(body, encoding="utf-8")
-    print(body, end="")
+    if args.candidate_in:  # the runner reads `::` commands from stdout, and that file fed this
+        print(f"lgcov: the report is at {report}")
+    else:
+        print(body, end="")
     if args.result_out:
         bound = GateResult(
             start.base or "",
@@ -2221,6 +2387,7 @@ def _selfcheck_cmd(argv: list[str]) -> int:
                 nightly_url=None,
                 bands="calibration/bands.json",
                 policy_dir=None,
+                candidate_in=None,
             )
         )
         actual = Outcome(result.action.exit_code)

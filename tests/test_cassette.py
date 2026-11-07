@@ -351,6 +351,16 @@ def test_on_divergence_fail_stops_the_run_and_leaves_the_rest_not_checked() -> N
     assert [d.node for d in r.drifts] == ["a"]  # b and c weren't checked: not drift
 
 
+def test_compared_run_says_what_replay_run_says_from_the_steps_alone() -> None:
+    # T179: so a job that can't run the graph can do this with steps another job reports.
+    from lgcov.cassette import ON_DIVERGENCE, compared_run, replay_run
+
+    cassette = record(_chain(1), {"x": 0})
+    for on_divergence in ON_DIVERGENCE:
+        r = replay_run(_chain(2), cassette, serve=True, on_divergence=on_divergence)
+        assert compared_run(cassette, r.steps, r.calls, r.halt) == r
+
+
 def test_on_divergence_live_runs_the_rest_of_the_run_live() -> None:
     from lgcov.cassette import replay_run
 

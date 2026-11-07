@@ -598,7 +598,7 @@ def _compared(step: Step, ignore_paths: Sequence[str], routed: Container[str]) -
 
 
 def _by_node(
-    steps: list[Step], ignore_paths: Sequence[str] = (), routed: Container[str] = ()
+    steps: Sequence[Step], ignore_paths: Sequence[str] = (), routed: Container[str] = ()
 ) -> dict[str, list[str]]:
     # sorted per node so parallel Send workers compare stably
     out: dict[str, list[str]] = {}
@@ -667,6 +667,18 @@ def replay_run(
     fresh, calls, halt = _run(
         graph, cassette.inputs, served, ignore_paths, on_divergence, budget, mask_volatile
     )
+    return compared_run(cassette, fresh, calls, halt, ignore_paths)
+
+
+def compared_run(
+    cassette: Cassette,
+    fresh: Sequence[Step],
+    calls: Sequence[Call],
+    halt: Halt | None,
+    ignore_paths: Sequence[str] = (),
+) -> Replay:
+    """T179: one run's steps against its cassette. It only reads data, so the job that decides
+    can do this with steps another job reports, without the graph."""
     recorded = cassette.steps
     not_checked: tuple[str, ...] = ()
     if halt is not None:  # compare only what the run reached: each node's first k steps
