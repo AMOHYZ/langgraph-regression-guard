@@ -12,7 +12,7 @@ against that function.
 | Statistical verdict | The paired KPI gate across the blocking KPIs and their node or slice groups: SHIP, BLOCK or INCONCLUSIVE ([gate.md](gate.md)). None when no blocking KPI was judged. |
 | Policy violation | Drift that `fail-on` cares about, node coverage under `thresholds.min_node_coverage`, or a blocking code check that passed on the base and fails on this PR, including one a re-baseline in this PR hides. |
 | Judge abstention | A blocking KPI whose judge didn't commit: a BLOCK at low confidence, a BLOCK from a flag-band judge, or more than half its judgments not running. |
-| Infra failure | Install, graph load or cassette trouble, network trouble in a node or judge, a blocking KPI with no valid judgment on a side, no llm client for a blocking KPI, or a commit moving during the run. |
+| Infra failure | Install, graph load or cassette trouble, network trouble in a node or judge, a blocking KPI with no valid judgment on a side, no llm client for a blocking KPI, a commit moving during the run, or a candidate job that left no result this job can use. |
 | Human approval | The `approved-by` input, which your workflow fills in. |
 | CI status | The `ci-status` input, which your workflow fills in. lgcov doesn't read your other jobs. |
 | Adoption permission | The `mode` input: `enforcing` (the default) or `advisory`. A PR whose base has no policy yet is advisory whatever `mode` says ([trust-boundary.md](trust-boundary.md)). |

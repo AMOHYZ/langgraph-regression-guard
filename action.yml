@@ -61,6 +61,10 @@ inputs:
     description: "The result of your other CI jobs, as needs.<job>.result gives it: success, failure, cancelled or skipped. Shown in the comment; it changes no verdict or exit code."
     required: false
     default: ""
+  phase:
+    description: "all (default): everything in this one job. candidate: only run the PR's code and upload what it did; give that job no keys and no write token. evaluate: only decide from that upload, with no project install; that job holds the keys and posts the comment. See docs/trust-boundary.md."
+    required: false
+    default: all
 
 outputs:
   report-path:
@@ -90,6 +94,7 @@ runs:
         TIER: ${{ inputs.tier }}
         MODE: ${{ inputs.mode }}
         CI_STATUS: ${{ inputs.ci-status }}
+        PHASE: ${{ inputs.phase }}
       run: |
         case "$FAIL_ON" in
           root-drift|any-drift|never) ;;
@@ -140,6 +145,13 @@ runs:
             exit 2
             ;;
         esac
+        case "${PHASE:-all}" in
+          all|candidate|evaluate) ;;
+          *)
+            echo "::error title=lgcov::phase must be one of all, candidate, evaluate; got '$PHASE'"
+            exit 2
+            ;;
+        esac
         if [ -n "$BUDGET_SECONDS" ] && ! [[ "$BUDGET_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
           echo "::error title=lgcov::budget-seconds must be a number of seconds, or empty; got '$BUDGET_SECONDS'"
           exit 2
@@ -148,10 +160,64 @@ runs:
     - name: Install uv
       uses: astral-sh/setup-uv@v6
       with:
-        enable-cache: true
+        # T179: caches are shared within a PR, so the candidate job could leave a poisoned one.
+        enable-cache: ${{ inputs.phase != 'evaluate' }}
+
+    # T179: before the install, which can run the PR's code. A candidate job has
+    # persist-credentials: false, so this is the one step with a token it can use, and from the
+    # install on that code could wrap `git`.
+    - name: Check out the commits
+      id: base
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_SHA: ${{ github.sha }}
+        PHASE: ${{ inputs.phase }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        GIT_TERMINAL_PROMPT: "0"
+      run: |
+        have() {
+          git cat-file -e "$1^{commit}" 2>/dev/null \
+            || git fetch --no-tags --depth=1 origin "$1" \
+            || GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
+               GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" \
+               git fetch --no-tags --depth=1 origin "$1"
+        }
+        if [ -z "$BASE_SHA" ]; then
+          echo "lgcov: not a pull_request event; the graph diff is skipped"
+        elif have "$BASE_SHA" && git worktree add --detach "$RUNNER_TEMP/lgcov-base" "$BASE_SHA"; then
+          echo "dir=$RUNNER_TEMP/lgcov-base" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning title=lgcov::could not check out the base commit; the gate gives no verdict"
+        fi
+        if [ "$PHASE" = "evaluate" ]; then
+          # T179: only ever read. A symlink in it stays a small plain file, so no read can follow
+          # one out of the checkout into this job's files.
+          if git config core.symlinks false && have "$PR_SHA" \
+             && git worktree add --detach "$RUNNER_TEMP/lgcov-pr" "$PR_SHA"; then
+            echo "pr-dir=$RUNNER_TEMP/lgcov-pr" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=lgcov::could not check out the PR's commit; the gate gives no verdict"
+          fi
+        fi
+
+    # T179: pinned by the Action's own lock, and away from the checkouts: a PR's uv.toml or
+    # pyproject.toml could name another index, and this job holds the keys.
+    - name: Install lgcov for this job
+      if: inputs.phase == 'evaluate'
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        UV_PYTHON: ${{ inputs.python-version }}
+        UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/lgcov-venv
+      run: |
+        uv sync --no-config --project "$ACTION_PATH" --locked --no-dev \
+          || echo "::warning title=lgcov::could not install lgcov; the gate gives no verdict"
 
     - name: Install your project and lgcov
       id: install
+      if: inputs.phase != 'evaluate'
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -182,28 +248,9 @@ runs:
           } >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Check out the base commit
-      id: base
-      shell: bash
-      env:
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      run: |
-        if [ -z "$BASE_SHA" ]; then
-          echo "lgcov: not a pull_request event; the graph diff is skipped"
-          exit 0
-        fi
-        dir="$RUNNER_TEMP/lgcov-base"
-        if { git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null \
-             || git fetch --no-tags --depth=1 origin "$BASE_SHA"; } \
-           && git worktree add --detach "$dir" "$BASE_SHA"; then
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
-        else
-          echo "::warning title=lgcov::could not check out the base commit; the gate gives no verdict"
-        fi
-
     - name: Download main's coverage
       id: coverage-main
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' && inputs.phase != 'candidate'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -236,7 +283,7 @@ runs:
 
     - name: Find main's latest nightly run
       id: nightly
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' && inputs.phase != 'candidate'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -253,6 +300,14 @@ runs:
           echo "url=${GITHUB_SERVER_URL:-https://github.com}/$REPO/actions/runs/$id" >> "$GITHUB_OUTPUT"
         fi
         exit 0
+
+    - name: Download what the candidate job did
+      if: inputs.phase == 'evaluate'
+      uses: actions/download-artifact@v4
+      continue-on-error: true  # with no file, lgcov gives no verdict and the comment says why
+      with:
+        name: lgcov-candidate
+        path: ${{ runner.temp }}/lgcov-candidate
 
     - name: Run lgcov
       id: lgcov
@@ -277,9 +332,13 @@ runs:
         MODE: ${{ inputs.mode }}
         APPROVED_BY: ${{ inputs.approved-by }}
         CI_STATUS: ${{ inputs.ci-status }}
+        PHASE: ${{ inputs.phase }}
+        PR_DIR: ${{ steps.base.outputs.pr-dir }}
+        EVALUATOR: ${{ runner.temp }}/lgcov-venv/bin/lgcov
       run: |
         # Actions runs bash with -e; this step checks exit codes itself.
         set +e -uo pipefail
+        phase="${PHASE:-all}"
         report="$RUNNER_TEMP/lgcov/report.md"
         args=(ci --report "$report" --github-output "$GITHUB_OUTPUT" --fail-on "$FAIL_ON")
         [ -n "$GRAPH" ] && args+=(--graph "$GRAPH")
@@ -302,14 +361,23 @@ runs:
         args+=(--mode "$MODE")
         [ -n "$APPROVED_BY" ] && args+=(--approved-by "$APPROVED_BY")
         [ -n "$CI_STATUS" ] && args+=(--ci-status "$CI_STATUS")
-        if [ -n "$HARNESS_ERROR" ]; then
+        [ "$phase" = "candidate" ] && args+=(--candidate-out "$RUNNER_TEMP/lgcov/candidate.json")
+        if [ "$phase" = "evaluate" ]; then
+          # T179: relative paths read the PR's files as data. Nothing from them runs here.
+          args+=(--candidate-in "$RUNNER_TEMP/lgcov-candidate/candidate.json")
+          if [ -z "${PR_DIR:-}" ] || ! cd "$PR_DIR"; then
+            [ -n "$HARNESS_ERROR" ] || HARNESS_ERROR="This job could not read the PR's commit, so it has no cassettes to compare with."
+          fi
+          [ -n "$HARNESS_ERROR" ] && args+=(--harness-error "$HARNESS_ERROR")
+          "$EVALUATOR" "${args[@]}"
+        elif [ -n "$HARNESS_ERROR" ]; then
           # The run can't go ahead; lgcov alone is enough to render the harness report.
           uvx --from "$ACTION_PATH" lgcov "${args[@]}" --harness-error "$HARNESS_ERROR"
         else
           .venv/bin/lgcov "${args[@]}"
         fi
         code=$?
-        if [ ! -s "$report" ]; then
+        if [ "$phase" != "candidate" ] && [ ! -s "$report" ]; then
           mkdir -p "$(dirname "$report")"
           printf '%s\n' "<!-- lgcov-report -->" "## ⚠️ lgcov: harness error, not a regression" "" \
             "⚠️ Harness error, not a regression: lgcov could not start (exit $code)." > "$report"
@@ -322,7 +390,7 @@ runs:
     # so the comment step below posts that instead, and needs no change.
     - name: Verify the result
       id: verify
-      if: github.event_name == 'pull_request' && steps.lgcov.outputs.exit-code != '2'
+      if: inputs.phase != 'candidate' && github.event_name == 'pull_request' && steps.lgcov.outputs.exit-code != '2'
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -333,6 +401,8 @@ runs:
         BASE_DIR: ${{ steps.base.outputs.dir }}
         TAXONOMY: ${{ inputs.taxonomy }}
         FAIL_ON: ${{ inputs.fail-on }}
+        PHASE: ${{ inputs.phase }}
+        EVALUATOR: ${{ runner.temp }}/lgcov-venv/bin/lgcov
       run: |
         # Actions runs bash with -e; this step checks exit codes itself.
         set +e -uo pipefail
@@ -341,7 +411,11 @@ runs:
         args+=(--github-output "$out" --policy-dir "$BASE_DIR")
         args+=(--base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" --fail-on "$FAIL_ON")
         [ -n "$TAXONOMY" ] && args+=(--taxonomy "$TAXONOMY")
-        uvx --from "$ACTION_PATH" lgcov "${args[@]}"
+        if [ "${PHASE:-all}" = "evaluate" ]; then
+          "$EVALUATOR" "${args[@]}"
+        else
+          uvx --from "$ACTION_PATH" lgcov "${args[@]}"
+        fi
         if [ ! -s "$out" ]; then
           # It couldn't run. No verdict, rather than the one it couldn't check.
           printf '%s\n' "<!-- lgcov-report -->" "## ⚠️ lgcov: harness error, not a regression" "" \
@@ -351,6 +425,7 @@ runs:
         cat "$out" >> "$GITHUB_OUTPUT"
 
     - name: Post or update the PR comment
+      if: inputs.phase != 'candidate'
       uses: actions/github-script@v7
       env:
         REPORT_PATH: ${{ steps.lgcov.outputs.report-path }}
@@ -396,7 +471,7 @@ runs:
           }
 
     - name: Upload coverage for main
-      if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      if: inputs.phase != 'candidate' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
       uses: actions/upload-artifact@v4
       continue-on-error: true
       with:
@@ -406,7 +481,7 @@ runs:
         overwrite: true
 
     - name: Upload the nightly report
-      if: steps.lgcov.outputs.tier == 'nightly'
+      if: inputs.phase != 'candidate' && steps.lgcov.outputs.tier == 'nightly'
       uses: actions/upload-artifact@v4
       continue-on-error: true
       with:
@@ -415,7 +490,20 @@ runs:
         if-no-files-found: warn
         overwrite: true
 
+    # T179: only what the job that decides needs. It holds live outputs, so it doesn't stay long.
+    - name: Upload what this job did
+      if: inputs.phase == 'candidate'
+      uses: actions/upload-artifact@v4
+      continue-on-error: true  # with no file, the other job gives no verdict and says why
+      with:
+        name: lgcov-candidate
+        path: ${{ runner.temp }}/lgcov/candidate.json
+        if-no-files-found: warn
+        overwrite: true
+        retention-days: 1
+
     - name: Exit with the verdict
+      if: inputs.phase != 'candidate'
       shell: bash
       env:
         CODE: ${{ steps.verify.outputs.exit-code || steps.lgcov.outputs.exit-code }}

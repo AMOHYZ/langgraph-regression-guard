@@ -211,8 +211,9 @@ langsmith:          # lgcov.yaml
   the commit lgcov tested or the PR's head commit. LangSmith's `evaluate()` records that
   field. If no experiment ran on either commit, the report says nothing.
 - **The key.** Put `LANGSMITH_API_KEY` in the job's `env:` from a secret.
-  - ⚠️ That job runs the PR's code, which can read the key. Until the job split, only do
-    this if PR authors are trusted: no fork PRs, no outside contributors.
+  - ⚠️ With one job, that job runs the PR's code, which can read the key. Only do this if PR
+    authors are trusted: no fork PRs, no outside contributors. With
+    [two jobs](#two-jobs-so-the-prs-code-cant-touch-the-verdict), it goes in the job that decides.
   - Without it, the report says so in one line. Fork PRs get no secrets, so they always
     hit this case.
   - A LangSmith outage is a ⚠️ line.
@@ -292,9 +293,10 @@ jobs:
 - With `taxonomy:`, the run also gates the taxonomy's KPIs on the replayed outputs (see
   [The gate](#the-gate-ship-block-or-inconclusive)) and adds the table to the report, at
   most 200 model judge calls per run. `judge: jev` KPIs read `JEV_API_URL` and
-  `JEV_API_KEY`: set them in the job's `env:` from secrets. ⚠️ That job runs the PR's code,
-  which can read them. Until the job split, only do this if PR authors are trusted: no
-  fork PRs, no outside contributors.
+  `JEV_API_KEY`: set them in the job's `env:` from secrets. ⚠️ With one job, that job runs
+  the PR's code, which can read them. Only do this if PR authors are trusted: no fork PRs, no
+  outside contributors. With [two jobs](#two-jobs-so-the-prs-code-cant-touch-the-verdict), they
+  go in the job that decides.
 - Outcomes and exit codes are in the table below.
 - The run locks the commits it compares. It records the base checkout's HEAD and the PR's
   at the start, and the report prints both:
@@ -309,10 +311,72 @@ jobs:
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
   `cassette-dir`, `taxonomy` (turns on the KPI gate; `taxonomy_path` isn't read here),
   `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `tier`,
-  `python-version`, `github-token`, `live`, `mode`, `approved-by`, `ci-status`. Outputs:
+  `python-version`, `github-token`, `live`, `mode`, `approved-by`, `ci-status`, `phase`. Outputs:
   `report-path`, `root-drift-count`, `propagated-drift-count`, `verdict` (`pass`, `fail`,
   `needs_human` or `error`).
 - Runs on Linux and macOS runners.
+
+### Two jobs, so the PR's code can't touch the verdict
+
+The workflow above runs the PR's code in the job that posts the verdict, so that code can read any
+key in the job and interfere with the result. The `phase` input splits it in two:
+
+```yaml
+name: lgcov
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  lgcov-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: AMOHYZ/langgraph-regression-guard@v0
+        with:
+          phase: candidate  # runs the PR's code and decides nothing
+  lgcov:
+    needs: lgcov-candidate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    env:
+      JEV_API_URL: ${{ secrets.JEV_API_URL }}
+      JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}  # empty on a push: that commit
+      - uses: AMOHYZ/langgraph-regression-guard@v0
+        with:
+          phase: evaluate  # decides from what the other job uploaded; installs no project
+```
+
+- **Require the `lgcov` check.** The candidate job passes whatever it finds.
+- **Keep `if: ${{ !cancelled() }}`.** GitHub counts a skipped required check as passing, so without
+  it, a PR whose code kills the candidate job would pass.
+- **Give both jobs the same inputs.** A different `tier` gives no verdict, and so does a
+  candidate job checked out at another commit: use a plain `actions/checkout` there.
+- **Keys.** The judge keys and `LANGSMITH_API_KEY` go in the job that decides. A changed node that
+  calls a model needs its key in the candidate job, where the PR's code can read it. That is your
+  call, for trusted authors only. With no key the node raises, which reads as an agent failure and
+  exits 1, as on a fork PR.
+- **Other setup.** Steps your project needs before it runs, like a database, go in the candidate job.
+- **The Action's version.** It has to be one with `phase`. An older one warns about the unknown input
+  and runs the whole gate in each job, so the job on the base would pass without looking at the PR.
+- **The artifact.** `lgcov-candidate` holds each run's live outputs for a day, and anyone who can
+  read the repo's Actions can download it. Treat those outputs as you do a committed cassette.
+- **What this can't stop.** The candidate job's upload is the PR's code's word for what it did, so
+  code written to attack the gate can still report a clean run. A same-repo author can also edit the
+  workflow itself. [docs/trust-boundary.md](docs/trust-boundary.md) has the full list.
 
 ### Outcomes
 
@@ -325,7 +389,7 @@ the reviewer's next step and the exit code, including what `mode`, `approved-by`
 | PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI, if there is one, is SHIP. |
 | AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, a blocking code check newly fails (even if a re-baseline in the PR hides it), node coverage under `thresholds.min_node_coverage`, or a node in the PR's graph raised; the report names the node (a router by its function name, a node inside subgraph `sub` as `sub.inner`). A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
 | INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK (the KPI table shows the cases it still needs), its judge abstained, or replay left nodes not checked: a divergence with `on-divergence: fail`, or a budget hit. Shown as "⚠️ No decision: needs_human". GitHub's green tick on exit 0 is not a pass, so the comment says that and the Action adds a warning. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1. |
-| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, a blocking KPI left with no valid judgment on a side, or the base or candidate commit moved during the run (then no verdict at all, even a BLOCK). Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
+| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, a blocking KPI left with no valid judgment on a side, or the base or candidate commit moved during the run (then no verdict at all, even a BLOCK), or a candidate job that left no result the job deciding can use. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
 
 A regression found in the same run wins over a judge's infra error: exit 1. An infra error
 wins over INCONCLUSIVE: exit 2. With `mode: advisory`, every exit 1 becomes 0, and an infra
