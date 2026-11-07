@@ -1,6 +1,6 @@
 # Attribution benchmark
 
-**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. On 72 synthetic cases from 24 edits, lgcov's root misses 14 of 31 regressed cases (5 of 12 by edit) and flags all 24 harmless ones, as do both baselines.
+**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. On 72 synthetic cases from 24 edits, lgcov's root misses 14 of 31 regressed cases (5 of 12 by edit) and flags all 24 harmless ones, as do both node-naming baselines.
 
 ## What was measured
 
@@ -12,7 +12,7 @@ Each kind of evidence has its own section, and their numbers never combine: demo
 
 - **One real PR (n=1).** Both runs are the same PR and question, so they aren't two data points.
 - **The edited-node baseline beats lgcov on single-node edits,** on recall, 1.00 (20 of 20) against 0.85 (17 of 20), and on coverage, 1.00 (44 of 44) against 0.86 (38 of 44). lgcov is ahead only on case-level precision, 0.39 against 0.35: see [Synthetic](#synthetic).
-- **No harmless-edit discrimination yet.** lgcov and both baselines flag 24 of 24 harmless synthetic cases; negative controls (T123) and non-pinnable edits (T182) are the next tests.
+- **No harmless-edit discrimination yet.** lgcov and both node-naming baselines flag 24 of 24 harmless synthetic cases; negative controls (T123) and non-pinnable edits (T182) are the next tests.
 - **Synthetic cases come from our own generator,** so they share its assumptions about what an edit looks like; real PRs (T171) are the check.
 - **Usage counts are pending.** Request, token and error counts for the `gpt-6-luna` runs and the pilot still have to come from the usage page: see [Cost per run](#cost-per-run).
 - **More real PRs (T171) and a base-against-base run (T173) are pending.** Neither has run, so there are no numbers for them.
