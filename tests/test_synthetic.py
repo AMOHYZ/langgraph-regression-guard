@@ -378,3 +378,7 @@ def test_a_fan_out_that_only_finished_in_another_order_is_labelled_inert(
     monkeypatch.setattr("lgcov.synthetic.record", lambda graph, inputs: _reordered(base))
     mutation = Mutation("plan", "no edit", FANOUT.graph)
     assert generate("x", (mutation,), (base,), FANOUT.outcome_ok, 0).truth.label == "inert"
+
+
+def test_t121_has_no_todos_left() -> None:
+    assert "TODO(T121)" not in (ROOT / "src" / "lgcov" / "synthetic.py").read_text("utf-8")
