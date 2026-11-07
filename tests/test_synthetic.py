@@ -3,6 +3,7 @@ runs did. Every case the seeds reach is one edit on one recorded question."""
 
 import socket
 from collections import Counter
+from dataclasses import replace
 from functools import cache
 from pathlib import Path
 from types import ModuleType
@@ -12,10 +13,10 @@ import yaml
 
 from examples.demo_agent.graph import graph as demo_graph
 from examples.demo_agent.mutations import MUTATIONS, NOT_ON_DEMO, build, outcome_ok
-from examples.synthetic_agents import fanout, subgraph
+from examples.synthetic_agents import AGENTS, DEMO, fanout, subgraph
 from lgcov.cassette import Cassette, Step, record, runs_from_json
 from lgcov.snapshot import snapshot_from_compiled
-from lgcov.synthetic import Case, Label, Mutation, generate
+from lgcov.synthetic import Case, Label, Mutation, every_case, generate
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = runs_from_json((ROOT / "examples/demo_agent/cassettes/baseline.json").read_text("utf-8"))
@@ -240,3 +241,64 @@ def test_with_no_edit_the_other_graphs_record_the_same_run(agent: ModuleType) ->
         assert agent.outcome_ok(base)
         for _ in range(20):  # the fan-out's workers run in parallel: their order mustn't flip
             assert record(agent.build(), {"question": question}) == base
+
+
+@cache
+def _suite() -> tuple[Case, ...]:
+    return tuple(case for agent in AGENTS for case in every_case(agent))
+
+
+def test_the_suite_has_at_least_50_cases_from_at_least_20_distinct_edits() -> None:
+    assert len(_suite()) >= 50
+    assert len({case.edit for case in _suite()}) >= 20
+
+
+def test_each_edit_runs_once_on_each_of_its_agents_questions() -> None:
+    assert len(_suite()) == len(set(_identity(case) for case in _suite()))
+    for agent in AGENTS:
+        edits = sum(len(mutations) for mutations in agent.mutations.values())
+        assert sum(case.agent == agent.name for case in _suite()) == edits * len(agent.questions)
+
+
+def _identity(case: Case) -> tuple[tuple[str, str, str], str]:
+    return (case.edit, case.base.inputs["question"])
+
+
+def test_the_suite_reaches_all_8_classes_and_every_label() -> None:
+    doc = yaml.safe_load((ROOT / "docs" / "mutations.yaml").read_text("utf-8"))
+    assert {case.operator for case in _suite()} == {e["operator"] for e in doc["operators"]}
+    assert {case.truth.label for case in _suite()} == {"inert", "benign", "regressed"}
+
+
+def test_the_suite_is_not_one_answer_per_edit() -> None:
+    labels: dict[tuple[str, str, str], set[str]] = {}
+    for case in _suite():
+        labels.setdefault(case.edit, set()).add(case.truth.label)
+    # An edit whose label doesn't depend on the question only repeats itself across questions.
+    assert sum(len(found) > 1 for found in labels.values()) >= 8
+
+
+def test_every_edit_in_the_suite_is_replayable_from_its_case() -> None:
+    for case in _suite():
+        assert record(case.graph, case.base.inputs) == case.pr
+
+
+def test_a_question_whose_base_fails_its_outcome_check_stops_the_suite() -> None:
+    broken = replace(DEMO, questions=("Where is my order number 42 right now?",))
+    with pytest.raises(ValueError, match="no recorded run passes"):
+        every_case(broken)
+
+
+def test_the_original_20_cases_are_still_in_the_suite() -> None:
+    suite = {(c.operator, c.variant, c.base.inputs["question"]) for c in _suite()}
+    assert {(c.operator, c.variant, c.base.inputs["question"]) for c in _every_case()} <= suite
+
+
+def test_the_suites_counts() -> None:
+    assert len(_suite()) == 72
+    assert len({case.edit for case in _suite()}) == 24
+    assert Counter(case.truth.label for case in _suite()) == {
+        "regressed": 31,
+        "benign": 24,
+        "inert": 17,
+    }

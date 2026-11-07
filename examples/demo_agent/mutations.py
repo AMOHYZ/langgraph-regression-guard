@@ -79,6 +79,19 @@ def _flipped(state: State) -> Literal["lookup_order", "respond"]:
     return "respond" if state["needs_tool"] else "lookup_order"
 
 
+def _key_written_twice(state: State) -> _Renamed:
+    result = lookup_order(state)["tool_result"]
+    return {"tool_result": result, "order_status": result}
+
+
+def _always_lookup(state: State) -> Literal["lookup_order", "respond"]:
+    return "lookup_order"
+
+
+def _never_lookup(state: State) -> Literal["lookup_order", "respond"]:
+    return "respond"
+
+
 MUTATIONS: dict[str, tuple[Mutation, ...]] = {
     "state_key_rename": (
         Mutation(
@@ -127,5 +140,49 @@ MUTATIONS: dict[str, tuple[Mutation, ...]] = {
     # route is classify's conditional edge, not a node: the edit sits at classify, in no output.
     "router_flip": (
         Mutation("classify", "route is inverted", build(router=_flipped), "conditional_edge"),
+    ),
+}
+
+# T121: the suite's other edits on this agent. MUTATIONS stays as the 20 cases tests pin.
+MORE_MUTATIONS: dict[str, tuple[Mutation, ...]] = {
+    "state_key_rename": (
+        Mutation(
+            "lookup_order",
+            "order_status is written next to tool_result, which respond still reads",
+            build(lookup=_key_written_twice, schema=_Renamed),
+        ),
+    ),
+    "retrieval_k_change": (
+        Mutation(
+            "lookup_order",
+            "the tool's results go from 1 to 2, with this order's first",
+            build(_returning("order #42: shipped; order #43: pending")),
+        ),
+        Mutation(
+            "lookup_order",
+            "the tool's results go from 1 to 2, with this order's last",
+            build(_returning("order #43: pending; order #42: shipped")),
+        ),
+    ),
+    "prompt_edit": (
+        Mutation(
+            "respond",
+            "the prompt ends on a word the outcome check looks for",
+            build(answer=_respond_with(SYSTEM_PROMPT="Say when an item has shipped.")),
+        ),
+    ),
+    "router_flip": (
+        Mutation(
+            "classify",
+            "route always goes to the tool",
+            build(router=_always_lookup),
+            "conditional_edge",
+        ),
+        Mutation(
+            "classify",
+            "route never goes to the tool",
+            build(router=_never_lookup),
+            "conditional_edge",
+        ),
     ),
 }

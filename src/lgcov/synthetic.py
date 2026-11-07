@@ -5,12 +5,10 @@ Offline only: recorded cassettes and fake models, with no network, API keys or p
 # TODO(T121): A/A re-runs for flip-rate baselines; `activated` assumes a deterministic agent.
 # TODO(T121): `lgcov bench --synthetic`: precision, recall and coverage vs edited-node,
 # first-divergence and end-to-end baselines.
-# TODO(T121): at least 50 cases, which needs more recorded inputs or more graphs.
 # TODO(T121): a "synthetic" section in docs/benchmark.md, kept separate from real PRs.
-# TODO(T121): send_fan_out_drop and subgraph_output_change, on a graph that has them.
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from random import Random
 from typing import Any, Literal
 
@@ -50,6 +48,24 @@ class Case:
     base: Cassette
     pr: Cassette
     truth: GroundTruth
+    graph: Any  # the edited agent, as in Mutation, so a case can be replayed against it
+    agent: str = ""
+
+    @property
+    def edit(self) -> tuple[str, str, str]:
+        """One edit, whichever question it ran on: cases sharing this aren't independent."""
+        return (self.agent, self.operator, self.variant)
+
+
+@dataclass(frozen=True)
+class Agent:
+    """A graph the suite edits, the questions it asks, and how it judges an outcome."""
+
+    name: str
+    graph: Any  # as in Mutation
+    questions: tuple[str, ...]
+    mutations: Mapping[str, tuple[Mutation, ...]]
+    outcome_ok: Callable[[Cassette], bool]
 
 
 def _trace(run: Cassette) -> list[tuple[str, Any]]:
@@ -78,4 +94,15 @@ def generate(
         activated=_trace(pr) != _trace(base),
         regressed=not outcome_ok(pr),
     )
-    return Case(operator, seed, mutation.variant, base, pr, truth)
+    return Case(operator, seed, mutation.variant, base, pr, truth, mutation.graph)
+
+
+def every_case(agent: Agent) -> tuple[Case, ...]:
+    """Each edit on each question, once: one run and one mutation leave the seed nothing to pick."""
+    bases = [record(agent.graph, {"question": question}) for question in agent.questions]
+    return tuple(
+        replace(generate(operator, (mutation,), (base,), agent.outcome_ok, 0), agent=agent.name)
+        for operator, mutations in agent.mutations.items()
+        for mutation in mutations
+        for base in bases
+    )
