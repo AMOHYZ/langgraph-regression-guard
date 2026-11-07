@@ -6,7 +6,7 @@
 
 Whether lgcov names the node a change broke (root) and the nodes that only inherited the damage (propagated), scored against hand-written labels. On the real PR, agent KPIs were also read from the saved runs, kept separate from those scores. Not measured: a judge on a real PR, and how much a live model's answers vary with no change at all.
 
-Each kind of evidence has its own section, and their numbers never combine: demo fixtures, synthetic cases and real PRs. `lgcov bench` overwrites this whole file by default and writes only the demo fixtures table and its known gaps, so pass `--out` with another path and copy those in.
+Each kind of evidence has its own section, and their numbers never combine: demo fixtures, synthetic cases and real PRs. `lgcov bench --synthetic` replaces only its own section. `lgcov bench` overwrites this whole file by default and writes only the demo fixtures table and its known gaps, so pass `--out` with another path and copy those in.
 
 ## Demo fixtures
 
@@ -224,7 +224,7 @@ Scored on #163 from what was already on disk, the saved runs and a clone of the 
 - **First divergence ties lgcov on root in both runs, because first drift is lgcov's root rule.** On this PR, lgcov's root adds nothing over it. What lgcov adds is its propagated labels, at a precision of 1 of 2 in both runs.
 - **End-to-end isn't scored because it names no node.** The final report differs in both runs, but there's no node to check against the labels, and with no base-against-base run we can't say the difference comes from the PR.
 
-On single-node synthetic edits, edited node from the diff matches or beats lgcov; lgcov's case rests on changes the diff can't pin to one node (planned).
+On single-node synthetic edits, edited node from the diff matches or beats lgcov on recall and coverage, and lgcov is ahead only on case-level precision: see [Synthetic](#synthetic). lgcov's case rests on changes the diff can't pin to one node (T182, planned).
 
 ## What the tool missed
 
