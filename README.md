@@ -465,6 +465,12 @@ future work.
 
 Planned: sequential stopping (mSPRT), to stop judging once a KPI's verdict is clear.
 
+To fix the plan across several runs, lock a round. `lgcov round new` writes `lgcov-round.yaml`: the
+cases, the judge, each KPI's margin, α, power, K_gate and the candidate commits. `lgcov guard` exits
+2 if any of it moved or the commit isn't a locked candidate. `exposure.json` records which judge
+versions and candidates saw each case, across rounds. The Action doesn't run this yet:
+[docs/round.md](docs/round.md).
+
 ### Calibrate judges against human labels
 
 `lgcov calibrate` compares each judge with human labels: every CSV under

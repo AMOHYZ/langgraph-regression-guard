@@ -86,7 +86,21 @@ from lgcov.coverage import (
 )
 from lgcov.draft import Drafter, approve, as_doc, draft, parse_traces, to_yaml
 from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
+from lgcov.exposure import CaseExposure, entries, exposure_to_json, parse_exposure
+from lgcov.exposure import record as record_exposure
 from lgcov.gate_result import GateResult, file_hash, parse_result, result_to_json, verify_result
+from lgcov.gate_round import (
+    GateNow,
+    JudgeLock,
+    case_ids,
+    is_full_sha,
+    lock_round,
+    parse_draft,
+    parse_round,
+    prompt_hash,
+    round_problems,
+    round_to_yaml,
+)
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
@@ -1713,6 +1727,166 @@ def _metrics_cmd(argv: list[str]) -> int:
     return 0
 
 
+_ROUND = "lgcov-round.yaml"
+_EXPOSURE = "exposure.json"
+
+
+def _round_args(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument("--round", default=_ROUND, help="the round file")
+    ap.add_argument("--exposure", default=_EXPOSURE, help="what saw each case, across rounds")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml")
+    ap.add_argument("--taxonomy", help="taxonomy.yaml; overrides taxonomy_path")
+    ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
+
+
+def _read_round[T](path: str, parse: Callable[[object], T]) -> T:
+    try:
+        return parse(yaml.safe_load(Path(path).read_text(encoding="utf-8")))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path}: malformed YAML: {exc}") from None
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from None
+
+
+def _read_ledger(path: str) -> dict[str, CaseExposure]:
+    """The ledger; empty with no file, which a round's exposure floor then catches."""
+    file = Path(path)
+    if not file.is_file():
+        return {}
+    try:
+        return parse_exposure(file.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from None
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Through a temp file, so a crash can't leave the round or the ledger half written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _gate_now(args: argparse.Namespace, cases_path: str) -> GateNow:
+    """What the gate would use now. The cases come from this checkout, as a PR's edits to them
+    reach `lgcov ci`; everything else from where the gate reads its policy."""
+    config = _policy_path(args, args.config)
+    if not Path(config).is_file():
+        raise ValueError(f"{config}: not found")
+    # No graph loads here, so a stand-in entrypoint validates, as in _pinned_jev_model.
+    cfg = load_config(config, {"graph_entrypoint": "guard.py:unused"})
+    taxonomy = args.taxonomy or cfg.taxonomy_path
+    if not taxonomy:
+        raise ValueError("a round needs a taxonomy (--taxonomy or taxonomy_path)")
+    every = list(load_taxonomy(_policy_path(args, taxonomy)).kpi_specs)
+    advisory, _, _ = _gate_bands(_policy_path(args, args.bands), every, cfg)
+    # As _ci_result chooses them: K_gate is the blocking KPIs the run judges.
+    runs_llm = tier_policy(cfg.tier, cfg.samples_per_case).llm_judges and _llm_judge is not None
+    judged = every if runs_llm else [s for s in every if s.judge != "llm"]
+    try:
+        ids = case_ids(json.loads(Path(cases_path).read_text(encoding="utf-8")))
+    except ValueError as exc:
+        raise ValueError(f"{cases_path}: {exc}") from None
+    return GateNow(
+        case_ids=ids,
+        judge=JudgeLock(cfg.jev_model, version("lgcov"), prompt_hash(every)),
+        margins={s.name: cfg.gate.margin if s.margin is None else s.margin for s in every},
+        alpha=cfg.gate.alpha,
+        power=cfg.gate.power,
+        k_gate=sum(s.name not in advisory for s in judged),
+        unpinned=tuple(
+            s.name for s in every if s.judge == "jev" and cfg.jev_model in (None, "jev-latest")
+        ),
+    )
+
+
+def _round_new_cmd(argv: list[str]) -> int:
+    """Lock the next round: what a person wrote in the round file, and the gate's settings as
+    they stand. exposure.json carries over untouched; it is only created if there is none."""
+    ap = argparse.ArgumentParser(prog="lgcov round new")
+    _round_args(ap)
+    ap.set_defaults(policy_dir=None)  # a round is locked on the base, not read from one
+    args = ap.parse_args(argv)
+    try:
+        draft = _read_round(args.round, parse_draft)
+        now = _gate_now(args, draft.gate_cases_path)
+        locked = lock_round(draft, now, entries(_read_ledger(args.exposure)))
+    except (OSError, ValueError) as exc:
+        print(f"lgcov round new: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    _write_atomic(Path(args.round), round_to_yaml(locked))
+    if not Path(args.exposure).is_file():
+        _write_atomic(Path(args.exposure), exposure_to_json({}))
+    print(
+        f"Round {locked.round} locked in {args.round}: {len(now.case_ids)} cases, "
+        f"K_gate = {locked.k_gate}, {len(locked.candidates)} candidate(s). "
+        f"Commit it with {args.exposure}."
+    )
+    return 0
+
+
+def _candidate_arg(value: str) -> str:
+    if not is_full_sha(value):
+        raise argparse.ArgumentTypeError(f"{value!r} isn't a full commit SHA")
+    return value
+
+
+def _guard_cmd(argv: list[str]) -> int:
+    """Exit 2 unless the round still holds and this commit is one of its candidates. Read-only,
+    unless --record adds this candidate and judge to the ledger."""
+    ap = argparse.ArgumentParser(prog="lgcov guard")
+    _round_args(ap)
+    ap.add_argument(
+        "--policy-dir",
+        help="checkout of the PR's base: round, exposure, lgcov.yaml, taxonomy, bands",
+    )
+    ap.add_argument(
+        "--candidate",
+        type=_candidate_arg,
+        help="the commit under test, a full SHA; default the PR's head, else HEAD",
+    )
+    ap.add_argument(
+        "--record",
+        action="store_true",
+        help="after a clean check, record that this candidate and judge saw these cases",
+    )
+    args = ap.parse_args(argv)
+    if args.record and args.policy_dir:
+        print(
+            "lgcov guard: --record can't run with --policy-dir: that checkout is thrown away, so "
+            "the record would be lost. Run it where exposure.json is committed.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    try:
+        locked = _read_round(_policy_path(args, args.round), parse_round)
+        now = _gate_now(args, locked.gate_cases_path)
+        ledger = _read_ledger(_policy_path(args, args.exposure))
+    except (OSError, ValueError) as exc:
+        print(f"lgcov guard: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    # On a PR, HEAD is GitHub's merge commit, which no round can lock.
+    candidate: str | None = args.candidate or _pr_head() or _head(".")
+    problems = round_problems(locked, now, candidate, entries(ledger))
+    if problems or candidate is None:
+        print(f"lgcov guard: this run isn't covered by round {locked.round}:", file=sys.stderr)
+        print("\n".join(f"- {p}" for p in problems), file=sys.stderr)
+        return EXIT_ERROR
+    cases = len(now.case_ids)
+    print(locked_line(replace(_commits(None), candidate=candidate)))
+    print(
+        f"Round {locked.round} holds: {cases} cases, K_gate = {now.k_gate}, judge {now.judge.id}."
+    )
+    if args.record:
+        recorded = record_exposure(ledger, now.case_ids, candidate, now.judge.id, locked.round)
+        _write_atomic(Path(args.exposure), exposure_to_json(recorded))
+        print(
+            f"{args.exposure}: candidate `{candidate[:7]}` and judge {now.judge.id} recorded on "
+            f"{cases} cases."
+        )
+    return 0
+
+
 def _review_cmd(argv: list[str]) -> int:
     """T102: override a judge's verdict on one case. The override is a label; when the
     human disagrees, the case is saved so the judge is re-checked on it on every PR; and
@@ -2237,6 +2411,13 @@ def _command(argv: list[str]) -> int | None:
         return EXIT_ERROR
     if argv[:1] == ["cassette"]:
         return _cassette_accept(argv[1:])
+    if argv[:2] == ["round", "new"]:
+        return _round_new_cmd(argv[2:])
+    if argv[:1] == ["round"]:
+        print("lgcov round: the one action is new (lgcov round new)", file=sys.stderr)
+        return EXIT_ERROR
+    if argv[:1] == ["guard"]:
+        return _guard_cmd(argv[1:])
     return None
 
 
@@ -2287,6 +2468,8 @@ commands:
   taxonomy draft    draft failure modes and KPIs from traces, each pending review
   taxonomy approve  approve one drafted entry
   import langsmith  turn a LangSmith dataset's examples into lgcov cases
+  round new         lock a round: its cases, judge, margins and candidates
+  guard             exit 2 if the round moved or this commit isn't locked in it
   bench             score the root / propagated labels against hand-written ones
   metrics summary   summarize per-PR records: overridden blocks, label burden, cost, time
   selfcheck         run the harness on fixtures whose outcome is known
