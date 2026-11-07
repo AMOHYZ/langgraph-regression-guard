@@ -79,10 +79,31 @@ def test_dogfood_workflow_runs_on_prs_and_on_pushes_to_main() -> None:
     assert set(trigger) == {"pull_request", "push"}
     assert _dict(trigger["push"])["branches"] == ["main"]  # main uploads the coverage baseline
     assert "pull_request_target" not in path.read_text(encoding="utf-8")
-    assert _dict(workflow["permissions"])["actions"] == "read"  # to download that baseline
-    steps = _dict(_dict(workflow["jobs"])["report"])["steps"]
-    assert isinstance(steps, list)
-    assert {"uses": "./"} in steps
+    jobs = _dict(workflow["jobs"])
+    candidate, report = _dict(jobs["candidate"]), _dict(jobs["report"])
+    # T179: the job that decides checks out the base, so `uses: ./` is the base's action.yml, and it
+    # holds what the candidate job doesn't.
+    assert report["needs"] == "candidate"
+    assert report["if"] == "${{ !cancelled() }}"
+    assert _dict(report["permissions"])["pull-requests"] == "write"
+    assert _dict(report["permissions"])["actions"] == "read"  # to download that baseline
+    assert report["steps"] == [
+        {
+            "uses": "actions/checkout@v4",
+            "with": {"ref": "${{ github.event.pull_request.base.sha }}"},
+        },
+        {"uses": "./", "with": {"phase": "evaluate"}},
+    ]
+    assert candidate["permissions"] == {"contents": "read"}
+    assert candidate["steps"] == [
+        {"uses": "actions/checkout@v4", "with": {"persist-credentials": False}},
+        {"uses": "./", "with": {"phase": "candidate"}},
+    ]
+    assert "permissions" not in workflow
+
+
+def test_the_temporary_two_job_workflow_is_gone() -> None:
+    assert not (ROOT / ".github" / "workflows" / "two-jobs.yml").exists()
 
 
 def test_coverage_artifact_is_uploaded_on_main_and_downloaded_on_prs() -> None:
