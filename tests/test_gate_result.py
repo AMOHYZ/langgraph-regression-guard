@@ -97,8 +97,9 @@ def test_what_is_not_a_result_is_refused(text: str) -> None:
 
 
 def test_the_known_limit_a_forger_who_recomputes_every_field_passes() -> None:
-    # Every value in the binding is public, so this is tamper evidence, not a signature. While the
-    # PR's code shares the job it can do just this: docs/trust-boundary.md, closed by T179.
+    # Every value in the binding is public, so this is tamper evidence, not a signature. In one job
+    # the PR's code can do just this. With two it never runs where this file is:
+    # docs/trust-boundary.md.
     forged = GateResult(BASE_SHA, HEAD_SHA, POLICY, 0, "pass", file_hash(b"forged report"))
     parsed = parse_result(result_to_json(forged))
     assert verify_result(parsed, BASE_SHA, HEAD_SHA, POLICY, b"forged report") == ""

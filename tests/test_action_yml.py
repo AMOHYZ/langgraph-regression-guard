@@ -1,9 +1,12 @@
 """T078: action.yml's public contract, and the workflows around it."""
 
+import base64
 import os
+import re
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from lgcov.drift_gate import FAIL_ON_VALUES
@@ -47,6 +50,7 @@ def test_action_is_composite_with_the_documented_inputs_and_outputs() -> None:
         "mode": "enforcing",  # T153
         "approved-by": "",
         "ci-status": "",
+        "phase": "all",  # T179
     }
     assert set(_dict(action["outputs"])) == {
         "report-path",
@@ -458,3 +462,444 @@ def test_the_verify_step_passes_on_what_lgcov_verified(tmp_path: Path) -> None:
     outputs, report = _verify_step(tmp_path, fake)
     assert outputs == "exit-code=1\nverdict=fail\n"
     assert report == "## 🟢 lgcov: pass\n"  # lgcov verified it, so the step leaves it
+
+
+# T179: two jobs, so the PR's code never runs where the verdict is decided. A composite Action can't
+# define jobs, so the workflow declares them and tells each which half to run.
+PHASES = {
+    "all": [
+        "Check inputs",
+        "Install uv",
+        "Check out the commits",
+        "Install your project and lgcov",
+        "Download main's coverage",
+        "Find main's latest nightly run",
+        "Run lgcov",
+        "Verify the result",
+        "Post or update the PR comment",
+        "Upload coverage for main",
+        "Upload the nightly report",
+        "Exit with the verdict",
+    ],
+    # The fetch comes first because it is the one step with a token it can use: from the install
+    # on, the PR's code can run, and it could wrap `git` for any step after that.
+    "candidate": [
+        "Check inputs",
+        "Install uv",
+        "Check out the commits",
+        "Install your project and lgcov",
+        "Run lgcov",
+        "Upload what this job did",
+    ],
+    "evaluate": [
+        "Check inputs",
+        "Install uv",
+        "Check out the commits",
+        "Install lgcov for this job",
+        "Download main's coverage",
+        "Find main's latest nightly run",
+        "Download what the candidate job did",
+        "Run lgcov",
+        "Verify the result",
+        "Post or update the PR comment",
+        "Upload coverage for main",
+        "Upload the nightly report",
+        "Exit with the verdict",
+    ],
+}
+
+
+def _runs_in(step: dict[object, object], phase: str) -> bool:
+    wanted = re.findall(r"inputs\.phase (==|!=) '(\w+)'", str(step.get("if", "")))
+    return all((phase == named) == (op == "==") for op, named in wanted)
+
+
+@pytest.mark.parametrize("phase", PHASES)
+def test_each_phase_runs_its_own_steps_in_order(phase: str) -> None:
+    assert [str(s["name"]) for s in _steps() if _runs_in(s, phase)] == PHASES[phase]
+
+
+def test_phase_is_checked_first() -> None:
+    first = str(_steps()[0].get("run", ""))
+    assert "all|candidate|evaluate" in first
+    assert "phase must be one of all, candidate, evaluate" in first
+
+
+def test_a_bad_phase_stops_the_run(tmp_path: Path) -> None:
+    env = {
+        **os.environ,
+        **dict.fromkeys(("LIVE", "FAIL_ON_INCONCLUSIVE"), "false"),
+        **dict.fromkeys(("BUDGET_SECONDS", "TIER", "CI_STATUS"), ""),
+        "FAIL_ON": "root-drift",
+        "ON_DIVERGENCE": "flag",
+        "MODE": "enforcing",
+        "PHASE": "verdict",
+    }
+    result = subprocess.run(
+        [*GITHUB_BASH, _step("Check inputs")], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 2
+    assert "phase must be one of all, candidate, evaluate; got 'verdict'" in result.stdout
+
+
+def test_the_job_that_decides_restores_no_cache() -> None:
+    # Caches are shared within a PR, so the candidate job could leave a poisoned one for this job.
+    uv = {str(s.get("name")): s for s in _steps()}["Install uv"]
+    assert _dict(uv["with"])["enable-cache"] == "${{ inputs.phase != 'evaluate' }}"
+
+
+def test_the_job_that_decides_installs_lgcov_pinned_and_away_from_the_checkouts() -> None:
+    # A PR's uv.toml or pyproject.toml could name another index, and this job holds the keys.
+    step = {str(s.get("name")): s for s in _steps()}["Install lgcov for this job"]
+    assert step["working-directory"] == "${{ runner.temp }}"
+    run = str(step["run"])
+    assert "uv sync --no-config --project " in run
+    assert "--locked" in run and "--no-dev" in run
+    assert _dict(step["env"])["UV_PROJECT_ENVIRONMENT"] == "${{ runner.temp }}/lgcov-venv"
+
+
+def test_the_upload_is_read_back_by_the_other_job() -> None:
+    steps = {str(s.get("name")): s for s in _steps()}
+    up, down = (
+        _dict(steps["Upload what this job did"]["with"]),
+        _dict(steps["Download what the candidate job did"]["with"]),
+    )
+    assert up["name"] == down["name"] == "lgcov-candidate"
+    assert up["path"] == "${{ runner.temp }}/lgcov/candidate.json"
+    assert '--candidate-out "$RUNNER_TEMP/lgcov/candidate.json"' in _step("Run lgcov")
+    assert down["path"] == "${{ runner.temp }}/lgcov-candidate"
+    assert '--candidate-in "$RUNNER_TEMP/lgcov-candidate/candidate.json"' in _step("Run lgcov")
+    assert (
+        up["retention-days"] == 1
+    )  # live outputs, readable by whoever can read the repo's Actions
+    assert up["overwrite"] is True  # a re-run replaces it
+
+
+def test_no_upload_is_for_lgcov_to_report() -> None:
+    # A missing file is no verdict, exit 2, and the comment says so. It can't stop the run here.
+    steps = {str(s.get("name")): s for s in _steps()}
+    assert steps["Download what the candidate job did"]["continue-on-error"] is True
+    assert steps["Upload what this job did"]["continue-on-error"] is True
+
+
+FAKE_LGCOV = 'printf "%s\\n" "$0" "$PWD" "$@" > "$RUNNER_TEMP/called"\n'
+
+
+def _phase_run(
+    tmp_path: Path, phase: str, pr_dir: str = "", harness_error: str = ""
+) -> tuple[list[str], str]:
+    """Run the `Run lgcov` step in a phase with fake lgcovs: the program it called, the folder it
+    called it from and its arguments, then the outputs it set."""
+    _executable(tmp_path / ".venv" / "bin" / "lgcov", FAKE_LGCOV)
+    _executable(tmp_path / "bin" / "uvx", FAKE_LGCOV)
+    evaluator = tmp_path / "evaluator" / "lgcov"
+    _executable(evaluator, FAKE_LGCOV)
+    out = tmp_path / "github_output"
+    out.touch()
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "ACTION_PATH": str(tmp_path),
+        "UV_PYTHON": "3.12",
+        "EVENT_NAME": "pull_request",
+        "BASE_DIR": "/base",
+        "HARNESS_ERROR": harness_error,
+        "LIVE": "false",
+        "FAIL_ON_INCONCLUSIVE": "false",
+        "ON_DIVERGENCE": "flag",
+        "FAIL_ON": "root-drift",
+        **dict.fromkeys(("GRAPH", "CASSETTE_DIR", "TAXONOMY", "BUDGET_SECONDS", "TIER"), ""),
+        **dict.fromkeys(("NIGHTLY_URL", "COVERAGE_BASELINE", "APPROVED_BY", "CI_STATUS"), ""),
+        "MODE": "enforcing",
+        "PHASE": phase,
+        "PR_DIR": pr_dir,
+        "EVALUATOR": str(evaluator),
+    }
+    result = subprocess.run(
+        [*GITHUB_BASH, _step("Run lgcov")], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    called = tmp_path / "called"
+    lines = called.read_text(encoding="utf-8").splitlines() if called.exists() else []
+    return lines, out.read_text(encoding="utf-8")
+
+
+def test_the_candidate_phase_runs_the_pr_s_code_and_decides_nothing(tmp_path: Path) -> None:
+    called, outputs = _phase_run(tmp_path, "candidate")
+    assert called[0] == ".venv/bin/lgcov"
+    assert called[called.index("--candidate-out") + 1] == f"{tmp_path}/lgcov/candidate.json"
+    assert called[called.index("--policy-dir") + 1] == "/base"
+    assert "--candidate-in" not in called
+    assert outputs == ""  # no fallback report: the other job says what went wrong
+
+
+def test_a_failed_install_in_the_candidate_job_reaches_the_other_job(tmp_path: Path) -> None:
+    called, _ = _phase_run(tmp_path, "candidate", harness_error="Installing failed")
+    assert called[0].endswith("/uvx")  # no project to run: lgcov alone can write the file
+    assert "--candidate-out" in called
+    assert called[called.index("--harness-error") + 1] == "Installing failed"
+
+
+def test_the_evaluate_phase_reads_the_pr_as_data_with_lgcov_from_the_action(tmp_path: Path) -> None:
+    data = tmp_path / "pr"
+    data.mkdir()
+    called, _ = _phase_run(tmp_path, "evaluate", str(data))
+    assert called[0] == f"{tmp_path}/evaluator/lgcov"  # never .venv/bin/lgcov
+    assert Path(called[1]).resolve() == data.resolve()
+    assert called[called.index("--candidate-in") + 1] == (
+        f"{tmp_path}/lgcov-candidate/candidate.json"
+    )
+    assert called[called.index("--policy-dir") + 1] == "/base"
+    assert "--candidate-out" not in called and "--harness-error" not in called
+
+
+def test_the_evaluate_phase_with_no_pr_commit_gives_no_verdict(tmp_path: Path) -> None:
+    called, _ = _phase_run(tmp_path, "evaluate")
+    assert called[0] == f"{tmp_path}/evaluator/lgcov"
+    assert "could not read the PR's commit" in called[called.index("--harness-error") + 1]
+
+
+def test_the_evaluate_phase_with_no_way_into_the_pr_s_commit_gives_no_verdict(
+    tmp_path: Path,
+) -> None:
+    called, _ = _phase_run(tmp_path, "evaluate", str(tmp_path / "no-such-folder"))
+    assert Path(called[1]).resolve() == tmp_path.resolve()
+    assert "could not read the PR's commit" in called[called.index("--harness-error") + 1]
+
+
+def test_the_evaluate_phase_with_no_lgcov_gives_no_verdict(tmp_path: Path) -> None:
+    data = tmp_path / "pr"
+    data.mkdir()
+    _executable(tmp_path / "evaluator" / "lgcov", "exit 127\n")
+    script = _step("Run lgcov").replace('"$EVALUATOR"', f'"{tmp_path}/no/such/lgcov"')
+    out = tmp_path / "github_output"
+    out.touch()
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "ACTION_PATH": str(tmp_path),
+        "EVENT_NAME": "pull_request",
+        "BASE_DIR": "/base",
+        "HARNESS_ERROR": "",
+        "LIVE": "false",
+        "FAIL_ON_INCONCLUSIVE": "false",
+        "ON_DIVERGENCE": "flag",
+        "FAIL_ON": "root-drift",
+        **dict.fromkeys(("GRAPH", "CASSETTE_DIR", "TAXONOMY", "BUDGET_SECONDS", "TIER"), ""),
+        **dict.fromkeys(("NIGHTLY_URL", "COVERAGE_BASELINE", "APPROVED_BY", "CI_STATUS"), ""),
+        "MODE": "enforcing",
+        "PHASE": "evaluate",
+        "PR_DIR": str(data),
+    }
+    result = subprocess.run(
+        [*GITHUB_BASH, script], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    outputs = out.read_text(encoding="utf-8")
+    assert "exit-code=2\n" in outputs and "verdict=error\n" in outputs
+    assert "lgcov could not start" in (tmp_path / "lgcov" / "report.md").read_text(encoding="utf-8")
+
+
+def test_the_evaluate_phase_is_told_where_the_pr_and_lgcov_are() -> None:
+    run = {str(s.get("name")): s for s in _steps()}["Run lgcov"]
+    env = _dict(run["env"])
+    assert env["PHASE"] == "${{ inputs.phase }}"
+    assert env["PR_DIR"] == "${{ steps.base.outputs.pr-dir }}"
+    assert env["EVALUATOR"] == "${{ runner.temp }}/lgcov-venv/bin/lgcov"
+
+
+def test_the_verify_step_is_told_the_phase_and_where_lgcov_is() -> None:
+    # Without them it would still work, through uvx, with no lock behind what it installs.
+    verify = {str(s.get("name")): s for s in _steps()}["Verify the result"]
+    env = _dict(verify["env"])
+    assert env["PHASE"] == "${{ inputs.phase }}"
+    assert env["EVALUATOR"] == "${{ runner.temp }}/lgcov-venv/bin/lgcov"
+
+
+def _verify_in_phase(tmp_path: Path, phase: str) -> list[str]:
+    _executable(tmp_path / "bin" / "uvx", FAKE_LGCOV)
+    _executable(tmp_path / "evaluator" / "lgcov", FAKE_LGCOV)
+    out, report = tmp_path / "github_output", tmp_path / "report.md"
+    out.touch()
+    report.write_text("## 🟢 lgcov: pass\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "ACTION_PATH": str(tmp_path),
+        "UV_PYTHON": "3.12",
+        "REPORT_PATH": str(report),
+        "BASE_SHA": "a" * 40,
+        "HEAD_SHA": "b" * 40,
+        "BASE_DIR": "/base",
+        "TAXONOMY": "",
+        "FAIL_ON": "root-drift",
+        "PHASE": phase,
+        "EVALUATOR": str(tmp_path / "evaluator" / "lgcov"),
+    }
+    result = subprocess.run(
+        [*GITHUB_BASH, _step("Verify the result")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return (tmp_path / "called").read_text(encoding="utf-8").splitlines()
+
+
+def test_the_evaluate_phase_verifies_with_the_same_lgcov(tmp_path: Path) -> None:
+    assert _verify_in_phase(tmp_path, "evaluate")[0] == f"{tmp_path}/evaluator/lgcov"
+
+
+def test_one_job_verifies_with_lgcov_from_the_action(tmp_path: Path) -> None:
+    assert _verify_in_phase(tmp_path, "all")[0].endswith("/uvx")
+
+
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    return done.stdout.decode().strip()
+
+
+@pytest.fixture
+def commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str, str]:
+    """A repo with a base commit, then a PR's, which holds a symlink out of the checkout."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for who in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{who}_NAME", "lgcov test")
+        monkeypatch.setenv(f"GIT_{who}_EMAIL", "test@example.invalid")
+    repo = tmp_path / "repo"
+    (repo / "cassettes").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    (repo / "cassettes" / "baseline.json").write_text("{}\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "cassettes" / "baseline.json").unlink()
+    (repo / "cassettes" / "baseline.json").symlink_to("/etc/passwd")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "the PR")
+    return repo, base, _git(repo, "rev-parse", "HEAD")
+
+
+def _commits_step(cwd: Path, tmp_path: Path, phase: str, base: str, pr: str) -> tuple[str, str]:
+    """Run the step that checks the commits out: the outputs it set, and what it printed."""
+    out = tmp_path / "github_output"
+    out.write_text("", encoding="utf-8")
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(out),
+        "BASE_SHA": base,
+        "PR_SHA": pr,
+        "PHASE": phase,
+        "GH_TOKEN": "s3cret",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    result = subprocess.run(
+        [*GITHUB_BASH, _step("Check out the commits")],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return out.read_text(encoding="utf-8"), result.stdout + result.stderr
+
+
+def test_the_pr_s_commit_is_data_so_a_symlink_in_it_leads_nowhere(
+    commits: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    repo, base, pr = commits
+    outputs, _ = _commits_step(repo, tmp_path, "evaluate", base, pr)
+    assert f"dir={tmp_path}/lgcov-base\n" in outputs
+    assert f"pr-dir={tmp_path}/lgcov-pr\n" in outputs
+    linked = tmp_path / "lgcov-pr" / "cassettes" / "baseline.json"
+    assert not linked.is_symlink()
+    assert linked.read_text(encoding="utf-8") == "/etc/passwd"
+    # A plain file where the commit has a symlink isn't an uncommitted change the lock warns of.
+    assert _git(tmp_path / "lgcov-pr", "status", "--porcelain") == ""
+    assert _git(tmp_path / "lgcov-pr", "rev-parse", "HEAD") == pr
+    assert _git(tmp_path / "lgcov-base", "rev-parse", "HEAD") == base
+
+
+@pytest.mark.parametrize("phase", ["all", "candidate"])
+def test_the_other_phases_check_out_only_the_base(
+    commits: tuple[Path, str, str], tmp_path: Path, phase: str
+) -> None:
+    repo, base, pr = commits
+    outputs, _ = _commits_step(repo, tmp_path, phase, base, pr)
+    assert outputs == f"dir={tmp_path}/lgcov-base\n"
+    assert not (tmp_path / "lgcov-pr").exists()
+
+
+def test_a_push_has_no_base_but_still_reads_its_commit_as_data(
+    commits: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    repo, _, pr = commits
+    outputs, _ = _commits_step(repo, tmp_path, "evaluate", "", pr)
+    assert outputs == f"pr-dir={tmp_path}/lgcov-pr\n"
+
+
+def test_commits_that_cannot_be_checked_out_are_for_lgcov_to_report(
+    commits: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    # Unknown to the repo, and no remote to fetch from. No outputs, so the run gives no verdict.
+    repo, _, _ = commits
+    outputs, printed = _commits_step(repo, tmp_path, "evaluate", "c" * 40, "d" * 40)
+    assert outputs == ""
+    assert "could not check out the base commit" in printed
+    assert "could not check out the PR's commit" in printed
+
+
+def _fake_git(tmp_path: Path, fetch: str) -> None:
+    _executable(
+        tmp_path / "bin" / "git",
+        f'case "$1" in\n  cat-file) exit 1 ;;\n  fetch) {fetch} ;;\n  *) exit 0 ;;\nesac\n',
+    )
+
+
+def test_a_fetch_that_needs_the_token_gets_it_just_for_that(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A candidate job has persist-credentials: false, so a private repo's fetch fails without it.
+    _fake_git(
+        tmp_path,
+        'if [ -z "${GIT_CONFIG_VALUE_0:-}" ]; then exit 1; fi; '
+        'printf "%s\\n" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" > "$RUNNER_TEMP/auth"',
+    )
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    outputs, printed = _commits_step(tmp_path, tmp_path, "candidate", "a" * 40, "")
+    assert outputs == f"dir={tmp_path}/lgcov-base\n"
+    key, value = (tmp_path / "auth").read_text(encoding="utf-8").splitlines()
+    encoded = base64.b64encode(b"x-access-token:s3cret").decode()
+    assert (key, value) == ("http.extraheader", f"AUTHORIZATION: basic {encoded}")
+    assert "s3cret" not in printed and encoded not in printed
+
+
+def test_a_fetch_that_needs_no_token_never_sees_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_git(
+        tmp_path,
+        'if [ -n "${GIT_CONFIG_VALUE_0:-}" ]; then touch "$RUNNER_TEMP/auth"; fi; exit 0',
+    )
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    outputs, _ = _commits_step(tmp_path, tmp_path, "candidate", "a" * 40, "")
+    assert outputs == f"dir={tmp_path}/lgcov-base\n"
+    assert not (tmp_path / "auth").exists()
+
+
+def test_the_commits_step_gets_the_token_and_no_other_later_step_with_the_pr_s_code_does() -> None:
+    steps = {str(s.get("name")): s for s in _steps()}
+    env = _dict(steps["Check out the commits"]["env"])
+    assert env["GH_TOKEN"] == "${{ inputs.github-token }}"
+    assert env["PR_SHA"] == "${{ github.sha }}"
+    assert env["PHASE"] == "${{ inputs.phase }}"
+    for name in ("Install your project and lgcov", "Run lgcov", "Upload what this job did"):
+        assert "github-token" not in str(steps[name]), name
