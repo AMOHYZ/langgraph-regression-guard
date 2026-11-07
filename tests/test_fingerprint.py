@@ -1,5 +1,6 @@
 """Code fingerprints: what makes `lgcov replay` re-run a node instead of serving it."""
 
+import copy
 import importlib.util
 import subprocess
 import sys
@@ -101,6 +102,62 @@ def node(state):
     return {"a": Config().name}
 """
 
+# The same, with what keeps a class's id outside a plain ref: each kind of decorator's info, on the
+# class, a parent and a class it holds, and the ref of a parametrized generic.
+DECORATED = """\
+from typing import Generic, TypeVar
+from pydantic import (
+    BaseModel,
+    computed_field,
+    field_serializer,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+
+T = TypeVar("T")
+
+class Box(BaseModel, Generic[T]):
+    item: T
+
+class Parent(BaseModel):
+    size: int = 1
+
+    @field_validator("size", mode="after")
+    @classmethod
+    def positive(cls, value):
+        return abs(value)
+
+class Config(Parent):
+    box: Box[int] | None = None
+    name: str = "old"
+
+    @model_validator(mode="after")
+    def named(self):
+        return self
+
+    @field_serializer("name", when_used="always")
+    def spoken(self, value):
+        return value.strip()
+
+    @computed_field
+    @property
+    def label(self) -> str:
+        return self.name.title()
+
+class Whole(BaseModel):
+    config: Config = Config()
+
+    @model_serializer(mode="plain", when_used="always")
+    def dumped(self):
+        return {"config": self.config.name.lower()}
+
+def node(state):
+    return {"a": Whole().config.name}
+"""
+
+USES_HELPER = "from {name} import helper\n\ndef node(state):\n    return {{'a': helper()}}\n"
+
 FINGERPRINT_A_FILE = """\
 import importlib.util, sys
 from lgcov.fingerprint import fingerprint
@@ -111,18 +168,24 @@ print(fingerprint(module.node))
 """
 
 
-def test_a_pydantic_class_keeps_its_fingerprint_from_another_checkout(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source", [PYDANTIC, DECORATED], ids=["fields", "decorators"])
+def test_a_pydantic_class_keeps_its_fingerprint_from_another_checkout(
+    tmp_path: Path, source: str
+) -> None:
     (tmp_path / "base").mkdir()
     (tmp_path / "head").mkdir()
-    base = _module(tmp_path / "base" / "graph.py", PYDANTIC)
-    head = _module(tmp_path / "head" / "graph.py", PYDANTIC)
+    base = _module(tmp_path / "base" / "graph.py", source)
+    head = _module(tmp_path / "head" / "graph.py", source)
     assert fingerprint(base.node) == fingerprint(head.node) is not None
 
 
 @pytest.mark.slow
-def test_a_pydantic_class_keeps_its_fingerprint_in_another_process(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source", [PYDANTIC, DECORATED], ids=["fields", "decorators"])
+def test_a_pydantic_class_keeps_its_fingerprint_in_another_process(
+    tmp_path: Path, source: str
+) -> None:
     path = tmp_path / "graph.py"
-    path.write_text(PYDANTIC, encoding="utf-8")
+    path.write_text(source, encoding="utf-8")
     found = {
         subprocess.run(
             [sys.executable, "-c", FINGERPRINT_A_FILE, str(path)],
@@ -152,6 +215,82 @@ def test_an_edit_to_a_pydantic_class_counts(tmp_path: Path, old: str, new: str) 
     head = _module(tmp_path / "head" / "graph.py", PYDANTIC.replace(old, new))
     assert fingerprint(base.node) is not None
     assert fingerprint(base.node) != fingerprint(head.node)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("abs(value)", "-abs(value)"),  # a field validator on a parent class
+        ('"size", mode="after"', '"size", mode="before"'),  # when it runs
+        ("return self\n", "assert self.name\n        return self\n"),  # a model validator
+        ("value.strip()", "value.lower()"),  # a field serializer
+        ('"name", when_used="always"', '"name", when_used="json"'),  # when it runs
+        ("name.title()", "name.upper()"),  # a computed field
+        ("name.lower()", "name.casefold()"),  # a model serializer
+        ("Box[int]", "Box[str]"),  # a generic's type argument
+    ],
+)
+def test_an_edit_to_a_decorated_pydantic_class_counts(tmp_path: Path, old: str, new: str) -> None:
+    assert DECORATED.replace(old, new) != DECORATED
+    (tmp_path / "base").mkdir()
+    (tmp_path / "head").mkdir()
+    base = _module(tmp_path / "base" / "graph.py", DECORATED)
+    head = _module(tmp_path / "head" / "graph.py", DECORATED.replace(old, new))
+    assert fingerprint(base.node) is not None
+    assert fingerprint(base.node) != fingerprint(head.node)
+
+
+def test_setting_an_attribute_keeps_a_pydantic_class_s_fingerprint(tmp_path: Path) -> None:
+    # pydantic caches a handler on the class the first time a run sets that attribute. A served
+    # node sets nothing, so the next case would otherwise miss the step recorded for it.
+    graph = _module(tmp_path / "graph.py", PYDANTIC)
+    before = fingerprint(graph.node)
+    graph.Config().name = "new"
+    assert fingerprint(graph.node) == before is not None
+
+
+def test_copying_an_instance_keeps_its_class_s_fingerprint(tmp_path: Path) -> None:
+    # copy and pickle leave `__slotnames__` on the class, and lgcov deep-copies state itself.
+    src = "from dataclasses import dataclass\n\n@dataclass\nclass Plan:\n    steps: int = 3\n\n"
+    graph = _module(tmp_path / "graph.py", src + "def node(state):\n    return {'a': Plan}\n")
+    before = fingerprint(graph.node)
+    copy.deepcopy(graph.Plan())
+    assert fingerprint(graph.node) == before is not None
+
+
+@pytest.mark.parametrize("folder", ["site-packages", "dist-packages"])
+def test_code_installed_outside_this_environment_counts_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str
+) -> None:
+    # `uv run --with` puts a new environment in front of the project's: `sys.prefix` is the new
+    # one, and what's installed in the other is still library code. An upgrade is no edit.
+    site = tmp_path / "env" / "lib" / "python3.12" / folder
+    site.mkdir(parents=True)
+    monkeypatch.syspath_prepend(str(site))
+    name = f"lgcov_fp_{folder.replace('-', '_')}"
+    library = site / f"{name}.py"
+    library.write_text("def helper():\n    return 1\n", encoding="utf-8")
+    graph = _module(tmp_path / "graph.py", USES_HELPER.format(name=name))
+    before = fingerprint(graph.node)
+    library.write_text("def helper():\n    return 2\n", encoding="utf-8")
+    assert fingerprint(graph.node) == before is not None
+
+
+def test_a_project_file_linked_into_site_packages_still_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `flit install --symlink` leaves the code in the project, where an edit has to count.
+    site = tmp_path / "env" / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    monkeypatch.syspath_prepend(str(site))
+    source = tmp_path / "lgcov_fp_linked.py"
+    source.write_text("def helper():\n    return 1\n", encoding="utf-8")
+    (site / source.name).symlink_to(source)
+    graph = _module(tmp_path / "graph.py", USES_HELPER.format(name=source.stem))
+    before = fingerprint(graph.node)
+    assert before is not None
+    source.write_text("def helper():\n    return 2\n", encoding="utf-8")
+    assert fingerprint(graph.node) != before
 
 
 def test_code_it_cannot_vouch_for_has_no_fingerprint(tmp_path: Path) -> None:

@@ -11,6 +11,8 @@
 - A served step's ids are fitted to the run's own; if they can't be, it runs live and reports `rebind_skipped` (#56).
 - A node that returns `Command` is served, and a change to where it sends the run is drift (#59).
 - A node that reaches a pydantic class keeps its fingerprint across processes, so it's served when unchanged (#65).
+- That now holds for a class with a validator, serializer, computed field or generic, and setting an attribute or copying an instance no longer changes a fingerprint. Such a node ran live on every replay, and a model's new answer read as drift.
+- Packages in any `site-packages` folder count as library code, as under `uv run --with`. After upgrading, re-record a node that reaches a project pydantic class: until then it runs live.
 - The first real PR through `lgcov bench`, open_deep_research #163, scored as a pilot: one PR, one question (#61, #62, #63, #64).
 - On a PR the gate reads `lgcov.yaml`, the taxonomy and the bands from the base commit, so a PR can't change what grades it; the first adoption PR is advisory. [What this doesn't stop yet](docs/trust-boundary.md).
 - `lgcov ci --result-out` binds the result to the commits and the policy, and `lgcov verify-result` checks it before the PR comment; a mismatch posts no verdict and exits 2.

@@ -3,15 +3,18 @@
 The fingerprint hashes the function's source text, its defaults, its closure values and
 the values of the global names its code uses, following functions, classes and modules
 from project files the same way. Library code (under the Python installation, the
-virtualenv or the user site-packages) counts by qualified name; any other object by its
-class, its repr with memory addresses removed, and the project functions it holds. Source
-is read from the file, never from a cache a same-size edit can leave stale, and nothing
-depends on paths, line numbers or the process, so a cassette replays from another checkout.
-A pydantic class counts by its members and core schema, without the schema's class ids.
+virtualenv, the user site-packages or any folder named site-packages) counts by qualified
+name; any other object by its class, its repr with memory addresses removed, and the project
+functions it holds. Source is read from the file, never from a cache a same-size edit can
+leave stale, and nothing depends on paths, line numbers or the process, so a cassette replays
+from another checkout. A pydantic class counts by its members and core schema, without the
+schema's class ids.
 
 Not seen: what a node reads at run time (files, environment, network), library upgrades,
 and changes an object's repr hides. A node that uses a compiled graph, or code with no
-readable source, gets no fingerprint (None) and always runs live.
+readable source, gets no fingerprint (None) and always runs live. Code installed anywhere else
+(`pip install --target`, `UV_LINK_MODE=symlink`) counts as project code, which can only make a
+node run live: an upgrade counts as an edit, and a cassette recorded elsewhere doesn't match.
 """
 
 import functools
@@ -28,9 +31,15 @@ from langgraph.pregel import Pregel
 _PREFIXES = (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 _LIBRARY = tuple(Path(p).resolve() for p in (*_PREFIXES, site.getusersitepackages()))
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
+# Where packages install, for what `sys.prefix` misses: `uv run --with` puts the project's
+# environment behind a new one. Only the resolved path counts, so a project file symlinked into
+# one of these, as `flit install --symlink` does, stays project code and an edit to it is seen.
+_SITE_DIRS = frozenset({"site-packages", "dist-packages"})
 # Class attributes that follow the module name or the file layout, not behaviour. pydantic's
 # validator and serializer are built from the class's schema, which counts; their reprs print
-# addresses and a map whose order changes with each process.
+# addresses and a map whose order changes with each process. Its decorator info repeats the schema
+# and the decorated functions, which are members, with the class's id. Its setattr handlers are a
+# cache that fills as a run sets attributes.
 _CLASS_NOISE = frozenset(
     {
         "__module__",
@@ -41,10 +50,13 @@ _CLASS_NOISE = frozenset(
         "__weakref__",
         "__pydantic_validator__",
         "__pydantic_serializer__",
+        "__pydantic_decorators__",
+        "__pydantic_setattr_handlers__",
+        "__slotnames__",  # a cache copy and pickle leave on a class
     }
 )
-# A ref in a pydantic schema ends in the class's id: "graph.Color:140247150680384".
-_SCHEMA_ID = re.compile(r":\d+$")
+# A ref in a pydantic schema holds class ids: "graph.Box:140247150680384[int:4344949472]".
+_SCHEMA_ID = re.compile(r":\d+")
 
 
 def fingerprint(fn: object) -> str | None:
@@ -61,7 +73,9 @@ def _in_project(path: str | None) -> bool:
     if not path or not Path(path).is_file():
         return False
     resolved = Path(path).resolve()
-    return not any(resolved.is_relative_to(root) for root in _LIBRARY)
+    return _SITE_DIRS.isdisjoint(resolved.parts) and not any(
+        resolved.is_relative_to(root) for root in _LIBRARY
+    )
 
 
 def _name(value: FunctionType | type) -> str:
