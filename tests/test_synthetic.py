@@ -5,13 +5,15 @@ import socket
 from collections import Counter
 from functools import cache
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import yaml
 
 from examples.demo_agent.graph import graph as demo_graph
 from examples.demo_agent.mutations import MUTATIONS, NOT_ON_DEMO, build, outcome_ok
-from lgcov.cassette import Cassette, Step, runs_from_json
+from examples.synthetic_agents import fanout, subgraph
+from lgcov.cassette import Cassette, Step, record, runs_from_json
 from lgcov.snapshot import snapshot_from_compiled
 from lgcov.synthetic import Case, Label, Mutation, generate
 
@@ -176,3 +178,65 @@ def test_generating_every_case_opens_no_connection(monkeypatch: pytest.MonkeyPat
     for operator in MUTATIONS:
         for seed in SEEDS:
             _case(operator, seed)
+
+
+# The 2 classes the demo can't hold, on graphs that have a fan-out and a subgraph.
+# The agent, the class, a word from the edit, the edited node, its label on each question.
+OTHER_GRAPHS = [
+    (fanout, "send_fan_out_drop", "first 2", "plan", "regressed", "regressed"),
+    (fanout, "send_fan_out_drop", "order question", "plan", "regressed", "inert"),
+    (fanout, "prompt_edit", "cheerful", "worker_b", "benign", "benign"),
+    (fanout, "retrieval_k_change", "1 to 0", "worker_b", "regressed", "regressed"),
+    (subgraph, "subgraph_output_change", "cut", "sub.inner", "regressed", "regressed"),
+    (subgraph, "subgraph_output_change", "style", "sub.inner", "benign", "benign"),
+    (subgraph, "subgraph_output_change", "built differently", "sub.inner", "inert", "inert"),
+    (subgraph, "model_swap", "last 8", "after", "regressed", "regressed"),
+]
+
+
+@pytest.mark.parametrize(
+    ("agent", "operator", "edit", "edited_node", "on_order", "on_hours"), OTHER_GRAPHS
+)
+def test_the_other_graphs_edits_get_their_labels(
+    agent: ModuleType, operator: str, edit: str, edited_node: str, on_order: str, on_hours: str
+) -> None:
+    mutation = next(m for m in agent.MUTATIONS[operator] if edit in m.variant)
+    assert mutation.edited_node == edited_node
+    found = {}
+    for question in (ORDER, HOURS):
+        base = record(agent.graph, {"question": question})
+        case = generate(operator, (mutation,), (base,), agent.outcome_ok, 0)
+        found[question] = case.truth.label
+    assert found == {ORDER: on_order, HOURS: on_hours}
+
+
+def test_every_edit_on_the_other_graphs_is_pinned_above() -> None:
+    pinned = Counter((agent, operator) for agent, operator, *_ in OTHER_GRAPHS)
+    assert pinned == {
+        (agent, operator): len(mutations)
+        for agent in (fanout, subgraph)
+        for operator, mutations in agent.MUTATIONS.items()
+    }
+
+
+def test_the_fan_out_drop_is_a_conditional_edge_edit_and_the_rest_are_not() -> None:
+    assert all(m.edit_kind == "conditional_edge" for m in fanout.MUTATIONS["send_fan_out_drop"])
+    others = [m for op, ms in fanout.MUTATIONS.items() if op != "send_fan_out_drop" for m in ms]
+    others += [m for ms in subgraph.MUTATIONS.values() for m in ms]
+    assert others and all(m.edit_kind == "node_body" for m in others)
+
+
+def test_every_class_in_the_mutation_list_has_an_edit_on_some_graph() -> None:
+    doc = yaml.safe_load((ROOT / "docs" / "mutations.yaml").read_text("utf-8"))
+    covered = MUTATIONS.keys() | fanout.MUTATIONS.keys() | subgraph.MUTATIONS.keys()
+    assert covered == {e["operator"] for e in doc["operators"]}
+
+
+@pytest.mark.parametrize("agent", [fanout, subgraph])
+def test_with_no_edit_the_other_graphs_record_the_same_run(agent: ModuleType) -> None:
+    assert snapshot_from_compiled(agent.build()) == snapshot_from_compiled(agent.graph)
+    for question in (ORDER, HOURS):
+        base = record(agent.graph, {"question": question})
+        assert agent.outcome_ok(base)
+        for _ in range(20):  # the fan-out's workers run in parallel: their order mustn't flip
+            assert record(agent.build(), {"question": question}) == base
