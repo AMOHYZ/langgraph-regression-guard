@@ -1,0 +1,460 @@
+{
+  "date": "2026-11-07",
+  "cases": 72,
+  "edits": 24,
+  "agents": 3,
+  "classes": 8,
+  "labels": {
+    "regressed": 31,
+    "inert": 17,
+    "benign": 24
+  },
+  "all_edits": [
+    {
+      "method": "lgcov root",
+      "cases": {
+        "precision": {
+          "hits": 17,
+          "of": 55,
+          "value": 0.3090909090909091
+        },
+        "recall": {
+          "hits": 17,
+          "of": 31,
+          "value": 0.5483870967741935
+        },
+        "coverage": {
+          "hits": 38,
+          "of": 55,
+          "value": 0.6909090909090909
+        },
+        "false_flag": {
+          "hits": 24,
+          "of": 24,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 7,
+          "of": 21,
+          "value": 0.3333333333333333
+        },
+        "recall": {
+          "hits": 7,
+          "of": 12,
+          "value": 0.5833333333333334
+        },
+        "coverage": {
+          "hits": 15,
+          "of": 21,
+          "value": 0.7142857142857143
+        },
+        "false_flag": {
+          "hits": 9,
+          "of": 9,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "edited node from the diff",
+      "cases": {
+        "precision": {
+          "hits": 31,
+          "of": 72,
+          "value": 0.4305555555555556
+        },
+        "recall": {
+          "hits": 31,
+          "of": 31,
+          "value": 1.0
+        },
+        "coverage": {
+          "hits": 55,
+          "of": 55,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 24,
+          "of": 24,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 12,
+          "of": 24,
+          "value": 0.5
+        },
+        "recall": {
+          "hits": 12,
+          "of": 12,
+          "value": 1.0
+        },
+        "coverage": {
+          "hits": 21,
+          "of": 21,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 9,
+          "of": 9,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "first divergence",
+      "cases": {
+        "precision": {
+          "hits": 17,
+          "of": 55,
+          "value": 0.3090909090909091
+        },
+        "recall": {
+          "hits": 17,
+          "of": 31,
+          "value": 0.5483870967741935
+        },
+        "coverage": {
+          "hits": 38,
+          "of": 55,
+          "value": 0.6909090909090909
+        },
+        "false_flag": {
+          "hits": 24,
+          "of": 24,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 7,
+          "of": 21,
+          "value": 0.3333333333333333
+        },
+        "recall": {
+          "hits": 7,
+          "of": 12,
+          "value": 0.5833333333333334
+        },
+        "coverage": {
+          "hits": 15,
+          "of": 21,
+          "value": 0.7142857142857143
+        },
+        "false_flag": {
+          "hits": 9,
+          "of": 9,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "end-to-end",
+      "cases": {
+        "precision": {
+          "hits": 0,
+          "of": 0,
+          "value": null
+        },
+        "recall": {
+          "hits": 0,
+          "of": 31,
+          "value": 0.0
+        },
+        "coverage": {
+          "hits": 0,
+          "of": 55,
+          "value": 0.0
+        },
+        "false_flag": {
+          "hits": 0,
+          "of": 24,
+          "value": 0.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 0,
+          "of": 0,
+          "value": null
+        },
+        "recall": {
+          "hits": 0,
+          "of": 12,
+          "value": 0.0
+        },
+        "coverage": {
+          "hits": 0,
+          "of": 21,
+          "value": 0.0
+        },
+        "false_flag": {
+          "hits": 0,
+          "of": 9,
+          "value": 0.0
+        }
+      }
+    }
+  ],
+  "single_node": [
+    {
+      "method": "lgcov root",
+      "cases": {
+        "precision": {
+          "hits": 17,
+          "of": 44,
+          "value": 0.38636363636363635
+        },
+        "recall": {
+          "hits": 17,
+          "of": 20,
+          "value": 0.85
+        },
+        "coverage": {
+          "hits": 38,
+          "of": 44,
+          "value": 0.8636363636363636
+        },
+        "false_flag": {
+          "hits": 24,
+          "of": 24,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 7,
+          "of": 17,
+          "value": 0.4117647058823529
+        },
+        "recall": {
+          "hits": 7,
+          "of": 8,
+          "value": 0.875
+        },
+        "coverage": {
+          "hits": 15,
+          "of": 17,
+          "value": 0.8823529411764706
+        },
+        "false_flag": {
+          "hits": 9,
+          "of": 9,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "edited node from the diff",
+      "cases": {
+        "precision": {
+          "hits": 20,
+          "of": 57,
+          "value": 0.3508771929824561
+        },
+        "recall": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        },
+        "coverage": {
+          "hits": 44,
+          "of": 44,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 24,
+          "of": 24,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 8,
+          "of": 19,
+          "value": 0.42105263157894735
+        },
+        "recall": {
+          "hits": 8,
+          "of": 8,
+          "value": 1.0
+        },
+        "coverage": {
+          "hits": 17,
+          "of": 17,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 9,
+          "of": 9,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "first divergence",
+      "cases": {
+        "precision": {
+          "hits": 17,
+          "of": 44,
+          "value": 0.38636363636363635
+        },
+        "recall": {
+          "hits": 17,
+          "of": 20,
+          "value": 0.85
+        },
+        "coverage": {
+          "hits": 38,
+          "of": 44,
+          "value": 0.8636363636363636
+        },
+        "false_flag": {
+          "hits": 24,
+          "of": 24,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 7,
+          "of": 17,
+          "value": 0.4117647058823529
+        },
+        "recall": {
+          "hits": 7,
+          "of": 8,
+          "value": 0.875
+        },
+        "coverage": {
+          "hits": 15,
+          "of": 17,
+          "value": 0.8823529411764706
+        },
+        "false_flag": {
+          "hits": 9,
+          "of": 9,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "end-to-end",
+      "cases": {
+        "precision": {
+          "hits": 0,
+          "of": 0,
+          "value": null
+        },
+        "recall": {
+          "hits": 0,
+          "of": 20,
+          "value": 0.0
+        },
+        "coverage": {
+          "hits": 0,
+          "of": 44,
+          "value": 0.0
+        },
+        "false_flag": {
+          "hits": 0,
+          "of": 24,
+          "value": 0.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 0,
+          "of": 0,
+          "value": null
+        },
+        "recall": {
+          "hits": 0,
+          "of": 8,
+          "value": 0.0
+        },
+        "coverage": {
+          "hits": 0,
+          "of": 17,
+          "value": 0.0
+        },
+        "false_flag": {
+          "hits": 0,
+          "of": 9,
+          "value": 0.0
+        }
+      }
+    }
+  ],
+  "end_to_end_caught": {
+    "hits": 31,
+    "of": 31,
+    "value": 1.0
+  },
+  "end_to_end_false": {
+    "hits": 22,
+    "of": 24,
+    "value": 0.9166666666666666
+  },
+  "aa": [
+    {
+      "agent": "demo",
+      "arm": "re-record",
+      "note": "0 by construction: a control, not a measurement",
+      "runs": 30,
+      "drifted": 0,
+      "outcome_flips": 0
+    },
+    {
+      "agent": "demo",
+      "arm": "served replay",
+      "note": "0 by construction: a control, not a measurement",
+      "runs": 30,
+      "drifted": 0,
+      "outcome_flips": 0
+    },
+    {
+      "agent": "demo",
+      "arm": "seeded noise",
+      "note": "wiring test, noise rate set by us, not a real-world flip estimate",
+      "runs": 30,
+      "drifted": 5,
+      "outcome_flips": 4
+    },
+    {
+      "agent": "fanout",
+      "arm": "re-record",
+      "note": "0 by construction: a control, not a measurement",
+      "runs": 30,
+      "drifted": 0,
+      "outcome_flips": 0
+    },
+    {
+      "agent": "fanout",
+      "arm": "served replay",
+      "note": "0 by construction: a control, not a measurement",
+      "runs": 30,
+      "drifted": 0,
+      "outcome_flips": 0
+    },
+    {
+      "agent": "subgraph",
+      "arm": "re-record",
+      "note": "0 by construction: a control, not a measurement",
+      "runs": 30,
+      "drifted": 0,
+      "outcome_flips": 0
+    },
+    {
+      "agent": "subgraph",
+      "arm": "served replay",
+      "note": "0 by construction: a control, not a measurement",
+      "runs": 30,
+      "drifted": 0,
+      "outcome_flips": 0
+    }
+  ]
+}

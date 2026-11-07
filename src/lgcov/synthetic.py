@@ -2,10 +2,6 @@
 Its truth: the edited node, whether the edit activated, whether the end-to-end outcome regressed.
 Offline only: recorded cassettes and fake models, with no network, API keys or paid calls."""
 
-# TODO(T121): `lgcov bench --synthetic`: precision, recall and coverage vs edited-node,
-# first-divergence and end-to-end baselines.
-# TODO(T121): a "synthetic" section in docs/benchmark.md, kept separate from real PRs.
-
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
