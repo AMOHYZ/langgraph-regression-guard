@@ -1,0 +1,1 @@
+{"api_spend_usd": 0.42, "cases": 6, "judge_calls": 30, "labels_added": 2, "overridden": true, "override_reason": "The judge marked a correct refund answer as wrong.", "pr": "example/agent#1", "repeats": 5, "schema": 1, "time_to_node_minutes": 12.0, "verdict": "fail", "wall_seconds": 180.0}

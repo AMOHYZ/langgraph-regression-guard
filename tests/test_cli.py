@@ -207,6 +207,7 @@ LGCOV_COMMANDS = (
     "taxonomy approve",
     "import langsmith",
     "bench",
+    "metrics summary",
     "selfcheck",
 )
 
