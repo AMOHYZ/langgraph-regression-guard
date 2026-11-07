@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -2536,3 +2537,11 @@ def test_every_single_node_miss_lgcov_makes_is_parent_only_naming_of_a_subgraph(
         and c.truth.edited_node not in _lgcov_root(c)
     ]
     assert misses and all(found == ("sub.inner", {"sub"}) for found in misses)
+
+
+def test_docs_benchmark_md_holds_the_current_synthetic_section(tmp_path: Path) -> None:
+    fresh = tmp_path / "b.md"
+    assert main(["bench", "--synthetic", "--out", str(fresh), "--json", str(tmp_path / "r")]) == 0
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "benchmark.md").read_text("utf-8")
+    undated = re.compile(r"^Run \d{4}-\d\d-\d\d:", re.MULTILINE)
+    assert undated.sub("Run:", fresh.read_text("utf-8")).strip() in undated.sub("Run:", doc)
