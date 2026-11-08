@@ -20,6 +20,8 @@ jobs:
       - uses: ./
         with:
           phase: candidate
+          # The demo's KPIs: only this input turns on the KPI gate (L2), and both jobs get it.
+          taxonomy: examples/demo_agent/taxonomy.yaml
 
   # T179: this job decides, and no PR's code runs in it: on the base's checkout, `uses: ./` is the
   # base's action.yml. So a change to the Action only reaches this job on the PR after it merges.
@@ -38,3 +40,4 @@ jobs:
       - uses: ./
         with:
           phase: evaluate
+          taxonomy: examples/demo_agent/taxonomy.yaml

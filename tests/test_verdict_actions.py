@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from lgcov.ci_report import MARKER, CiResult, Timing, render_ci_report
+from lgcov.ci_report import MARKER, CiResult, Tally, Timing, render_ci_report
 from lgcov.judges import KPI
 from lgcov.sampling import Sample, gate_kpis, kpi_stats
 from lgcov.slices import group_kpis
@@ -312,6 +312,9 @@ DRIFT = (
     "|---|---|---|",
     "| `respond` | root | 2/2 |",
 )
+TOUCHED = Tally(2, 2, ("respond",))  # DRIFT's runs; NO_DRIFT's are UNTOUCHED
+UNTOUCHED = Tally(2, 0)
+TOUCHED_0, UNTOUCHED_0 = replace(TOUCHED, worse=0), replace(UNTOUCHED, worse=0)  # KPIs judged
 RAN = Timing(12.0, 9.0, judges=3.0, live=2, served=3, judge_calls=8, budget=90)
 BASE = CiResult("root-drift", tier="pr")
 
@@ -331,7 +334,7 @@ UNDECIDED = replace(
     gate=GateFindings("INCONCLUSIVE", 1),
     l2_lines=_kpi_rows("| tone | 8 | ⚠️ INCONCLUSIVE |", "| ⚠️ underpowered: need 66 more cases |"),
 )
-DRIFTED = replace(BASE, replay_lines=DRIFT, root_drift=("respond",))
+DRIFTED = replace(BASE, replay_lines=DRIFT, root_drift=("respond",), tally=TOUCHED)
 LOADING = "cannot load graph: ImportError: boom"
 L2_CRASHED = "L2 gate failed: RuntimeError: boom"
 UNCHECKED = "Not checked (budget hit): run 1 from `respond` (`respond`)."
@@ -346,6 +349,7 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             first_adoption=True,
             replay_lines=DRIFT,
             root_drift=("respond",),
+            tally=TOUCHED_0,
             l2_lines=(*SHIPPED.l2_lines, "", "**What SHIP and BLOCK guarantee.** SHIP needs..."),
         ),
         0,
@@ -358,7 +362,11 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
         1,
         "fail",
     ),
-    "policy_drift": (replace(SHIPPED, replay_lines=DRIFT, root_drift=("respond",)), 1, "fail"),
+    "policy_drift": (
+        replace(SHIPPED, replay_lines=DRIFT, root_drift=("respond",), tally=TOUCHED_0),
+        1,
+        "fail",
+    ),
     "policy_code_check": (
         replace(
             SHIPPED,
@@ -367,6 +375,7 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             ),
             replay_lines=DRIFT,
             root_drift=("respond",),
+            tally=replace(TOUCHED, worse=1, worse_by_kpi=(("tone", 1),)),
             l2_lines=_kpi_rows(
                 TONE_SHIP, "| 🔴 new failure: tone on 1 of 8 cases: `run-0/respond` |"
             ),
@@ -382,6 +391,7 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             ),
             cassettes_edited=True,
             replay_lines=NO_DRIFT,
+            tally=replace(UNTOUCHED, worse=1, worse_by_kpi=(("tone", 1),)),
             notes=("⚠️ This PR changes `cassettes`, the expected outputs this gate compares.",),
         ),
         1,
@@ -394,6 +404,7 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             BASE,
             not_checked=("respond",),
             replay_lines=(*NO_DRIFT, "", UNCHECKED),
+            tally=UNTOUCHED,
             timing=replace(RAN, budget_hit=("respond", 88.4)),
         ),
         0,
@@ -414,6 +425,7 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             SHIPPED,
             cassettes_edited=True,
             replay_lines=NO_DRIFT,
+            tally=UNTOUCHED_0,
             notes=("⚠️ This PR changes `cassettes`, the expected outputs this gate compares.",),
         ),
         0,
@@ -437,12 +449,21 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
         "pass",
     ),
     "nothing_ran": (
-        replace(SHIPPED, replay_lines=NO_DRIFT, timing=replace(RAN, live=0, served=5)),
+        replace(
+            SHIPPED,
+            replay_lines=NO_DRIFT,
+            timing=replace(RAN, live=0, served=5),
+            tally=UNTOUCHED_0,
+        ),
         0,
         "pass",
     ),
-    "ship": (replace(SHIPPED, replay_lines=NO_DRIFT, timing=RAN), 0, "pass"),
-    "no_drift_no_kpi": (replace(BASE, replay_lines=NO_DRIFT, timing=RAN), 0, "pass"),
+    "ship": (replace(SHIPPED, replay_lines=NO_DRIFT, timing=RAN, tally=UNTOUCHED_0), 0, "pass"),
+    "no_drift_no_kpi": (
+        replace(BASE, replay_lines=NO_DRIFT, timing=RAN, tally=UNTOUCHED),
+        0,
+        "pass",
+    ),
     # A finding that stands, with the rest of the run lost to an infra failure.
     "drift_then_infra": (replace(DRIFTED, harness_error=L2_CRASHED), 1, "fail"),
     "drift_then_infra_advisory": (

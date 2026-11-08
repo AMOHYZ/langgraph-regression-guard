@@ -3,19 +3,24 @@
 The fingerprint hashes the function's source text, its defaults, its closure values and
 the values of the global names its code uses, following functions, classes and modules
 from project files the same way. Library code (under the Python installation, the
-virtualenv or the user site-packages) counts by qualified name; any other object by its
-class, its repr with memory addresses removed, and the project functions it holds. Source
-is read from the file, never from a cache a same-size edit can leave stale, and nothing
-depends on paths, line numbers or the process, so a cassette replays from another checkout.
-A pydantic class counts by its members and core schema, without the schema's class ids.
+virtualenv, the user site-packages or any folder named site-packages) counts by qualified
+name; any other object by its class, its repr with memory addresses removed, and the project
+functions it holds. Source is read from the file, never from a cache a same-size edit can
+leave stale, and nothing depends on paths, line numbers or the process, so a cassette replays
+from another checkout. A class counts as its first use would leave it. A pydantic class
+counts by its members and core schema, without the schema's class ids.
 
 Not seen: what a node reads at run time (files, environment, network), library upgrades,
 and changes an object's repr hides. A node that uses a compiled graph, or code with no
-readable source, gets no fingerprint (None) and always runs live.
+readable source, gets no fingerprint (None) and always runs live. Code installed anywhere else
+(`pip install --target`, `UV_LINK_MODE=symlink`) counts as project code, which can only make a
+node run live: an upgrade counts as an edit, and a cassette recorded elsewhere doesn't match.
 """
 
+import contextlib
 import functools
 import hashlib
+import inspect
 import re
 import site
 import sys
@@ -24,13 +29,21 @@ from pathlib import Path
 from types import CodeType, FunctionType, MethodType, ModuleType
 
 from langgraph.pregel import Pregel
+from pydantic import BaseModel
+from pydantic.dataclasses import is_pydantic_dataclass, rebuild_dataclass
 
 _PREFIXES = (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 _LIBRARY = tuple(Path(p).resolve() for p in (*_PREFIXES, site.getusersitepackages()))
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
+# Where packages install, for what `sys.prefix` misses: `uv run --with` puts the project's
+# environment behind a new one. Only the resolved path counts, so a project file symlinked into
+# one of these, as `flit install --symlink` does, stays project code and an edit to it is seen.
+_SITE_DIRS = frozenset({"site-packages", "dist-packages"})
 # Class attributes that follow the module name or the file layout, not behaviour. pydantic's
 # validator and serializer are built from the class's schema, which counts; their reprs print
-# addresses and a map whose order changes with each process.
+# addresses and a map whose order changes with each process. Its decorator info repeats the schema
+# and the decorated functions, which are members, with the class's id. Its setattr handlers are a
+# cache that fills as a run sets attributes.
 _CLASS_NOISE = frozenset(
     {
         "__module__",
@@ -41,10 +54,13 @@ _CLASS_NOISE = frozenset(
         "__weakref__",
         "__pydantic_validator__",
         "__pydantic_serializer__",
+        "__pydantic_decorators__",
+        "__pydantic_setattr_handlers__",
+        "__slotnames__",  # a cache copy and pickle leave on a class
     }
 )
-# A ref in a pydantic schema ends in the class's id: "graph.Color:140247150680384".
-_SCHEMA_ID = re.compile(r":\d+$")
+# A ref in a pydantic schema holds class ids: "graph.Box:140247150680384[int:4344949472]".
+_SCHEMA_ID = re.compile(r":\d+")
 
 
 def fingerprint(fn: object) -> str | None:
@@ -61,7 +77,9 @@ def _in_project(path: str | None) -> bool:
     if not path or not Path(path).is_file():
         return False
     resolved = Path(path).resolve()
-    return not any(resolved.is_relative_to(root) for root in _LIBRARY)
+    return _SITE_DIRS.isdisjoint(resolved.parts) and not any(
+        resolved.is_relative_to(root) for root in _LIBRARY
+    )
 
 
 def _name(value: FunctionType | type) -> str:
@@ -87,6 +105,23 @@ def _schema(value: object) -> object:
         else _schema(v)
         for k, v in value.items()
     }
+
+
+def _finish_building(cls: type) -> None:
+    """Leave a class as its first use would, so that use changes nothing and no edit stays hidden.
+
+    A pydantic class with a forward reference or `defer_build` builds itself at first use: until
+    then its schema is a stand-in that hides its nested models. Python 3.14 computes annotations
+    at first read and keeps them on the class: until then a TypedDict's field types are in no
+    code of the project's. A name that can't be resolved stays as it is. Depth 0: lgcov's own
+    frames aren't where the class's names live. `BaseModel`, which the walk reaches when pydantic
+    itself counts as project code, isn't a model to build."""
+    if issubclass(cls, BaseModel) and cls is not BaseModel:
+        cls.model_rebuild(raise_errors=False, _parent_namespace_depth=0)
+    elif is_pydantic_dataclass(cls):
+        rebuild_dataclass(cls, raise_errors=False, _parent_namespace_depth=0)
+    with contextlib.suppress(Exception):
+        inspect.get_annotations(cls)
 
 
 def _function(fn: FunctionType, seen: dict[int, object]) -> str:
@@ -131,9 +166,10 @@ def _describe(value: object, names: frozenset[str], seen: dict[int, object]) -> 
             f"{n}={_describe(attrs[n], names, seen)}" for n in sorted(names & attrs.keys())
         )
     if isinstance(value, type):
-        module = sys.modules.get(value.__module__)  # None: a graph file lgcov loaded itself
+        module = sys.modules.get(value.__module__)  # None: not imported, so not a library
         if module is not None and not _in_project(getattr(module, "__file__", None)):
             return _name(value)
+        _finish_building(value)
         members = {k: v for k, v in vars(value).items() if k not in _CLASS_NOISE}
         if "__pydantic_core_schema__" in members:
             members["__pydantic_core_schema__"] = _schema(members["__pydantic_core_schema__"])

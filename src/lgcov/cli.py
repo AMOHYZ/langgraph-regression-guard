@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
-from types import CodeType
+from types import CodeType, ModuleType
 from typing import Any
 
 import yaml
@@ -31,6 +31,17 @@ from lgcov.attribution import (
     render_markdown,
     results_json,
     score,
+)
+from lgcov.bench_round import check as check_round
+from lgcov.bench_round import (
+    exposures,
+    ledger_lines,
+    lock_round,
+    new_round,
+    parse_ledger,
+    parse_round,
+    round_to_yaml,
+    tree_state,
 )
 from lgcov.calibration import (
     Band,
@@ -68,7 +79,7 @@ from lgcov.cassette import (
     runs_to_json,
     unservable,
 )
-from lgcov.ci_report import CiResult, Timing, render_ci_report
+from lgcov.ci_report import CiResult, Tally, Timing, render_ci_report
 from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import (
@@ -182,13 +193,7 @@ def _load_drafter(target: str) -> Drafter:
     path, sep, attr = target.rpartition(":")
     if not sep or not path or not attr:
         raise ValueError(f"client must be <file.py>:<attr>, got {target!r}")
-    name = Path(path).stem
-    spec = importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
-    if spec is None or spec.loader is None:
-        raise ValueError(f"cannot import {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    make = getattr(module, attr, None)
+    make = getattr(_import_file(path), attr, None)
     client = make() if callable(make) else None
     if not isinstance(client, Drafter):
         raise ValueError(f"{target} makes no drafting client (one with a propose method)")
@@ -274,18 +279,45 @@ class _SourceOnlyLoader(importlib.machinery.SourceFileLoader):
         return self.source_to_code(self.get_data(self.path), self.path)
 
 
-# Any: a compiled graph from user code; see cassette.record for why it stays untyped.
-def _load_graph(target: str) -> Any:
-    path, sep, attr = target.rpartition(":")
-    if not sep or not path or not attr:
-        raise ValueError(f"target must be <file.py>:<attr>, got {target!r}")
-    name = Path(path).stem
+def _hides_a_module(name: str, path: str) -> bool:
+    """Would the file, registered as `name`, hide a real module from every import of it, the
+    file's own too? Finding itself, or a graph lgcov loaded earlier, hides nothing."""
+    try:
+        found = importlib.util.find_spec(name)
+    except ImportError:  # a dotted stem with no such parent
+        return False
+    except ValueError:  # in sys.modules with no spec, as __main__ can be
+        return True
+    if found is None or isinstance(found.loader, _SourceOnlyLoader):
+        return False
+    return found.origin is None or Path(found.origin).resolve() != Path(path).resolve()
+
+
+def _import_file(path: str, name: str | None = None) -> ModuleType:
+    """Import a user's file and keep it in sys.modules, as an import does: the standard library,
+    pydantic and LangGraph look a class's module up there, while loading and while a node runs.
+
+    The name is the file's stem unless a real module has it. It stays the same from one run to
+    the next because fingerprints can include it (a pydantic ref, a dataclass's methods).
+    """
+    if name is None:
+        stem = Path(path).stem
+        name = f"lgcov_user_{stem}" if _hides_a_module(stem, path) else stem
     spec = importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot import {path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
-    graph = getattr(module, attr, None)
+    return module
+
+
+# Any: a compiled graph from user code; see cassette.record for why it stays untyped.
+def _load_graph(target: str, name: str | None = None) -> Any:
+    path, sep, attr = target.rpartition(":")
+    if not sep or not path or not attr:
+        raise ValueError(f"target must be <file.py>:<attr>, got {target!r}")
+    graph = getattr(_import_file(path, name), attr, None)
     if not hasattr(graph, "stream"):
         raise ValueError(f"{target} is not a compiled graph")
     return graph
@@ -815,7 +847,8 @@ def _base_diff(base_dir: str | None, target: str, head: GraphSnapshot) -> tuple[
         return _graph_diff_lines(diff_graphs(empty, head)), note
     try:
         # Exception: the base graph's own code or deps; not this PR's problem.
-        base = snapshot_from_compiled(_load_graph(base_target))
+        # A name of its own: head runs after this, and must still find head in sys.modules.
+        base = snapshot_from_compiled(_load_graph(base_target, "lgcov_base_graph"))
     except Exception as exc:
         return [], f"Could not load the base graph ({_harness_message('load', exc)}); skipped."
     return _graph_diff_lines(diff_graphs(base, head)), ""
@@ -1046,6 +1079,9 @@ def _evaluate(
     drifts = [d for d, _ in pairs]
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
+    # T199: the comment's tally line: each touched run's root, in run order, once each.
+    run_roots = dict.fromkeys(_run_root(run, d) for run, d in zip(runs, drifts, strict=True))
+    tally = Tally(len(runs), sum(1 for d in drifts if d), tuple(r for r in run_roots if r))
     # T083: coverage of the runs replay just did; nothing executes again for it.
     cov = snapshot_coverage(run.head, [[s.node for s in steps] for _, steps in pairs], args.commit)
     if args.coverage_out:
@@ -1081,6 +1117,7 @@ def _evaluate(
         ),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
+        tally=tally,
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
         under_floor=under_floor,
@@ -1134,8 +1171,14 @@ def _evaluate(
     groups = _groups(stats, l2[0], cfg, gate)
     findings = gate_findings(stats, groups)
     hidden = _hidden_failures(*l2, stats, [steps for _, steps in pairs], paired, stopped)
+    worse = {s.kpi: {*s.worse} for s in stats}
+    for failure in hidden:  # a re-baseline can't hide a run from the tally either
+        worse[failure.kpi] |= {*failure.cases}
+    by_kpi = tuple((kpi, len(cases)) for kpi, cases in worse.items() if cases)
+    runs_worse = {case.split("/", 1)[0] for cases in worse.values() for case in cases}  # run-{i}
     return replace(
         result,
+        tally=replace(tally, worse=len(runs_worse), worse_by_kpi=by_kpi) if stats else tally,
         gate=replace(
             findings, infra=findings.infra or bool(policy.llm_code), hidden_failures=hidden
         ),
@@ -2404,6 +2447,84 @@ def _selfcheck_cmd(argv: list[str]) -> int:
     return 0 if all_ok else 1
 
 
+def _round_ledger(path: Path) -> str:
+    """The exposure ledger next to a round file; '' before its first row."""
+    ledger = path.with_name("exposure.jsonl")
+    return ledger.read_text(encoding="utf-8") if ledger.exists() else ""
+
+
+def _append_ledger(path: Path, lines: str) -> None:
+    with path.with_name("exposure.jsonl").open("a", encoding="utf-8") as ledger:
+        ledger.write(lines)
+
+
+def _round_lock(path: Path, now: str) -> int:
+    """T119: refuses tracked changes anywhere and untracked files in the round's folder; an
+    untracked file elsewhere only gets a warning, since it can't change what the round locks."""
+    round_ = parse_round(path.read_text(encoding="utf-8"))
+    rows = parse_ledger(_round_ledger(path))
+    folder = str(path.resolve().parent)
+    if _head(folder) is None:
+        raise ValueError(f"{folder} isn't a git checkout with a commit, so nothing can be locked")
+    status = _git_out(folder, "status", "--porcelain", "-z", "--untracked-files=all")
+    tree = tree_state(status, _git_out(folder, "rev-parse", "--show-prefix").strip())
+    if tree.tracked_changes:
+        raise ValueError(f"uncommitted changes: {', '.join(tree.tracked_changes)}")
+    if tree.untracked_in_folder:
+        raise ValueError(f"untracked in the round's folder: {', '.join(tree.untracked_in_folder)}")
+    if tree.untracked_elsewhere:
+        print(
+            f"warning: untracked, outside the round: {', '.join(tree.untracked_elsewhere)}",
+            file=sys.stderr,
+        )
+    locked, lock_rows = lock_round(round_, rows, now)
+    _append_ledger(path, ledger_lines(lock_rows))
+    path.write_text(round_to_yaml(locked), encoding="utf-8")
+    print(f"Locked round {locked.id}. Commit {path.name} and exposure.jsonl.")
+    return 0
+
+
+def _round_check(path: Path, run_id: str | None, now: str) -> int:
+    round_ = parse_round(path.read_text(encoding="utf-8"))
+    problems = check_round(round_, parse_ledger(_round_ledger(path)))
+    for problem in problems:
+        print(f"lgcov round check: {problem}", file=sys.stderr)
+    if problems:
+        return EXIT_ERROR
+    if run_id:
+        _append_ledger(path, ledger_lines(exposures(round_, run_id, now)))
+    print(f"Round {round_.id} is clean.")
+    return 0
+
+
+def _round_cmd(argv: list[str]) -> int:
+    """T119: a benchmark round: init writes a template, lock freezes it, check verifies it."""
+    ap = argparse.ArgumentParser(prog="lgcov round")
+    verbs = ap.add_subparsers(dest="verb", required=True)
+    init = verbs.add_parser("init", help="write an unfrozen round to fill in")
+    init.add_argument("--id", required=True, help="the round's id, unique in its ledger")
+    lock = verbs.add_parser("lock", help="freeze the round and record its SHAs in the ledger")
+    check = verbs.add_parser("check", help="exit 2 on a moved SHA or a re-exposed case")
+    check.add_argument("--record", metavar="RUN_ID", help="after a clean check, record this run")
+    for verb in (init, lock, check):
+        verb.add_argument("path", help="the round file; exposure.jsonl sits next to it")
+    args = ap.parse_args(argv)
+    path, now = Path(args.path), datetime.now(UTC).isoformat(timespec="seconds")
+    try:
+        if args.verb == "lock":
+            return _round_lock(path, now)
+        if args.verb == "check":
+            return _round_check(path, args.record, now)
+        if path.exists():
+            raise ValueError(f"{path} already exists")
+        path.write_text(round_to_yaml(new_round(args.id, now)), encoding="utf-8")
+        print(f"Wrote {path}. Fill in its candidates and cases, commit, then lock it.")
+        return 0
+    except (OSError, ValueError) as exc:
+        print(f"lgcov round {args.verb}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
 def _command(argv: list[str]) -> int | None:
     """Run the lgcov command argv names and return its exit code; None if it names none."""
     if argv[:1] == ["--version"]:
@@ -2429,6 +2550,8 @@ def _command(argv: list[str]) -> int | None:
         return _calibrate_cmd(argv[1:])
     if argv[:1] == ["review"]:
         return _review_cmd(argv[1:])
+    if argv[:1] == ["round"]:
+        return _round_cmd(argv[1:])
     if argv[:1] == ["bench"]:
         return _bench_cmd(argv[1:])
     if argv[:1] == ["metrics"]:
@@ -2501,6 +2624,9 @@ commands:
   taxonomy draft    draft failure modes and KPIs from traces, each pending review
   taxonomy approve  approve one drafted entry
   import langsmith  turn a LangSmith dataset's examples into lgcov cases
+  round init        write an unfrozen benchmark round to fill in
+  round lock        freeze a benchmark round and record its SHAs
+  round check       exit 2 if a locked SHA moved or a case was already exposed
   bench             score the root / propagated labels against hand-written ones
   metrics summary   summarize per-PR records: overridden blocks, label burden, cost, time
   selfcheck         run the harness on fixtures whose outcome is known

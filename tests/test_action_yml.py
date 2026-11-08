@@ -87,17 +87,20 @@ def test_dogfood_workflow_runs_on_prs_and_on_pushes_to_main() -> None:
     assert report["if"] == "${{ !cancelled() }}"
     assert _dict(report["permissions"])["pull-requests"] == "write"
     assert _dict(report["permissions"])["actions"] == "read"  # to download that baseline
+    # The demo's KPIs, so live runs here reach the KPI gate (L2). Both jobs get the same inputs.
+    taxonomy = "examples/demo_agent/taxonomy.yaml"
+    assert (ROOT / taxonomy).is_file()
     assert report["steps"] == [
         {
             "uses": "actions/checkout@v4",
             "with": {"ref": "${{ github.event.pull_request.base.sha }}"},
         },
-        {"uses": "./", "with": {"phase": "evaluate"}},
+        {"uses": "./", "with": {"phase": "evaluate", "taxonomy": taxonomy}},
     ]
     assert candidate["permissions"] == {"contents": "read"}
     assert candidate["steps"] == [
         {"uses": "actions/checkout@v4", "with": {"persist-credentials": False}},
-        {"uses": "./", "with": {"phase": "candidate"}},
+        {"uses": "./", "with": {"phase": "candidate", "taxonomy": taxonomy}},
     ]
     assert "permissions" not in workflow
 

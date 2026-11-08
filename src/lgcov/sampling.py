@@ -140,6 +140,7 @@ class KpiStats:
     cases: tuple[tuple[tuple[float, ...], tuple[float, ...]], ...] = ()  # T090: paired scores
     score_range: float = 1.0  # T150: the KPI's highest score minus its lowest
     new_failures: tuple[str, ...] = ()  # code judges: cases that passed on base, fail here
+    worse: tuple[str, ...] = ()  # T199, every judge: cases this PR scores lower than the base
 
     @property
     def flakiness(self) -> float:
@@ -185,6 +186,7 @@ def kpi_stats(
         )
     changed = [c for c in pairs if fmean(b_scores[c]) != fmean(n_scores[c])]
     new_failures = [c for c in changed if code and fmean(n_scores[c]) < fmean(b_scores[c])]
+    worse = [c for c in changed if fmean(n_scores[c]) < fmean(b_scores[c])]
     roots = sorted({case_roots[c] for c in changed if c in case_roots}) if case_roots else []
     confidence = {c.case_id: c.confidence for c in new_cases}
     outcome: GateOutcome = "infra_error" if infra else "needs_human"  # unless pairs decide
@@ -221,6 +223,7 @@ def kpi_stats(
         margin=margin,
         roots=tuple(roots),
         new_failures=tuple(new_failures),
+        worse=tuple(worse),
         score_range=max(kpi.score_map.values()) - min(kpi.score_map.values()),
     )
     return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence)[0]

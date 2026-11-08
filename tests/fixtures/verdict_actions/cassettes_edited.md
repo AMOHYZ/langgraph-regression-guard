@@ -1,6 +1,8 @@
 <!-- lgcov-report -->
 ## ⚠️ No decision: needs_human
 
+0 of 2 runs touched · 0 worse · root node: none
+
 **Next step:** Read the cassette diff and decide: this PR changed the expected outputs it is graded on, so lgcov can't vouch for it. This check exits 0 so that a re-baseline can land. That is not a pass.
 
 Statistical verdict: SHIP

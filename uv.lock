@@ -526,6 +526,7 @@ dependencies = [
     { name = "httpx" },
     { name = "langchain-core" },
     { name = "langgraph" },
+    { name = "pydantic" },
     { name = "pyyaml" },
 ]
 
@@ -543,6 +544,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain-core", specifier = ">=1.4.7" },
     { name = "langgraph", specifier = ">=1.2.16" },
+    { name = "pydantic", specifier = ">=2.14.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 

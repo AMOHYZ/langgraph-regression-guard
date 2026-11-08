@@ -13,8 +13,8 @@ import pytest
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from examples.synthetic_agents import AGENTS
-from lgcov.cassette import replay_run
-from lgcov.cli import _lgcov_root, main
+from lgcov.cassette import _codes, replay_run
+from lgcov.cli import _lgcov_root, _load_graph, main
 from lgcov.judges import KPI, NodeState, Verdict
 from lgcov.slices import Group
 from lgcov.synthetic import Case, every_case
@@ -206,6 +206,9 @@ LGCOV_COMMANDS = (
     "taxonomy draft",
     "taxonomy approve",
     "import langsmith",
+    "round init",
+    "round lock",
+    "round check",
     "bench",
     "metrics summary",
     "selfcheck",
@@ -466,6 +469,144 @@ def test_cli_replay_sees_edit_with_same_size_and_mtime(
     capsys.readouterr()
     assert main(["replay", "--config", str(cfg)]) == 1
     assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
+
+
+# A graph file stays in sys.modules: Python, pydantic and LangGraph look a class's module up there.
+_FUTURE = "from __future__ import annotations\n"
+_TYPED_DICT_STATE = "class State(TypedDict):\n    messages: Annotated[list, add_messages]\n"
+
+
+def _one_node(defs: str, answer: str, future: str = _FUTURE) -> str:
+    return f"""{future}from dataclasses import dataclass
+from typing import Annotated, Generic, Literal, Optional, TypedDict, TypeVar
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.graph.message import add_messages
+from pydantic import BaseModel
+State = MessagesState
+{defs}
+def node(state: State) -> State:
+    return {{"messages": [{{"role": "assistant", "content": {answer}}}]}}
+graph = StateGraph(State).add_node(node).add_edge(START, "node").compile()
+"""
+
+
+_GENERIC = 'T = TypeVar("T")\nclass B(BaseModel, Generic[T]):\n    v: T\nC = B[int]\n'
+_NEEDS_ITS_MODULE = {
+    "dataclass": _one_node('@dataclass\nclass C:\n    text: str = "ok"\n', "C().text"),
+    "pydantic_generic": _one_node(_GENERIC, "str(C(v=1).v)", future=""),
+    "typed_dict_state": _one_node(_TYPED_DICT_STATE, '"ok"'),
+    # This one fails inside the node, so being registered while it loads isn't enough.
+    "pydantic_model": _one_node(
+        'class C(BaseModel):\n    text: Optional[str] = "ok"\n', "C().text"
+    ),
+}
+_CLASSES = 'class R(BaseModel):\n    text: str = "old"\nclass C:\n    reply = R\n'
+_USES_CLASSES = _one_node(_CLASSES, "C.reply().text", future="")
+
+
+def _one_node_project(folder: Path, source: str) -> Path:
+    (folder / "graph.py").write_text(source, encoding="utf-8")
+    (folder / "inputs.json").write_text('[{"messages": [["user", "hi"]]}]', encoding="utf-8")
+    cfg = folder / "lgcov.yaml"
+    entry = f"graph_entrypoint: {folder / 'graph.py'}:graph\n"
+    cfg.write_text(f"{entry}cassette_dir: {folder / 'cassettes'}\n", encoding="utf-8")
+    return cfg
+
+
+@pytest.mark.parametrize("source", _NEEDS_ITS_MODULE.values(), ids=_NEEDS_ITS_MODULE)
+def test_cli_runs_a_graph_file_that_needs_its_module(tmp_path: Path, source: str) -> None:
+    cfg = _one_node_project(tmp_path, source)
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    assert main(["replay", "--live", "--config", str(cfg)]) == 0
+
+
+def test_cli_ci_runs_head_against_head_after_loading_a_base_of_the_same_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ci loads head, then the base's graph.py, then runs head. pydantic looks `Side` up in
+    # sys.modules at its first use, so it could find the base's and reject "head".
+    reply = 'class R(BaseModel):\n    side: Side\nSide = Literal["head"]\n'
+    source = _one_node(_TYPED_DICT_STATE + reply, 'R(side="head").side')
+    monkeypatch.chdir(tmp_path)
+    cfg = _one_node_project(tmp_path, source)
+    assert main(["record", "--config", str(cfg), "--inputs", "inputs.json"]) == 0
+    (tmp_path / "base").mkdir()
+    base = source.replace('Literal["head"]', 'Literal["base"]')
+    (tmp_path / "base" / "graph.py").write_text(base, encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--base-dir", "base", "--live")
+    assert code == 0
+    assert "No graph changes." in report  # the base needs its module too, to load at all
+
+
+def test_load_graph_leaves_a_package_named_like_the_file_importable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # src/agent/agent.py: registered as `agent`, the file would hide the package it imports,
+    # and left out, its classes would be looked up in that package, where `Annotated` isn't.
+    package = tmp_path / "acme_agent"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "state.py").write_text('TEXT = "ok"\n', encoding="utf-8")
+    source = _one_node(_TYPED_DICT_STATE, "TEXT").replace(
+        "from dataclasses", "from acme_agent.state import TEXT\nfrom dataclasses"
+    )
+    (package / "acme_agent.py").write_text(source, encoding="utf-8")
+    monkeypatch.syspath_prepend(tmp_path)
+    assert _load_graph(f"{package / 'acme_agent.py'}:graph") is not None
+    assert sys.modules["acme_agent"].__file__ == str(package / "__init__.py")
+
+
+def test_load_graph_leaves_a_real_module_named_like_the_file_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "json", json)  # put back after the test, whatever happens
+    path = tmp_path / "json.py"  # a class here counted as the stdlib's, so an edit went unseen
+    path.write_text(_USES_CLASSES, encoding="utf-8")
+    old = _codes(_load_graph(f"{path}:graph"))
+    assert sys.modules["json"] is json
+    path.write_text(_USES_CLASSES.replace('"old"', '"new"'), encoding="utf-8")
+    assert _codes(_load_graph(f"{path}:graph")) != old
+
+
+def test_load_graph_gives_a_node_the_input_its_annotation_names(tmp_path: Path) -> None:
+    # LangGraph narrows a node's input from its annotation, and quietly gives up if it can't
+    # resolve it. Left out of sys.modules, the node saw the whole state, unlike outside lgcov.
+    defs = (
+        "class State(TypedDict):\n    messages: list\n    secret: str\n"
+        "class Asked(TypedDict):\n    secret: Optional[str]\n"
+    )
+    source = _one_node(defs, '",".join(sorted(state))').replace("state: State", "state: Asked")
+    path = tmp_path / "graph.py"
+    path.write_text(source, encoding="utf-8")
+    done = _load_graph(f"{path}:graph").invoke({"messages": [], "secret": "s"})
+    assert done["messages"][0]["content"] == "secret"
+
+
+def test_load_graph_keeps_a_free_stem_and_the_fingerprint_from_before_it_was_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # fingerprint.py asks sys.modules, which now has the file. Its classes still count by what's
+    # in them, so a cassette recorded before it was registered still matches, and edits count.
+    import importlib.util
+
+    from lgcov.fingerprint import fingerprint
+
+    monkeypatch.delitem(sys.modules, "graph", raising=False)
+    path, other = tmp_path / "graph.py", tmp_path / "other" / "graph.py"
+    path.write_text(_USES_CLASSES, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("graph", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    recorded = fingerprint(module.node)
+    monkeypatch.syspath_prepend(tmp_path)  # the file finds itself, which hides nothing
+    assert _codes(_load_graph(f"{path}:graph"))["node"] == recorded is not None
+    assert sys.modules["graph"].__file__ == str(path)
+    # A later file by that name takes it: the earlier one was lgcov's own.
+    other.parent.mkdir()
+    other.write_text(_USES_CLASSES.replace('"old"', '"new"'), encoding="utf-8")
+    assert _codes(_load_graph(f"{other}:graph"))["node"] != recorded
+    assert sys.modules["graph"].__file__ == str(other)
 
 
 # T085: ignore_paths in lgcov.yaml reach `lgcov replay`.
@@ -1313,6 +1454,49 @@ def test_cli_ci_a_check_that_already_failed_on_the_base_is_not_a_new_failure(
     code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--live")
     assert (code, outputs["verdict"]) == (0, "needs_human")  # 2 cases can't SHIP
     assert "code check failed" not in report and "new failure" not in report
+
+
+# T199: the tally line under the comment's heading. PR 7, the demo PR, makes this change.
+PR_7 = ("a concise support", "a friendly, detailed support")
+
+
+def test_cli_ci_tally_line_for_the_demo_prompt_tweak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo)
+    _, report, _ = _run_ci(tmp_path)
+    assert report.splitlines()[3] == "0 of 2 runs touched · no KPI judged · root node: none"
+    tweaked = demo.replace(*PR_7)
+    assert tweaked != demo
+    (tmp_path / "graph.py").write_text(tweaked, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path)
+    assert report.splitlines()[1:4] == [
+        "## 🔴 lgcov: drift",
+        "",
+        "2 of 2 runs touched · no KPI judged · root node: `respond`",
+    ]
+    # With the demo's taxonomy: neither KPI reads the answer, so the prompt tweak can't lower one.
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", DEMO_TAXONOMY)
+    assert report.splitlines()[3] == "2 of 2 runs touched · 0 worse · root node: `respond`"
+
+
+def test_cli_ci_tally_line_counts_kpi_drops_and_names_the_first_runs_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _order_lookup_project(tmp_path, monkeypatch, ["Where is my order 1?", "Where is my order 999?"])
+    skipping = _skipping_the_lookup_for("999")
+    (tmp_path / "graph.py").write_text(skipping, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    want = "1 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `classify`"
+    assert report.splitlines()[3] == want
+    tweaked = skipping.replace(*PR_7)
+    assert tweaked != skipping
+    (tmp_path / "graph.py").write_text(tweaked, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    # Run 1's root comes first; the drift table's sorted list would put `classify` first.
+    want = "2 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `respond` +1 more"
+    assert report.splitlines()[3] == want
 
 
 @pytest.mark.parametrize(
@@ -2204,6 +2388,15 @@ def test_cli_taxonomy_draft_takes_its_client_from_a_file(tmp_path: Path) -> None
     ]
     assert main(["taxonomy", "draft", *args]) == 0
     assert "id: skipped_lookup" in out.read_text(encoding="utf-8")
+
+
+def test_cli_taxonomy_draft_loads_a_client_that_needs_its_module(tmp_path: Path) -> None:
+    client = CLIENT.replace("class Client:", '@dataclass\nclass Client:\n    name: str = "x"\n')
+    (tmp_path / "client.py").write_text(
+        f"{_FUTURE}from dataclasses import dataclass\n{client}", encoding="utf-8"
+    )
+    args = [*_draft_args(tmp_path), "--out", str(tmp_path / "draft.yaml")]
+    assert main(["taxonomy", "draft", *args, "--client", f"{tmp_path / 'client.py'}:Client"]) == 0
 
 
 def test_cli_taxonomy_draft_needs_a_client(

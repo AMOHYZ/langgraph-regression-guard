@@ -1,12 +1,21 @@
 # Attribution benchmark
 
-**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root precision is 1 of 1 (95% interval 0.21 to 1.00) and root recall is 1 of 6 on the pilot and 1 of 5 on the `gpt-6-luna` rerun. lgcov named the same single root both times.
+**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. On 72 synthetic cases from 24 edits, lgcov's root misses 14 of 31 regressed cases (5 of 12 by edit) and flags all 24 harmless ones, as do both node-naming baselines.
 
 ## What was measured
 
 Whether lgcov names the node a change broke (root) and the nodes that only inherited the damage (propagated), scored against hand-written labels. On the real PR, agent KPIs were also read from the saved runs, kept separate from those scores. Not measured: a judge on a real PR, and how much a live model's answers vary with no change at all.
 
 Each kind of evidence has its own section, and their numbers never combine: demo fixtures, synthetic cases and real PRs. `lgcov bench --synthetic` replaces only its own section. `lgcov bench` overwrites this whole file by default and writes only the demo fixtures table and its known gaps, so pass `--out` with another path and copy those in.
+
+## Limitations
+
+- **One real PR (n=1).** Both runs are the same PR and question, so they aren't two data points.
+- **The edited-node baseline beats lgcov on single-node edits,** on recall, 1.00 (20 of 20) against 0.85 (17 of 20), and on coverage, 1.00 (44 of 44) against 0.86 (38 of 44). lgcov is ahead only on case-level precision, 0.39 against 0.35: see [Synthetic](#synthetic).
+- **No harmless-edit discrimination yet.** lgcov and both node-naming baselines flag 24 of 24 harmless synthetic cases; negative controls (T123) and non-pinnable edits (T182) are the next tests.
+- **Synthetic cases come from our own generator,** so they share its assumptions about what an edit looks like; real PRs (T171) are the check.
+- **Usage counts are pending.** Request, token and error counts for the `gpt-6-luna` runs and the pilot still have to come from the usage page: see [Cost per run](#cost-per-run).
+- **More real PRs (T171) and a base-against-base run (T173) are pending.** Neither has run, so there are no numbers for them.
 
 ## Demo fixtures
 
@@ -246,3 +255,7 @@ From the OpenAI usage page: $0.84 in total for the 3 runs on 5 November. The pag
 | Pilot, `gpt-4.1` | $0.52 | Requests, tokens, errors |
 | `gpt-6-luna`, invalid and not scored | About $0.16 | Requests, tokens, errors |
 | `gpt-6-luna`, scored | About $0.16 | Requests, tokens, errors |
+
+## Rounds
+
+A [benchmark round](benchmark-rounds.md) locks a run's commits and cases, and an exposure ledger records which cases each candidate has seen. `lgcov round check` fails if a locked SHA moved or a case was already exposed to that candidate in another round. [The #163 round](benchmark/rounds/t101-163/lgcov-round.yaml) is locked retroactively: its runs came first.

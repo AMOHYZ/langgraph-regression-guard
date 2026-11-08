@@ -274,6 +274,11 @@ jobs:
 - A node's retry policy and error handler work as they do outside lgcov. Each attempt that
   raised counts as a live call and the report names the node, because what the attempt did
   before raising, like a write, still happened.
+- Under its heading, the report sums up the run in one line, e.g.
+  "1 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `classify`": the runs where
+  a node drifted, the runs a KPI's judge scored lower than on the base (each KPI's count in
+  brackets, or "no KPI judged"), and the first touched run's root node, with "+N more" when other
+  runs have another.
 - The report ends with where the time went, e.g. `⏱ 42 s · agent 31 s (3 live / 1 served)
   · judges 9 s (12 calls, 1.4k tokens) · budget 90 s`.
 - Two tiers. `pr` (the default) serves unchanged nodes, judges each case once, skips
