@@ -347,6 +347,13 @@ def test_a_code_judge_names_the_cases_that_newly_fail_and_only_those() -> None:
     assert kpi_stats(KPI_, 1, base, new).new_failures == ()
 
 
+def test_every_judge_names_the_cases_this_pr_scores_lower_and_only_those() -> None:
+    base = {"worse": [_scored(1.0)], "same": [_scored(1.0)], "better": [_scored(0.0)]}
+    new = {"worse": [_scored(0.0)], "same": [_scored(1.0)], "better": [_scored(1.0)]}
+    assert kpi_stats(KPI_, 1, base, new).worse == ("worse",)
+    assert kpi_stats(KPI_, 1, base, new, code=True).worse == ("worse",)
+
+
 @pytest.mark.parametrize(
     ("n", "decision"), [(8, "INCONCLUSIVE"), (200, "SHIP")], ids=["small suite", "large suite"]
 )

@@ -53,6 +53,28 @@ def format_timing(t: Timing) -> str:
 
 
 @dataclass(frozen=True)
+class Tally:
+    """T199: the line under the comment's heading: what replay and the KPI gate found, in runs."""
+
+    runs: int  # replay compared
+    touched: int  # runs where some node drifted
+    roots: tuple[str, ...] = ()  # each touched run's first node to drift, in run order, once each
+    worse: int | None = None  # runs some KPI scored lower than on the base; None: no KPI judged
+    worse_by_kpi: tuple[tuple[str, int], ...] = ()  # (KPI, runs it scored lower), table order
+
+
+def format_tally(t: Tally) -> str:
+    """E.g. ``2 of 3 runs touched · 1 worse (`tone` 1) · root node: `respond` +1 more``."""
+    worse = "no KPI judged" if t.worse is None else f"{t.worse} worse"
+    if t.worse_by_kpi:
+        worse += " (" + ", ".join(f"`{kpi}` {n}" for kpi, n in t.worse_by_kpi) + ")"
+    root = "none"
+    if t.roots:
+        root = f"`{t.roots[0]}`" + (f" +{len(t.roots) - 1} more" if len(t.roots) > 1 else "")
+    return f"{t.touched} of {t.runs} runs touched · {worse} · root node: {root}"
+
+
+@dataclass(frozen=True)
 class CiResult:
     fail_on: FailOn
     graph_lines: tuple[str, ...] = ()
@@ -74,6 +96,7 @@ class CiResult:
     inconclusive_blocks: bool = False  # T153: fail-on-inconclusive or gate.inconclusive_blocks
     not_checked: tuple[str, ...] = ()  # T089: nodes replay stopped before checking
     timing: Timing | None = None  # T089
+    tally: Tally | None = None  # T199; None: replay compared no runs, so no tally line
     tier: str = ""  # T089: pr or nightly
     lint_summary: str = ""  # T104: "🧹 Lint: 2 warnings"; never changes the exit code
     lint_lines: tuple[str, ...] = ()  # T104: one per finding
@@ -135,7 +158,10 @@ def _claiming_no_ship(body: str) -> str:
 
 def render_ci_report(r: CiResult) -> str:
     action = r.action
-    lines = [MARKER, f"## {action.headline}", "", f"**Next step:** {action.next_step}", ""]
+    lines = [MARKER, f"## {action.headline}", ""]
+    if r.tally is not None and action.verdict != "error":  # no counts for a PR it didn't check
+        lines += [format_tally(r.tally), ""]
+    lines += [f"**Next step:** {action.next_step}", ""]
     lines += [line for detail in action.details for line in (detail, "")]
     if r.crash:
         lines += [f"🔴 {r.crash}", ""]

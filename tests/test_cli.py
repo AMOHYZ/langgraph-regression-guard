@@ -1318,6 +1318,49 @@ def test_cli_ci_a_check_that_already_failed_on_the_base_is_not_a_new_failure(
     assert "code check failed" not in report and "new failure" not in report
 
 
+# T199: the tally line under the comment's heading. PR 7, the demo PR, makes this change.
+PR_7 = ("a concise support", "a friendly, detailed support")
+
+
+def test_cli_ci_tally_line_for_the_demo_prompt_tweak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo)
+    _, report, _ = _run_ci(tmp_path)
+    assert report.splitlines()[3] == "0 of 2 runs touched · no KPI judged · root node: none"
+    tweaked = demo.replace(*PR_7)
+    assert tweaked != demo
+    (tmp_path / "graph.py").write_text(tweaked, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path)
+    assert report.splitlines()[1:4] == [
+        "## 🔴 lgcov: drift",
+        "",
+        "2 of 2 runs touched · no KPI judged · root node: `respond`",
+    ]
+    # With the demo's taxonomy: neither KPI reads the answer, so the prompt tweak can't lower one.
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", DEMO_TAXONOMY)
+    assert report.splitlines()[3] == "2 of 2 runs touched · 0 worse · root node: `respond`"
+
+
+def test_cli_ci_tally_line_counts_kpi_drops_and_names_the_first_runs_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _order_lookup_project(tmp_path, monkeypatch, ["Where is my order 1?", "Where is my order 999?"])
+    skipping = _skipping_the_lookup_for("999")
+    (tmp_path / "graph.py").write_text(skipping, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    want = "1 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `classify`"
+    assert report.splitlines()[3] == want
+    tweaked = skipping.replace(*PR_7)
+    assert tweaked != skipping
+    (tmp_path / "graph.py").write_text(tweaked, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    # Run 1's root comes first; the drift table's sorted list would put `classify` first.
+    want = "2 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `respond` +1 more"
+    assert report.splitlines()[3] == want
+
+
 @pytest.mark.parametrize(
     "stop",
     [("--on-divergence", "fail"), ("--budget-seconds", "0")],

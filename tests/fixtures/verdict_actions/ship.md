@@ -1,6 +1,8 @@
 <!-- lgcov-report -->
 ## 🟢 lgcov: SHIP (1 blocking KPI)
 
+0 of 2 runs touched · 0 worse · root node: none
+
 **Next step:** Review as usual. SHIP covers these KPIs on the recorded cases, nothing else.
 
 Statistical verdict: SHIP
