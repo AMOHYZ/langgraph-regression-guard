@@ -79,7 +79,7 @@ from lgcov.cassette import (
     runs_to_json,
     unservable,
 )
-from lgcov.ci_report import CiResult, Timing, render_ci_report
+from lgcov.ci_report import CiResult, Tally, Timing, render_ci_report
 from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import (
@@ -1079,6 +1079,9 @@ def _evaluate(
     drifts = [d for d, _ in pairs]
     counts, roots = _drift_kinds(runs, drifts)
     root, downstream = sorted(roots), sorted(counts.keys() - roots)
+    # T199: the comment's tally line: each touched run's root, in run order, once each.
+    run_roots = dict.fromkeys(_run_root(run, d) for run, d in zip(runs, drifts, strict=True))
+    tally = Tally(len(runs), sum(1 for d in drifts if d), tuple(r for r in run_roots if r))
     # T083: coverage of the runs replay just did; nothing executes again for it.
     cov = snapshot_coverage(run.head, [[s.node for s in steps] for _, steps in pairs], args.commit)
     if args.coverage_out:
@@ -1114,6 +1117,7 @@ def _evaluate(
         ),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
+        tally=tally,
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
         under_floor=under_floor,
@@ -1167,8 +1171,14 @@ def _evaluate(
     groups = _groups(stats, l2[0], cfg, gate)
     findings = gate_findings(stats, groups)
     hidden = _hidden_failures(*l2, stats, [steps for _, steps in pairs], paired, stopped)
+    worse = {s.kpi: {*s.worse} for s in stats}
+    for failure in hidden:  # a re-baseline can't hide a run from the tally either
+        worse[failure.kpi] |= {*failure.cases}
+    by_kpi = tuple((kpi, len(cases)) for kpi, cases in worse.items() if cases)
+    runs_worse = {case.split("/", 1)[0] for cases in worse.values() for case in cases}  # run-{i}
     return replace(
         result,
+        tally=replace(tally, worse=len(runs_worse), worse_by_kpi=by_kpi) if stats else tally,
         gate=replace(
             findings, infra=findings.infra or bool(policy.llm_code), hidden_failures=hidden
         ),

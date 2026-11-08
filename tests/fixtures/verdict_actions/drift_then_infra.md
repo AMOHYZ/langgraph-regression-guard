@@ -1,6 +1,8 @@
 <!-- lgcov-report -->
 ## 🔴 lgcov: drift
 
+2 of 2 runs touched · no KPI judged · root node: `respond`
+
 **Next step:** Open the root node. If the change is intended, re-baseline with `lgcov cassette accept --nodes respond`; if not, fix it. Then fix the harness error and re-run.
 
 Statistical verdict: none (no blocking KPI judged)

@@ -1,6 +1,8 @@
 <!-- lgcov-report -->
 ## ⚠️ No decision: needs_human
 
+2 of 2 runs touched · no KPI judged · root node: `respond`
+
 **Next step:** Read the drift table and decide. `fail-on: never` means lgcov won't fail this check on drift. This check exits 0 because `fail-on: never` does not block on drift. That is not a pass.
 
 Statistical verdict: none (no blocking KPI judged)

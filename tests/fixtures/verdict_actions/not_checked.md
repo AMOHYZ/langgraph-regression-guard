@@ -1,6 +1,8 @@
 <!-- lgcov-report -->
 ## ⚠️ No decision: needs_human
 
+0 of 2 runs touched · no KPI judged · root node: none
+
 **Next step:** Re-run with a bigger budget or `on-divergence: flag`, or review `respond` yourself: lgcov did not check them. This check exits 0 because INCONCLUSIVE does not block by default. That is not a pass.
 
 Statistical verdict: none (no blocking KPI judged)

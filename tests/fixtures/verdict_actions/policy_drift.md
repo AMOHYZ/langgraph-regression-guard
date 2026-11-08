@@ -1,6 +1,8 @@
 <!-- lgcov-report -->
 ## 🔴 lgcov: drift
 
+2 of 2 runs touched · 0 worse · root node: `respond`
+
 **Next step:** Open the root node. If the change is intended, re-baseline with `lgcov cassette accept --nodes respond`; if not, fix it.
 
 Statistical verdict: SHIP
