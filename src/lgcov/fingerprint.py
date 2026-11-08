@@ -166,7 +166,7 @@ def _describe(value: object, names: frozenset[str], seen: dict[int, object]) -> 
             f"{n}={_describe(attrs[n], names, seen)}" for n in sorted(names & attrs.keys())
         )
     if isinstance(value, type):
-        module = sys.modules.get(value.__module__)  # None: a graph file lgcov loaded itself
+        module = sys.modules.get(value.__module__)  # None: not imported, so not a library
         if module is not None and not _in_project(getattr(module, "__file__", None)):
             return _name(value)
         _finish_building(value)

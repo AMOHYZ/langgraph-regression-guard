@@ -1,7 +1,6 @@
 """Code fingerprints: what makes `lgcov replay` re-run a node instead of serving it."""
 
 import copy
-import importlib.util
 import json
 import os
 import shutil
@@ -16,22 +15,16 @@ from types import ModuleType
 
 import pytest
 
+from lgcov.cli import _import_file
 from lgcov.fingerprint import fingerprint
 
 DEMO = (Path(__file__).parent / "fixtures" / "demo_graph.py").read_text(encoding="utf-8")
 
 
-def _module(path: Path, source: str, register: pytest.MonkeyPatch | None = None) -> ModuleType:
-    """Import `source` from `path` without registering it, as `lgcov replay` loads graphs, or
-    with `register`, as an imported project module is."""
+def _module(path: Path, source: str) -> ModuleType:
+    """Import `source` from `path` as `lgcov replay` loads graphs."""
     path.write_text(source, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    if register is not None:
-        register.setitem(sys.modules, path.stem, module)
-    spec.loader.exec_module(module)
-    return module
+    return _import_file(str(path))
 
 
 def test_same_code_moved_to_another_file_keeps_its_fingerprint(tmp_path: Path) -> None:
@@ -443,23 +436,21 @@ def test_copying_an_instance_keeps_its_class_s_fingerprint(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("source", NOT_BUILT.values(), ids=NOT_BUILT.keys())
-def test_an_edit_behind_a_class_not_built_yet_counts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
-) -> None:
+def test_an_edit_behind_a_class_not_built_yet_counts(tmp_path: Path, source: str) -> None:
     # Unseen, it would serve the old output: a PR's regression would pass.
     found = []
     for i, text in enumerate([source, source, source.replace("steps: int = 3", "steps: int = 9")]):
         (tmp_path / str(i)).mkdir()
-        found.append(fingerprint(_module(tmp_path / str(i) / "graph.py", text, monkeypatch).node))
+        found.append(fingerprint(_module(tmp_path / str(i) / "graph.py", text).node))
     assert found[0] is not None
     assert found[0] == found[1] != found[2]
 
 
 @pytest.mark.parametrize("source", NOT_BUILT.values(), ids=NOT_BUILT.keys())
 def test_first_use_keeps_the_fingerprint_of_a_class_not_built_yet(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+    tmp_path: Path, source: str
 ) -> None:
-    graph = _module(tmp_path / "graph.py", source, monkeypatch)
+    graph = _module(tmp_path / "graph.py", source)
     before = fingerprint(graph.node)
     assert graph.node({}) == {"a": 3}
     assert fingerprint(graph.node) == before is not None
