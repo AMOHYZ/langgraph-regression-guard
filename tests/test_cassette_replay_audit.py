@@ -33,6 +33,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Checkpointer, RetryPolicy
 
+from examples.demo_agent.mutations import build
 from lgcov.cassette import (
     Cassette,
     Halt,
@@ -44,7 +45,7 @@ from lgcov.cassette import (
     runs_from_json,
     runs_to_json,
 )
-from lgcov.cli import _divergence_lines, _load_graph, main
+from lgcov.cli import _divergence_lines, main
 from lgcov.messages import plain
 
 
@@ -635,7 +636,7 @@ def test_a_cassette_recorded_before_the_key_changed_is_still_served() -> None:
     saved = (demo / "cassettes" / "baseline.json").read_text(encoding="utf-8")
     held = {k for run in json.loads(saved)["runs"] for step in run["steps"] for k in step}
     assert held <= {"node", "input", "output", "code", "goto"}
-    graph = _load_graph(f"{demo / 'graph.py'}:graph")
+    graph = build()  # the agent as recorded: the demo PR edits graph.py's prompt
     done = [replay_run(graph, run, serve=True) for run in runs_from_json(saved)]
     assert [c.how for r in done for c in r.calls] == ["served"] * 5
     assert all(r.drifts == () for r in done)
