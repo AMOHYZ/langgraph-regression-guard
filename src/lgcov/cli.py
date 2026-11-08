@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
-from types import CodeType
+from types import CodeType, ModuleType
 from typing import Any
 
 import yaml
@@ -193,13 +193,7 @@ def _load_drafter(target: str) -> Drafter:
     path, sep, attr = target.rpartition(":")
     if not sep or not path or not attr:
         raise ValueError(f"client must be <file.py>:<attr>, got {target!r}")
-    name = Path(path).stem
-    spec = importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
-    if spec is None or spec.loader is None:
-        raise ValueError(f"cannot import {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    make = getattr(module, attr, None)
+    make = getattr(_import_file(path), attr, None)
     client = make() if callable(make) else None
     if not isinstance(client, Drafter):
         raise ValueError(f"{target} makes no drafting client (one with a propose method)")
@@ -285,18 +279,45 @@ class _SourceOnlyLoader(importlib.machinery.SourceFileLoader):
         return self.source_to_code(self.get_data(self.path), self.path)
 
 
-# Any: a compiled graph from user code; see cassette.record for why it stays untyped.
-def _load_graph(target: str) -> Any:
-    path, sep, attr = target.rpartition(":")
-    if not sep or not path or not attr:
-        raise ValueError(f"target must be <file.py>:<attr>, got {target!r}")
-    name = Path(path).stem
+def _hides_a_module(name: str, path: str) -> bool:
+    """Would the file, registered as `name`, hide a real module from every import of it, the
+    file's own too? Finding itself, or a graph lgcov loaded earlier, hides nothing."""
+    try:
+        found = importlib.util.find_spec(name)
+    except ImportError:  # a dotted stem with no such parent
+        return False
+    except ValueError:  # in sys.modules with no spec, as __main__ can be
+        return True
+    if found is None or isinstance(found.loader, _SourceOnlyLoader):
+        return False
+    return found.origin is None or Path(found.origin).resolve() != Path(path).resolve()
+
+
+def _import_file(path: str, name: str | None = None) -> ModuleType:
+    """Import a user's file and keep it in sys.modules, as an import does: the standard library,
+    pydantic and LangGraph look a class's module up there, while loading and while a node runs.
+
+    The name is the file's stem unless a real module has it. It stays the same from one run to
+    the next because fingerprints can include it (a pydantic ref, a dataclass's methods).
+    """
+    if name is None:
+        stem = Path(path).stem
+        name = f"lgcov_user_{stem}" if _hides_a_module(stem, path) else stem
     spec = importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot import {path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
-    graph = getattr(module, attr, None)
+    return module
+
+
+# Any: a compiled graph from user code; see cassette.record for why it stays untyped.
+def _load_graph(target: str, name: str | None = None) -> Any:
+    path, sep, attr = target.rpartition(":")
+    if not sep or not path or not attr:
+        raise ValueError(f"target must be <file.py>:<attr>, got {target!r}")
+    graph = getattr(_import_file(path, name), attr, None)
     if not hasattr(graph, "stream"):
         raise ValueError(f"{target} is not a compiled graph")
     return graph
@@ -826,7 +847,8 @@ def _base_diff(base_dir: str | None, target: str, head: GraphSnapshot) -> tuple[
         return _graph_diff_lines(diff_graphs(empty, head)), note
     try:
         # Exception: the base graph's own code or deps; not this PR's problem.
-        base = snapshot_from_compiled(_load_graph(base_target))
+        # A name of its own: head runs after this, and must still find head in sys.modules.
+        base = snapshot_from_compiled(_load_graph(base_target, "lgcov_base_graph"))
     except Exception as exc:
         return [], f"Could not load the base graph ({_harness_message('load', exc)}); skipped."
     return _graph_diff_lines(diff_graphs(base, head)), ""
