@@ -1,7 +1,6 @@
 """T121: the agents the synthetic suite edits. Offline: fake models or none."""
 
 from examples.demo_agent import mutations as demo
-from examples.demo_agent.graph import graph as demo_graph
 from examples.synthetic_agents import fanout, subgraph
 from lgcov.synthetic import Agent
 
@@ -11,7 +10,7 @@ QUESTIONS = ("Where is my order?", "Order status?", "What are your hours?")
 
 DEMO = Agent(
     "demo",
-    demo_graph,
+    demo.build(),  # the agent as recorded: the demo PR edits graph.py's prompt
     QUESTIONS,
     {
         operator: demo.MUTATIONS.get(operator, ()) + demo.MORE_MUTATIONS.get(operator, ())

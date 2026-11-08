@@ -167,6 +167,19 @@ def test_with_no_edit_the_pr_side_is_the_recording() -> None:
         assert case.pr == case.base and case.truth.label == "inert"
 
 
+def test_a_prompt_edit_in_graph_py_leaves_the_suite_on_the_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The demo PR's edit. Every case still compares against baseline.json, recorded before it,
+    # so neither build() nor DEMO may follow graph.py's SYSTEM_PROMPT.
+    monkeypatch.setattr(
+        "examples.demo_agent.graph.SYSTEM_PROMPT", "You are a friendly, detailed support agent."
+    )
+    for run in RUNS:
+        assert same_run(record(build(), run.inputs), run)
+        assert same_run(record(DEMO.graph, run.inputs), run)
+
+
 def test_only_the_edited_node_changes_its_code() -> None:
     for case in _every_case():
         recorded = {step.node: step.code for step in case.base.steps}
