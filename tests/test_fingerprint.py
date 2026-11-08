@@ -2,9 +2,14 @@
 
 import copy
 import importlib.util
+import json
+import os
+import shutil
 import subprocess
 import sys
+import sysconfig
 import typing
+import venv
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -215,6 +220,137 @@ spec.loader.exec_module(module)
 print(fingerprint(module.node))
 """
 
+# T206: one graph per cause, found on 7 Nov, of a fingerprint that changed in every process, so the
+# node was never served. Each node reaches a project pydantic class that uses only that.
+CAUSES = {
+    "validator": """\
+from pydantic import BaseModel, field_validator, model_validator
+
+class Parent(BaseModel):
+    size: int = 1
+
+    @field_validator("size", mode="after")
+    @classmethod
+    def positive(cls, value):
+        return abs(value)
+
+class Config(Parent):
+    @model_validator(mode="after")
+    def checked(self):
+        return self
+
+def node(state):
+    return {"a": str(Config(size=state["n"]).size)}
+""",
+    "serializer": """\
+from pydantic import BaseModel, field_serializer, model_serializer
+
+class Inner(BaseModel):
+    name: str = " old "
+
+    @field_serializer("name", when_used="always")
+    def spoken(self, value):
+        return value.strip()
+
+class Config(BaseModel):
+    inner: Inner = Inner()
+
+    @model_serializer(mode="plain")
+    def dumped(self):
+        return {"inner": self.inner.model_dump()}
+
+def node(state):
+    return {"a": f"{Config().model_dump()} {state['n']}"}
+""",
+    "computed_field": """\
+from pydantic import BaseModel, computed_field
+
+class Config(BaseModel):
+    name: str = "old"
+
+    @computed_field
+    @property
+    def label(self) -> str:
+        return self.name.title()
+
+def node(state):
+    return {"a": f"{Config().label} {state['n']}"}
+""",
+    "generic": """\
+from typing import Generic, TypeVar
+from pydantic import BaseModel
+
+T = TypeVar("T")
+
+class Box(BaseModel, Generic[T]):
+    item: T
+
+class Config(BaseModel):
+    box: Box[int] | None = None
+
+def node(state):
+    return {"a": str(Config(box={"item": state["n"]}).box.item)}
+""",
+    # The first case's run fills pydantic's setattr cache on the class. A served first case fills
+    # nothing, so the second case's recorded fingerprint was never matched.
+    "attribute_assignment": """\
+from pydantic import BaseModel
+
+class Config(BaseModel):
+    name: str = "old"
+
+def node(state):
+    config = Config()
+    config.name = f"new {state['n']}"
+    return {"a": config.name}
+""",
+}
+
+# A node reaching a LangChain message, whose validators and serializers made it run live wherever
+# installed code counted as project code.
+MESSAGE = """\
+from langchain_core.messages import AIMessage
+
+def node(state):
+    return {"a": AIMessage(content=f"hi {state['n']}").content}
+"""
+
+# What turns a node's file into a graph `lgcov replay` can load as `graph.py:graph`.
+AS_GRAPH = """
+from typing import TypedDict
+from langgraph.graph import END, START, StateGraph
+
+class State(TypedDict, total=False):
+    n: int
+    a: str
+
+builder = StateGraph(State)
+builder.add_node("node", node)
+builder.add_edge(START, "node")
+builder.add_edge("node", END)
+graph = builder.compile()
+"""
+
+# Run in a fresh process: record two cases from one load of the graph, as `lgcov record` does with
+# its inputs, or serve them as `lgcov replay` does. Prints each step's fingerprint and, when it
+# serves, how each call ran.
+RECORD_OR_SERVE = """\
+import json, sys
+from pathlib import Path
+from lgcov.cassette import record, replay_run, runs_from_json, runs_to_json
+from lgcov.cli import _load_graph
+
+mode, graph, saved = sys.argv[1], _load_graph(sys.argv[2] + ":graph"), Path(sys.argv[3])
+if mode == "record":
+    runs = [record(graph, {"n": n}) for n in (1, 2)]
+    saved.write_text(runs_to_json(runs))
+    hows = []
+else:
+    runs = [replay_run(graph, c, serve=True) for c in runs_from_json(saved.read_text())]
+    hows = [c.how for run in runs for c in run.calls]
+print(json.dumps({"codes": [s.code for run in runs for s in run.steps], "hows": hows}))
+"""
+
 
 @pytest.mark.parametrize("source", [PYDANTIC, DECORATED], ids=["fields", "decorators"])
 def test_a_pydantic_class_keeps_its_fingerprint_from_another_checkout(
@@ -412,6 +548,80 @@ def test_a_project_file_linked_into_site_packages_still_counts(
     assert before is not None
     source.write_text("def helper():\n    return 2\n", encoding="utf-8")
     assert fingerprint(graph.node) != before
+
+
+class _Found(typing.TypedDict):
+    codes: list[str | None]  # each step's fingerprint, in order
+    hows: list[str]  # how each call ran, when served
+
+
+def _record_then_serve(
+    graph: Path, python: str = sys.executable, env: dict[str, str] | None = None
+) -> tuple[_Found, _Found]:
+    """Record two cases in one fresh process, then serve them in another."""
+    saved = graph.with_name("runs.json")
+    found: list[_Found] = []
+    for mode in ("record", "serve"):
+        args = [python, "-c", RECORD_OR_SERVE, mode, str(graph), str(saved)]
+        done = subprocess.run(args, capture_output=True, text=True, env=env)
+        assert done.returncode == 0, done.stderr
+        found.append(json.loads(done.stdout))
+    return found[0], found[1]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("cause", CAUSES)
+def test_an_unchanged_node_is_served_from_a_fresh_process(tmp_path: Path, cause: str) -> None:
+    graph = tmp_path / "graph.py"
+    graph.write_text(CAUSES[cause] + AS_GRAPH, encoding="utf-8")
+    recorded, served = _record_then_serve(graph)
+    assert None not in recorded["codes"]
+    assert served["codes"] == recorded["codes"]  # what a fresh process makes of the same code
+    assert served["hows"] == ["served", "served"]
+
+
+def _uv_run_with(tmp_path: Path) -> tuple[str, dict[str, str]]:
+    # `uv run --with` puts a new environment in front of the project's, and the .pth file it writes
+    # there adds the project's site-packages: installed code is outside `sys.prefix`.
+    root = tmp_path / "overlay"
+    venv.create(root, symlinks=True)
+    site = sysconfig.get_path("purelib", "venv", vars={"base": str(root), "platbase": str(root)})
+    project = sysconfig.get_path("purelib")
+    Path(site, "_uv_ephemeral_overlay.pth").write_text(
+        f"import site; site.addsitedir({project!r})\n", encoding="utf-8"
+    )
+    return str(root / "bin" / "python"), dict(os.environ)
+
+
+def _uv_link_mode_symlink(tmp_path: Path) -> tuple[str, dict[str, str]]:
+    # UV_LINK_MODE=symlink links each installed file to uv's cache, so a file's resolved path is in
+    # no site-packages folder and under no prefix. Copies outside both stand in for the cache.
+    cache, linked = tmp_path / "cache", tmp_path / "linked"
+    for name in ("langchain_core", "pydantic", "pydantic_core"):
+        installed = Path(sysconfig.get_path("purelib"), name)
+        shutil.copytree(installed, cache / name, ignore=shutil.ignore_patterns("__pycache__"))
+    for file in cache.rglob("*"):
+        if file.is_file():
+            link = linked / file.relative_to(cache)
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(file)
+    path = os.pathsep.join(filter(None, [str(linked), os.environ.get("PYTHONPATH")]))
+    return sys.executable, {**os.environ, "PYTHONPATH": path}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "layout", [_uv_run_with, _uv_link_mode_symlink], ids=["uv_run_with", "uv_link_mode_symlink"]
+)
+def test_a_node_reaching_a_message_is_served_in_a_layered_install(
+    tmp_path: Path, layout: Callable[[Path], tuple[str, dict[str, str]]]
+) -> None:
+    graph = tmp_path / "graph.py"
+    graph.write_text(MESSAGE + AS_GRAPH, encoding="utf-8")
+    recorded, served = _record_then_serve(graph, *layout(tmp_path))
+    assert None not in recorded["codes"]
+    assert served["codes"] == recorded["codes"]
+    assert served["hows"] == ["served", "served"]
 
 
 def test_code_it_cannot_vouch_for_has_no_fingerprint(tmp_path: Path) -> None:
