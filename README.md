@@ -184,6 +184,9 @@ KPI that should catch it and its root and propagated labels, are in
 
 - **The key:** it comes from `LANGSMITH_API_KEY`.
 - **Region or self-hosting:** set `LANGSMITH_ENDPOINT` for an EU or self-hosted LangSmith.
+- **An org-scoped key** (one that works across workspaces) also needs
+  `LANGSMITH_WORKSPACE_ID`, the workspace's id. Without it LangSmith answers 403. The PR
+  report's experiment link reads the same three variables.
 
 With the key set:
 
