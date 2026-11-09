@@ -60,7 +60,9 @@ significant test; with no change, 4 runs in 2,000 met all three.
 
 **100 cases leave the gate undecided.** An unchanged PR SHIPs 62% of the time; the rest are
 INCONCLUSIVE. A drop of the full margin is BLOCKed 38% of the time. Neither is a wrong call, but
-both are a human's to settle.
+both are a human's to settle. At N = 100, the 38% of unchanged PRs left INCONCLUSIVE is the gate
+declining to call it on thin data, not a defect: more cases (N = 200 and up) are the lever, and
+part 2 of T151 measures that across the grid.
 
 ## Limits
 
