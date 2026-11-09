@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
+from langchain_core.load import dumpd
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -14,10 +15,12 @@ from langchain_core.messages import (
     RemoveMessage,
     SystemMessage,
     ToolMessage,
+    message_to_dict,
 )
+from langchain_core.messages.tool import ToolCall, tool_call
 from pydantic import BaseModel
 
-from lgcov.messages import decode, encode, key_fields, plain
+from lgcov.messages import decode, encode, key_fields, plain, run_tools
 
 
 def _round_trip(value: object) -> object:
@@ -209,3 +212,55 @@ def test_key_fields_read_a_chunk_as_the_message_it_becomes() -> None:
     )
     message = AIMessage("hi", id="m1", additional_kwargs=kwargs, response_metadata=metadata)
     assert key_fields(chunk) == key_fields(message)
+
+
+# T181: the tools a run called, for code judges' tool_called and tool_not_called.
+def _call(name: str, call_id: str | None = None, **args: object) -> ToolCall:
+    return tool_call(name=name, args=args, id=call_id)
+
+
+def _asking(*calls: ToolCall) -> AIMessage:
+    return AIMessage("", tool_calls=list(calls))
+
+
+def test_run_tools_lists_ai_message_calls_in_order_once_per_id() -> None:
+    first = _asking(_call("search", "c1", q="x"), _call("think", "c2"))
+    outputs = [
+        {"messages": [HumanMessage("q"), first, ToolMessage("r", tool_call_id="c1")]},
+        "a plain answer",
+        {"nested": {"deeper": [(_asking(_call("search", "c3")),)]}},
+        {"messages": [first]},  # a node that returns the whole list again: no new call
+    ]
+    assert run_tools(outputs) == ["search", "think", "search"]
+
+
+def test_run_tools_reads_a_chunk_and_skips_invalid_calls() -> None:
+    chunk = AIMessageChunk(
+        content="",
+        tool_call_chunks=[{"name": "search", "args": "{}", "id": "c1", "index": 0}],
+    )
+    bad = AIMessage("", invalid_tool_calls=[{"name": "s", "args": "{", "id": "c2", "error": "bad"}])
+    assert run_tools([{"m": [chunk, bad]}]) == ["search"]
+
+
+@pytest.mark.parametrize(
+    "saved",
+    [
+        {"type": "ai", "content": "", "tool_calls": [_call("search", "c1")]},
+        message_to_dict(_asking(_call("search", "c1"))),
+        {"langchain_message": message_to_dict(_asking(_call("search", "c1")))},
+        dumpd(_asking(_call("search", "c1"))),
+    ],
+    ids=["plain dict", "message_to_dict", "lgcov's saved form", "lc constructor"],
+)
+def test_run_tools_reads_a_message_saved_as_a_dict(saved: dict[str, object]) -> None:
+    assert run_tools([{"messages": [saved], "other": {"tool_calls": "not a message"}}]) == [
+        "search"
+    ]
+
+
+def test_run_tools_keeps_a_call_with_no_id_once_per_step_name_and_args() -> None:
+    once = {"type": "ai", "tool_calls": [{"name": "search", "args": {"q": "x"}}]}
+    twice = {"type": "ai", "tool_calls": [{"name": "search", "args": {"q": "y"}}]}
+    assert run_tools([{"m": [once, once, twice]}]) == ["search", "search"]
+    assert run_tools([{"m": [once]}, {"m": [once]}]) == ["search", "search"]  # one per step

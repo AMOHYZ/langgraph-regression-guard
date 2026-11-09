@@ -115,7 +115,7 @@ from lgcov.langsmith import (
 )
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
-from lgcov.messages import plain
+from lgcov.messages import plain, run_tools
 from lgcov.metrics import format_summary, parse_records, summarize
 from lgcov.normalize import normalize
 from lgcov.review import ReviewDecision, apply_decision
@@ -1126,6 +1126,7 @@ def _evaluate(
             *base_notes,
             *_removed_note(removed, cfg.cassette_dir),
             *policy.llm_notes,
+            *_whole_run_note(l2[0] if l2 else []),
             *([note] if note else []),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
             *_langsmith_notes(cfg.langsmith, args.commit),
@@ -1285,6 +1286,12 @@ def _llm_notes(
 
 def _quoted(names: list[str]) -> str:
     return ", ".join(f"`{n}`" for n in names)
+
+
+def _whole_run_note(specs: list[KPISpec]) -> list[str]:
+    """T181: a tool check reads every tool the run called, not only its KPI's node's (T210)."""
+    tools = [s.name for s in specs if (s.check or {}).get("type") in _TOOL_CHECKS]
+    return [f"⚠️ {_WHOLE_RUN}: {_quoted(tools)}."] if tools else []
 
 
 def _ci_gate(
@@ -1492,6 +1499,8 @@ def _verify_result_cmd(argv: list[str]) -> int:
 
 
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
+_TOOL_CHECKS = ("tool_called", "tool_not_called")
+_WHOLE_RUN = "node scope not applied to tool checks yet (whole-run)"
 # T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
 # never runs one, and a nightly run reports the KPIs it couldn't judge.
 _llm_judge: Callable[[KPI], Judge] | None = None
@@ -1564,14 +1573,16 @@ _Cases = dict[str, tuple[NodeState, NodeState]]
 def _l2_cases(spec: KPISpec, runs: list[list[Step]], stopped: Collection[int] = ()) -> _Cases:
     """One case per run: the trace for code judges, else the node's own input and output. A
     run in `stopped` has no whole-run case: its trace is cut off, and its last step isn't the
-    final one, so a code check would read as failed when it was never checked."""
+    final one, so a code check would read as failed when it was never checked. The trace's
+    tools are the whole run's, whatever node the KPI names (T181)."""
     cases: _Cases = {}
     for i, steps in enumerate(runs):
         if i in stopped and (spec.judge == "code" or spec.node == "final"):
             continue
         case_id = f"run-{i}/{spec.node}"
         if spec.judge == "code":
-            cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps]}})
+            tools = run_tools([s.output for s in steps])
+            cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps], "tools": tools}})
             continue
         if spec.node == "final":
             step = steps[-1] if steps else None
@@ -1749,6 +1760,8 @@ def _judge_cmd(argv: list[str]) -> int:
         return EXIT_ERROR
     if skipped:
         print("Skipped, no llm client: " + ", ".join(f"`{n}`" for n in skipped) + ".")
+    for line in _whole_run_note(specs):
+        print(line)
     try:
         advisory, flagged, calibration = _gate_bands(args.bands, every, replace(cfg, gate=gate))
     except (OSError, ValueError) as exc:

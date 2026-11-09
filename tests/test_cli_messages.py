@@ -221,6 +221,16 @@ def test_a_model_judge_is_sent_plain_json_not_message_objects(
     }
 
 
+def test_l2_cases_give_a_code_judge_the_recorded_runs_tool_calls(tmp_path: Path) -> None:
+    # T181: before, the trace held node names only, so tool_called could never pass.
+    _record(tmp_path)
+    runs = _load_runs(str(tmp_path / "cassettes" / "baseline.json"))
+    check = {"type": "tool_called", "tool": "search"}
+    spec = KPISpec("k", "f", "model", "code", "a description", "a rubric", check=check)
+    _, node_output = _l2_cases(spec, [r.steps for r in runs])["run-0/model"]
+    assert node_output == {"trace": {"nodes": ["model", "tools", "respond"], "tools": ["search"]}}
+
+
 def test_lgcov_review_override_saves_messages_as_plain_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

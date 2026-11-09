@@ -1456,6 +1456,119 @@ def test_cli_ci_a_check_that_already_failed_on_the_base_is_not_a_new_failure(
     assert "code check failed" not in report and "new failure" not in report
 
 
+# T181: tool checks see the tools a run called, read from the AI messages it recorded.
+TOOL_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: wrong_tool
+    description: An order question stops calling the order lookup, or calls a tool it must not.
+kpis:
+  - name: looks_up_the_order
+    failure_mode: wrong_tool
+    node: lookup_order
+    judge: code
+    description: Every order question calls the lookup_order tool.
+    rubric: Did the run call lookup_order?
+    check: {type: tool_called, tool: lookup_order}
+  - name: never_refunds
+    failure_mode: wrong_tool
+    node: lookup_order
+    judge: code
+    description: No run calls the refund_order tool.
+    rubric: Did the run call refund_order?
+    check: {type: tool_not_called, tool: refund_order}
+"""
+WHOLE_RUN = "node scope not applied to tool checks yet (whole-run)"
+
+
+def _calling_tools(for_999: tuple[str, ...] = ("lookup_order",)) -> str:
+    """The demo with lookup_order asking for its tool in an AIMessage, as a model would, and
+    for the tools in `for_999` instead when the question has 999 in it."""
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    src = (
+        demo.replace(
+            "from typing import Literal, TypedDict\n",
+            "from typing import Annotated, Literal, TypedDict\n\n"
+            "from langchain_core.messages import AIMessage, AnyMessage\n"
+            "from langgraph.graph.message import add_messages\n",
+        )
+        .replace(
+            "    answer: str\n",
+            "    answer: str\n    messages: Annotated[list[AnyMessage], add_messages]\n",
+        )
+        .replace(
+            '    return {"tool_result": "order #42: shipped"}',
+            f'    tools = {list(for_999)!r} if "999" in state["question"] else ["lookup_order"]\n'
+            '    calls = [{"name": t, "args": {}, "id": f"call_{t}"} for t in tools]\n'
+            '    asked = AIMessage("", id="ai-1", tool_calls=calls)\n'
+            '    return {"tool_result": "order #42: shipped", "messages": [asked]}',
+        )
+    )
+    assert "add_messages]" in src and "asked = AIMessage" in src and "Annotated, " in src
+    return src
+
+
+def _tool_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two order questions really recorded on the tool-calling demo, gated on tool checks."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "graph.py").write_text(_calling_tools(), encoding="utf-8")
+    (tmp_path / "taxonomy.yaml").write_text(TOOL_TAXONOMY, encoding="utf-8")
+    (tmp_path / "lgcov.yaml").write_text(
+        "graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n", encoding="utf-8"
+    )
+    questions = ["Where is my order 1?", "Where is my order 999?"]
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text(json.dumps([{"question": q} for q in questions]), encoding="utf-8")
+    assert main(["record", "--inputs", str(inputs)]) == 0
+
+
+def test_cli_ci_a_forbidden_tool_call_fails_its_code_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tool_project(tmp_path, monkeypatch)
+    forbidden = _calling_tools(("lookup_order", "refund_order"))
+    (tmp_path / "graph.py").write_text(forbidden, encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: code check failed\n")
+    assert (
+        "`never_refunds` passed on the base and fails here on 1 of 2 cases (`run-1/lookup_order`)."
+    ) in report
+    assert "looks_up_the_order" not in report.split("passed on the base")[0]
+    assert WHOLE_RUN in report
+
+
+def test_cli_ci_lookup_order_calling_its_tool_passes_tool_called(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tool_project(tmp_path, monkeypatch)
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert code == 0 and "code check failed" not in report and "new failure" not in report
+    # It passes on the base: so a PR that stops calling the tool is a new failure.
+    (tmp_path / "graph.py").write_text(_calling_tools(for_999=()), encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert (
+        "`looks_up_the_order` passed on the base and fails here on 1 of 2 cases "
+        "(`run-1/lookup_order`)."
+    ) in report
+
+
+def test_cli_judge_exits_1_on_a_forbidden_tool_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tool_project(tmp_path, monkeypatch)
+    forbidden = _calling_tools(("lookup_order", "refund_order"))
+    (tmp_path / "graph.py").write_text(forbidden, encoding="utf-8")
+    capsys.readouterr()
+    args = ["judge", "--taxonomy", "taxonomy.yaml", "--bands", str(tmp_path / "bands.json")]
+    assert main(args) == 1
+    out = capsys.readouterr().out
+    assert "| 🔴 new failure: never_refunds on 1 of 2 cases: `run-1/lookup_order` |" in out
+    assert WHOLE_RUN in out
+
+
 # T199: the tally line under the comment's heading. PR 7, the demo PR, makes this change.
 PR_7 = ("a concise support", "a friendly, detailed support")
 
