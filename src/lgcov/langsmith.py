@@ -52,9 +52,12 @@ class LangSmith:
     url: str = API_URL
     client: GetClient | None = None  # None: an httpx.Client per call; tests pass a fake
     page: int = 100  # items per request, the API's most
+    workspace: str | None = None  # an org-scoped key's workspace; without it, HTTP 403
 
     def _get(self, path: str, params: Params) -> object:
         headers = {"x-api-key": self.key}
+        if self.workspace:
+            headers["X-Tenant-Id"] = self.workspace
         if self.client is not None:
             return self._request(self.client, path, params, headers)
         with httpx.Client() as client:
@@ -119,11 +122,13 @@ class LangSmith:
 
 
 def from_env(client: GetClient | None = None) -> LangSmith | None:
-    """The API that LANGSMITH_API_KEY and LANGSMITH_ENDPOINT name; None without a key."""
+    """The API that LANGSMITH_API_KEY, LANGSMITH_ENDPOINT and LANGSMITH_WORKSPACE_ID name;
+    None without a key."""
     key = os.environ.get("LANGSMITH_API_KEY")
     if not key:
         return None
-    return LangSmith(key, os.environ.get("LANGSMITH_ENDPOINT") or API_URL, client)
+    url = os.environ.get("LANGSMITH_ENDPOINT") or API_URL
+    return LangSmith(key, url, client, workspace=os.environ.get("LANGSMITH_WORKSPACE_ID"))
 
 
 def cases(examples: Sequence[Item]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
