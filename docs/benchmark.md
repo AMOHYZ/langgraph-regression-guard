@@ -15,7 +15,8 @@ Each kind of evidence has its own section, and their numbers never combine: demo
 - **No harmless-edit discrimination yet.** lgcov and both node-naming baselines flag 24 of 24 harmless synthetic cases; negative controls (T123) and non-pinnable edits (T182) are the next tests.
 - **Synthetic cases come from our own generator,** so they share its assumptions about what an edit looks like; real PRs (T171) are the check.
 - **Usage counts are pending.** Request, token and error counts for the `gpt-6-luna` runs and the pilot still have to come from the usage page: see [Cost per run](#cost-per-run).
-- **More real PRs (T171) and a base-against-base run (T173) are pending.** Neither has run, so there are no numbers for them.
+- **lgcov's root label has no noise threshold.** Base run against itself gave the same root and propagated labels as both #163 runs, so #163's 1 of 1 can't be told apart from model noise, and real-PR root precision doesn't test the kill criterion yet: see [A/A noise floor](#aa-noise-floor).
+- **More real PRs (T171) are pending,** so there are no numbers for them.
 
 ## Demo fixtures
 
@@ -153,7 +154,7 @@ lgcov said root `write_research_brief`, propagated `final_report_generation` and
 - **Recall is capped at about 1/6.** lgcov calls only the first node to drift root, and this PR has 6 labelled roots. Multi-root is T162. This is a known limit, not a bug.
 - **The propagated false positive comes from the same limit.** `research_supervisor` is the subgraph holding the other 5 labelled roots, and lgcov scores it as one node.
 - **Root precision is 1 of 1,** so it says little: the 95% Wilson interval is 0.21 to 1.00.
-- **The hit has a real cause, but this run can't separate cause from noise.** The supervisor's system prompt, which the PR rewrote, differs between the sides. But a node whose code changed runs live, and a live model answer differs anyway. No run compared base against itself.
+- **The hit has a real cause, but this run can't separate cause from noise.** The supervisor's system prompt, which the PR rewrote, differs between the sides. But a node whose code changed runs live, and a live model answer differs anyway. A later base-against-base run gave the same labels, so this hit can't be told apart from noise: see [A/A noise floor](#aa-noise-floor).
 - **Clarification off removes the likeliest false root.** `clarify_with_user` only renamed locals, and with clarification off it calls no model, so it can't drift. With it on, it would run live and probably be called root. That wasn't measured.
 
 ### Agent KPIs
@@ -210,13 +211,26 @@ lgcov said root `write_research_brief`, propagated `final_report_generation` and
 
 These were read the same way as the first run's, and `researcher_uses_think_tool` still can't pass on base.
 
+### A/A noise floor
+
+#163's base, `f95d200`, run against itself with `lgcov bench --live`, so head ran every node live and nothing was served. No code differs, so any label is noise. Same question and settings as the `gpt-6-luna` run above; written down before the run: pass if lgcov labels no root or reports INCONCLUSIVE, fail on any root.
+
+| Date | lgcov commit | Validity | Root | Propagated | Verdict | Time | Spend |
+|---|---|---|---|---|---|---|---|
+| 2026-11-10 | `98c6587` | Valid; all saved answers from `gpt-6-luna` | `write_research_brief` | `final_report_generation`, `research_supervisor` | Fail | 757 s, both sides | $0.13 |
+
+- **These are exactly the labels both #163 runs gave.** `write_research_brief` is the first node that calls a model, and drift is an exact match, so it's called root whenever it runs live, PR or no PR. #163's 1 of 1 is a root by construction, not evidence that lgcov found the cause.
+- **So the kill criterion can't be read from real PRs yet.** With no change, the false-root rate on this agent is 1 of 1. On a PR that makes the first model node run live, root precision only shows whether the labels include that node.
+- **The drift has two sources.** The model wrote a different brief (1,021 against 1,280 characters), and the searches differed: head found 140 sources to base's 72. `research_supervisor` also keeps response ids inside text (`rs_…`, `fc_…`, `call_…`), which lgcov doesn't mask, so it drifts even when the model's text matches; a free run on a stub showed that.
+- **A fix is proposed, not built:** before calling a node root, run it again on base with the same recorded input, and report INCONCLUSIVE if base against base already drifts there. With exact-match drift that makes lgcov honest about model nodes but can't name one as root; that needs a distance measure and a threshold over several base samples.
+
 ## Baselines
 
 ### Comparison points
 
 - **The base recording.** Each run compares head with base's run of the same question, at `f95d200`, one run per side.
 - **The hand labels.** They were drafted from the PR's diff and reviewed by a human ([labels](benchmark/open_deep_research-163.yaml)). On the `gpt-6-luna` run, `compress_research` counts as propagated, not root, because pinning its model removes its only evidence.
-- **Base against base.** TODO(T173). No run has compared base with itself, so nothing here separates the PR's effect from a live model's own variation.
+- **Base against base.** The [A/A noise floor](#aa-noise-floor) run gave the same labels as #163, so nothing here separates the PR's effect from a live model's own variation.
 
 ### Naive methods
 
@@ -231,7 +245,7 @@ Scored on #163 from what was already on disk, the saved runs and a clone of the 
 
 - **Edited node from the diff beats lgcov on recall here, but picks nothing out.** This PR edits all 8 node functions, so calling every node root scores the same. Its false roots are `clarify_with_user` (renamed locals), `final_report_generation` (matters only on a retry, an error or a different key) and, on the second run, `compress_research`. The labels were drafted from the same diff, which favours this method.
 - **First divergence ties lgcov on root in both runs, because first drift is lgcov's root rule.** On this PR, lgcov's root adds nothing over it. What lgcov adds is its propagated labels, at a precision of 1 of 2 in both runs.
-- **End-to-end isn't scored because it names no node.** The final report differs in both runs, but there's no node to check against the labels, and with no base-against-base run we can't say the difference comes from the PR.
+- **End-to-end isn't scored because it names no node.** The final report differs in both runs, but there's no node to check against the labels, and the base-against-base run's final report differs too, so we can't say the difference comes from the PR.
 
 On single-node synthetic edits, edited node from the diff matches or beats lgcov on recall and coverage, and lgcov is ahead only on case-level precision: see [Synthetic](#synthetic). lgcov's case rests on changes the diff can't pin to one node (T182, planned).
 
@@ -255,6 +269,7 @@ From the OpenAI usage page: $0.84 in total for the 3 runs on 5 November. The pag
 | Pilot, `gpt-4.1` | $0.52 | Requests, tokens, errors |
 | `gpt-6-luna`, invalid and not scored | About $0.16 | Requests, tokens, errors |
 | `gpt-6-luna`, scored | About $0.16 | Requests, tokens, errors |
+| A/A noise floor, `gpt-6-luna`, 10 November | $0.13 | Requests, tokens, errors |
 
 ## Rounds
 

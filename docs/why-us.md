@@ -32,9 +32,10 @@ Wilson interval of 0.21 to 1.00, so it proves no precision claim. Recall is capp
 The [replay audit](validation/replay-audit.md) checks the replay this rests on, not these
 labels, and a change replay can't see can give no drift, so no root.
 `diff_cassettes` classifies by each node's recorded input, but only tests call it so far. A
-noise check, base against base on a real model, is planned (T173). Reenact records each
-LangGraph node boundary in its trajectory and shows them to its judges, but it gates per
-scenario, at the first call that diverges from the recording; lgcov's rule is the same
+noise check, base against base on a real model (T173), gave the same root as the PR, so that
+1 of 1 can't be told apart from model noise: lgcov's root has no noise threshold yet.
+Reenact records each LangGraph node boundary in its trajectory and shows them to its judges,
+but it gates per scenario, at the first call that diverges from the recording; lgcov's rule is the same
 first-divergence idea, labelled per graph node. EvalView names a root tool call. None of the
 tools below labels graph nodes root or propagated between base and PR.
 

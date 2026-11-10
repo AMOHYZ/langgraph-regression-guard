@@ -62,8 +62,9 @@ Against these seven, as documented. Each has a limit next to it.
   diagnosis of a failing trace in LangSmith Engine, Opik's Ollie and Braintrust's Loop.
   lgcov's evidence is a [pilot][lg-real], not proof: one PR, and 1 of 1 roots. Recall is
   capped at about 1/5 to 1/6, because only the first node to drift is called root (T162), and
-  a subgraph is scored as one node. A noise check, base against base on a real model, is
-  planned (T173). Until then these runs can't separate cause from model noise.
+  a subgraph is scored as one node. A noise check, base against base on a real model (T173),
+  gave the same root as the PR, so these runs can't separate cause from model noise: lgcov's
+  root has no noise threshold yet.
 - **A judge earns the right to block.** lgcov lets a judge block only when the lower bounds of
   its TPR and TNR against human labels clear 0.80. Langfuse reports kappa and F1, Confident AI
   a confusion matrix and Kitaru a calibration protocol, and LangSmith and Opik tune judges from
