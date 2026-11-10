@@ -520,6 +520,27 @@ def test_cli_runs_a_graph_file_that_needs_its_module(tmp_path: Path, source: str
     assert main(["replay", "--live", "--config", str(cfg)]) == 0
 
 
+# The state itself, and a ToolNode tool's arguments, as dataclasses whose hints are strings.
+_FUTURE_GRAPHS = Path(__file__).parent / "fixtures" / "future_annotations.py"
+_FUTURE_ANSWERS = {
+    "dataclass_state": "dataclass state ok",
+    "typed_dict_state": "typed dict state ok",
+    # ToolNode turns a tool's error into its answer, so a crash would still record: check it ran.
+    "tool_node": "Riyadh: sunny for 2 days",
+}
+
+
+@pytest.mark.parametrize(("attr", "answer"), _FUTURE_ANSWERS.items(), ids=_FUTURE_ANSWERS)
+def test_cli_records_future_annotations_with_dataclasses(
+    tmp_path: Path, attr: str, answer: str
+) -> None:
+    source = _FUTURE_GRAPHS.read_text(encoding="utf-8") + f"graph = {attr}\n"
+    cfg = _one_node_project(tmp_path, source)
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    assert answer in (tmp_path / "cassettes" / "baseline.json").read_text(encoding="utf-8")
+    assert main(["replay", "--live", "--config", str(cfg)]) == 0
+
+
 def test_cli_ci_runs_head_against_head_after_loading_a_base_of_the_same_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
