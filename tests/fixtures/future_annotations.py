@@ -3,8 +3,8 @@
 `from __future__ import annotations` leaves each one a string, which LangGraph and the tool's
 schema resolve against `sys.modules[cls.__module__]`. Before #89 lgcov didn't register the
 graph file there, so `lgcov record` crashed on these. Each graph's answer comes from a
-dataclass, so a test can see the node or the tool really ran. The states hold strings, not
-the dataclass: replay can't yet encode a dataclass value in the state, with or without the import.
+dataclass, so a test can see the node or the tool really ran. The states hold the dataclass too,
+so replay compares a fresh `Note` with the one the cassette saved (#105).
 """
 
 from __future__ import annotations
@@ -28,12 +28,12 @@ class Note:
 @dataclass
 class DataclassState:
     messages: Annotated[list[AnyMessage], add_messages] = field(default_factory=list)
-    notes: Annotated[list[str], operator.add] = field(default_factory=list)
+    notes: Annotated[list[Note], operator.add] = field(default_factory=list)
 
 
 class TypedDictState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
-    notes: Annotated[list[str], operator.add]
+    notes: Annotated[list[Note], operator.add]
 
 
 @dataclass
@@ -50,12 +50,12 @@ def forecast(query: Query) -> str:
 
 def note_dataclass(state: DataclassState) -> dict[str, object]:
     note = Note("dataclass state ok")
-    return {"messages": [AIMessage(note.text)], "notes": [note.text]}
+    return {"messages": [AIMessage(note.text)], "notes": [note]}
 
 
 def note_typed_dict(state: TypedDictState) -> dict[str, object]:
     note = Note("typed dict state ok")
-    return {"messages": [AIMessage(note.text)], "notes": [note.text]}
+    return {"messages": [AIMessage(note.text)], "notes": [note]}
 
 
 def call_forecast(state: DataclassState) -> dict[str, object]:
