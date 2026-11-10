@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 
 from langchain_core.messages import BaseMessage
 
@@ -68,6 +68,8 @@ def _norm(
     in_message = isinstance(value, BaseMessage)
     if isinstance(value, BaseMessage):
         value = mask.read(value)
+    elif is_dataclass(value) and not isinstance(value, type):
+        value = asdict(value)  # as Cassette.body saves it, so a fresh run compares to the recording
     if isinstance(value, dict):
         out: dict[object, object] = {}
         # A LangChain ToolCall in plain state, as in a Send payload: its `id` is a tool_call_id.
