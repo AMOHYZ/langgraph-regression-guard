@@ -1,6 +1,7 @@
 """T085: mask volatile fields (UUIDs, ISO timestamps, ids, ignore_paths) before comparing."""
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -309,3 +310,17 @@ def test_ignore_paths_reach_the_key() -> None:
         "meta": {"nonce": "<ignored>"},
         "id": "<id>",
     }
+
+
+@dataclass
+class _Note:
+    text: str
+    id: str
+
+
+def test_a_dataclass_compares_and_keys_as_the_cassette_saves_it() -> None:
+    # Cassette.body saves a dataclass in a node's output as asdict does; a fresh run still holds
+    # the object, so comparing it must read it the same way, masks included.
+    value = {"notes": [_Note("at 2026-11-10T09:00:00Z", "n1")]}
+    assert normalize(value) == {"notes": [{"text": "at <timestamp>", "id": "<id>"}]}
+    assert key_view(value) == {"notes": [{"text": "at 2026-11-10T09:00:00Z", "id": "n1"}]}
