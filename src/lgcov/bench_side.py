@@ -7,7 +7,7 @@ each side here, with that side's folders first on its path, and a run crosses ov
     check  <target>                                can the graph be loaded?
     record <target> <cases.json> <runs.json>       record each case, and save the runs
     replay <target> <runs.json> <drifted> <fresh>  replay them, and save the nodes that drifted in
-                                                   each, and the fresh runs
+           [--live]                                each, and the fresh runs; --live runs every node
 
 T169: runs are saved as each one finishes, so a crash can't lose what was already paid for.
 
@@ -33,6 +33,7 @@ def _save(path: Path, runs: list[Cassette]) -> None:
 
 def side_main(argv: list[str]) -> int:
     mode, target, *paths = argv
+    live = paths[-1:] == ["--live"]  # T173: run every node, serve none
     try:
         # Exception: importing user graph code can raise anything.
         graph = _load_graph(target)
@@ -50,7 +51,7 @@ def side_main(argv: list[str]) -> int:
             fresh: list[Cassette] = []
             try:
                 for run in runs_from_json(Path(paths[0]).read_text(encoding="utf-8")):
-                    done.append(replay_run(graph, run, (), serve=True))
+                    done.append(replay_run(graph, run, (), serve=not live))
                     fresh.append(Cassette(run.inputs, list(done[-1].steps)))
                     _save(Path(paths[2]), fresh)
             finally:

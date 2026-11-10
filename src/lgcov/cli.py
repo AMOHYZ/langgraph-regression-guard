@@ -2170,14 +2170,16 @@ def _error_row(b: Benchmark, error: str, seconds: float) -> Result:
     )
 
 
-def _bench_one(b: Benchmark, keep: Path | None = None) -> Result:
+def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Result:
     """Record the cases on base, replay head (unchanged nodes served, as `lgcov ci` does),
     and score lgcov's root / propagated labels. A benchmark that can't run says why.
 
     T166: each side runs in its own process. Head's import is checked first, and base's is the
     first thing its recording does, so a bad import costs no real call on either side.
 
-    T169: with `keep`, each side's runs stay in <keep>/<benchmark>/, saved as each one finishes."""
+    T169: with `keep`, each side's runs stay in <keep>/<benchmark>/, saved as each one finishes.
+
+    T173: with `live`, head serves nothing, so base against base measures the model's noise."""
     start = perf_counter()
     worktrees: list[Path] = []
     expected = (tuple(sorted(b.root)), tuple(sorted(b.propagated)))
@@ -2192,7 +2194,8 @@ def _bench_one(b: Benchmark, keep: Path | None = None) -> Result:
                 cases.write_text(json.dumps(list(b.cases)), encoding="utf-8")
                 _run_side(b, "head", head_root, "check", head_target)
                 _run_side(b, "base", base_root, "record", base_target, str(cases), str(saved))
-                replaying = (head_target, str(saved), str(drifted), str(fresh))
+                replaying = [head_target, str(saved), str(drifted), str(fresh)]
+                replaying += ["--live"] if live else []
                 _run_side(b, "head", head_root, "replay", *replaying)
                 runs = _load_runs(str(saved))
                 nodes: list[list[str]] = json.loads(drifted.read_text(encoding="utf-8"))
@@ -2275,9 +2278,10 @@ def _bench_cmd(argv: list[str]) -> int:
         metavar="DIR",
         help="save each side's runs in DIR/<benchmark>/{base,head}.json as each one finishes",
     )
+    ap.add_argument("--live", action="store_true", help="T173: head runs every node, serving none")
     args = ap.parse_args(argv)
     if args.synthetic:
-        if args.dir or args.only or args.keep_runs:
+        if args.dir or args.only or args.keep_runs or args.live:
             print("lgcov bench: --synthetic takes only --out and --json", file=sys.stderr)
             return EXIT_ERROR
         return _bench_synthetic(Path(args.out), Path(args.json or "docs/benchmark-synthetic.json"))
@@ -2310,7 +2314,7 @@ def _bench_cmd(argv: list[str]) -> int:
     code = 0
     for b in benchmarks:
         try:
-            results.append(pending_result(b) if b.status else _bench_one(b, keep))
+            results.append(pending_result(b) if b.status else _bench_one(b, keep, args.live))
         except _CantImport as exc:
             print(f"lgcov bench: {b.name}: {exc}", file=sys.stderr)
             results.append(_error_row(b, str(exc)[:200], 0.0))

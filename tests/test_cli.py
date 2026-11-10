@@ -2792,7 +2792,7 @@ def test_bench_synthetic_scores_lgcovs_real_root_not_the_first_divergence(tmp_pa
     assert roots["lgcov root"]["recall"]["of"] == roots["first divergence"]["recall"]["of"] == 31
 
 
-@pytest.mark.parametrize("extra", [["--only", "x"], ["--keep-runs", "x"], ["some/dir"]])
+@pytest.mark.parametrize("extra", [["--only", "x"], ["--keep-runs", "x"], ["--live"], ["some/dir"]])
 def test_bench_synthetic_refuses_what_only_the_fixture_bench_takes(
     extra: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
