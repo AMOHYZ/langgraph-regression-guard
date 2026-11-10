@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `lgcov bench --live` runs every node on head instead of serving the ones that didn't change. A row with the same commit on both sides then measures how much a live model varies on its own.
 - `tool_called` and `tool_not_called` now see the tools a run called, read from the AI messages in its recorded and replayed steps, in `lgcov ci` and `lgcov judge`. Before, they got node names only, so `tool_called` always failed and `tool_not_called` always passed.
 - **Limit:** a tool check reads the whole run, not only its KPI's `node:`, so a tool called by another node passes it. `lgcov ci` and `lgcov judge` say so for each tool check: "node scope not applied to tool checks yet (whole-run)".
 
