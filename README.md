@@ -169,7 +169,8 @@ on base, replays head, and scores lgcov's labels against hand-written ones, prec
 recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). Each side runs in its
 own process with its own imports, and a bench file can add `pythonpath: [src]` for a src
 layout. `--keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid
-recording. For now its rows are
+recording. `--live` runs every head node instead of serving the unchanged ones, so a row
+with base as head measures a live model's own variation. For now its rows are
 three demo fixtures in `tests/fixtures/bench/`; a pilot on one real PR has its own section
 in [docs/benchmark.md](docs/benchmark.md#real-prs). A miss on a
 hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden. The

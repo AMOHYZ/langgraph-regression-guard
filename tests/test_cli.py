@@ -541,6 +541,34 @@ def test_cli_records_future_annotations_with_dataclasses(
     assert main(["replay", "--live", "--config", str(cfg)]) == 0
 
 
+_DATACLASS_IN_STATE = """import operator
+from dataclasses import dataclass, field
+from typing import Annotated
+from langgraph.graph import START, StateGraph
+@dataclass
+class Note:
+    text: str
+@dataclass
+class State:
+    q: str = ""
+    notes: Annotated[list[Note], operator.add] = field(default_factory=list)
+def a(state: State) -> dict[str, object]:
+    return {"notes": [Note(state.q)]}
+def b(state: State) -> dict[str, object]:
+    return {"notes": [Note(state.notes[0].text + "!")]}
+graph = StateGraph(State).add_node(a).add_node(b).add_edge(START, "a").add_edge("a", "b").compile()
+"""
+
+
+def test_cli_replays_a_dataclass_value_in_the_state(tmp_path: Path) -> None:
+    # The cassette saves Note as {"text": ...}; the fresh run's Note must compare equal to it.
+    cfg = _one_node_project(tmp_path, _DATACLASS_IN_STATE)
+    (tmp_path / "inputs.json").write_text('[{"q": "hi"}]', encoding="utf-8")
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    assert main(["replay", "--live", "--config", str(cfg)]) == 0
+    assert main(["replay", "--config", str(cfg)]) == 0
+
+
 def test_cli_ci_runs_head_against_head_after_loading_a_base_of_the_same_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2813,7 +2841,7 @@ def test_bench_synthetic_scores_lgcovs_real_root_not_the_first_divergence(tmp_pa
     assert roots["lgcov root"]["recall"]["of"] == roots["first divergence"]["recall"]["of"] == 31
 
 
-@pytest.mark.parametrize("extra", [["--only", "x"], ["--keep-runs", "x"], ["some/dir"]])
+@pytest.mark.parametrize("extra", [["--only", "x"], ["--keep-runs", "x"], ["--live"], ["some/dir"]])
 def test_bench_synthetic_refuses_what_only_the_fixture_bench_takes(
     extra: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
