@@ -1,9 +1,9 @@
 # langgraph-regression-guard
 
-Catch silent regressions in LangGraph agents on every PR. lgcov tells you which LangGraph
-node a PR actually changed and which ones only inherited the damage, gates each KPI in your
-taxonomy with a paired test, and lets a judge block only once it has earned that against
-human labels. A GitHub Action; first report in 2 minutes.
+Catch silent regressions in LangGraph agents on every PR. lgcov replays your agent, re-runs
+only the nodes a PR can reach, and shows which node's output changed first and which changed
+after it. Each KPI in your taxonomy gets a paired test, and a judge can block only once it
+has earned that against human labels. A GitHub Action; first report in 2 minutes.
 
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
 
@@ -22,8 +22,9 @@ Three layers, one per level of confidence:
 
 - **L1 — Cassettes.** Record each node's input and output once. On every PR,
   nodes the change left alone are served from the recording and the rest re-run
-  and are compared with it. The diff tells you whether a change breaks a node at
-  its root or only propagates from upstream. [Known limits](#known-replay-limits).
+  and are compared with it. The diff shows which node's output changed first and
+  which changed after it; on nodes that call a live model, that can be noise, not
+  the PR. [Known limits](#known-replay-limits).
 - **L2 — Judge gate.** Typed LLM judges and deterministic code checks score
   KPIs, each verdict with a confidence, and a paired test per KPI decides SHIP,
   BLOCK or INCONCLUSIVE: an unclear or low-confidence result goes to a human

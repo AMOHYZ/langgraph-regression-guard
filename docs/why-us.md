@@ -1,10 +1,12 @@
 # Why lgcov
 
-lgcov tells you which LangGraph node a PR actually changed and which ones only inherited
-the damage, gates each KPI in your taxonomy with a paired test, and lets a judge block
-only once it has earned that against human labels. On real agents that attribution is a
-[pilot so far](benchmark.md#real-prs): one PR. First report in 2 minutes (L1 only, measured
-27 Oct 2026). Other tools as of 31 Oct 2026; Kitaru and LangSmith as of 5 Nov.
+lgcov replays your agent, re-runs only the nodes a PR can reach, and shows which node's
+output changed first and which changed after it. Each KPI in your taxonomy gets a paired
+test, and a judge can block only once it has earned that against human labels. On real
+agents that attribution is a [pilot so far](benchmark.md#real-prs): one PR, and a
+[base-against-base run](benchmark.md#aa-noise-floor) gave the same root. First report in
+2 minutes (L1 only, measured 27 Oct 2026). Other tools as of 31 Oct 2026; Kitaru and
+LangSmith as of 5 Nov.
 
 ## The problem
 
