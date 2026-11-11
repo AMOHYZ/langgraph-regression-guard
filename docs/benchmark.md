@@ -146,8 +146,8 @@ Measured by `lgcov bench`, apart from the last two rows.
 | Propagated recall | 1.00 (1 of 1) | None |
 | Propagated F1 | 0.67 | None |
 | Time | 216 s, both sides | None |
-| Spend | $0.52 (_any errors on the OpenAI usage page to be added_) | At most $0.60; stop and re-plan over $1 |
-| Requests | _To be added from the OpenAI usage page_ | About 110 |
+| Spend | $0.52 (errors not recorded; see [Cost per run](#cost-per-run)) | At most $0.60; stop and re-plan over $1 |
+| Requests | Not recorded (see [Cost per run](#cost-per-run)) | About 110 |
 
 lgcov said root `write_research_brief`, propagated `final_report_generation` and `research_supervisor`.
 
@@ -193,7 +193,7 @@ The same PR and question on a cheaper model, because `gpt-4.1` and `gpt-4.1-mini
 | Propagated F1 | 0.50 | 0.67 | None |
 | Time | 538 s, both sides | 216 s, both sides | None |
 | Spend | About $0.16 ([how](#cost-per-run)) | $0.52 | Under $0.60 |
-| Requests | _To be added from the OpenAI usage page_ | _To be added_ | None |
+| Requests | Not recorded (see [Cost per run](#cost-per-run)) | Not recorded (see [Cost per run](#cost-per-run)) | None |
 
 lgcov said root `write_research_brief`, propagated `final_report_generation` and `research_supervisor`, the same as the first run.
 

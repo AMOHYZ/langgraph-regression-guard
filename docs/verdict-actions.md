@@ -97,7 +97,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: AMOHYZ/langgraph-regression-guard@v0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
         with:
           mode: advisory
           approved-by: ${{ github.event.review.state == 'approved' && github.event.review.user.login || '' }}

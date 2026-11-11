@@ -247,7 +247,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: AMOHYZ/langgraph-regression-guard@v0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
         with:
           fail-on: root-drift  # root-drift | any-drift | never
 ```
@@ -296,7 +296,7 @@ jobs:
     schedule:
       - cron: "0 3 * * *"  # the nightly tier, on main
   # ...the same job as above, with:
-        - uses: AMOHYZ/langgraph-regression-guard@v0
+        - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
           with:
             tier: ${{ github.event_name == 'schedule' && 'nightly' || 'pr' }}
   ```
@@ -323,7 +323,7 @@ jobs:
   `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `tier`,
   `python-version`, `github-token`, `live`, `mode`, `approved-by`, `ci-status`, `phase`. Outputs:
   `report-path`, `root-drift-count`, `propagated-drift-count`, `verdict` (`pass`, `fail`,
-  `needs_human` or `error`).
+  `needs_human`, `error` or `advisory`).
 - Runs on Linux and macOS runners.
 
 ### Two jobs, so the PR's code can't touch the verdict
@@ -347,7 +347,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: AMOHYZ/langgraph-regression-guard@v0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
         with:
           phase: candidate  # runs the PR's code and decides nothing
   lgcov:
@@ -365,7 +365,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}  # empty on a push: that commit
-      - uses: AMOHYZ/langgraph-regression-guard@v0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
         with:
           phase: evaluate  # decides from what the other job uploaded; installs no project
 ```
@@ -625,6 +625,14 @@ uv run python -m lgcov.docs_lint      # docs/banned-phrases.txt and the tagline;
 ## Roadmap
 
 - Sequential stopping (mSPRT) for the KPI gate.
+- Three case pools, dev, gate and audit, with exposure flowing one way only: what the gate
+  and audit pools contain never reaches whoever writes the PR.
+- Eval pools as an input alongside the baseline cassettes.
+- An adoption path for each change: eligible → human approval → baseline update → merge →
+  deploy.
+
+More planned work is in [the one-pager](docs/guard-one-pager.md#planned-not-on-main-yet)
+and [Why lgcov](docs/why-us.md).
 
 ## License
 
