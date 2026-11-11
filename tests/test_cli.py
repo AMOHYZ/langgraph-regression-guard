@@ -727,7 +727,7 @@ def test_cli_replay_serves_unchanged_nodes_unless_live(
     assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
 
 
-def test_cli_replay_still_reports_root_and_downstream_drift(
+def test_cli_replay_still_reports_root_and_propagated_drift(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # b's code is unchanged but it reads a's output, so it re-runs once a changes.
@@ -746,7 +746,7 @@ def test_cli_replay_still_reports_root_and_downstream_drift(
     assert main(["replay", "--config", str(cfg)]) == 1
     lines = capsys.readouterr().out.splitlines()
     assert "| `a` | root | 1/1 |" in lines
-    assert "| `b` | downstream | 1/1 |" in lines
+    assert "| `b` | propagated | 1/1 |" in lines
 
 
 def test_cli_replay_reads_a_baseline_recorded_before_node_inputs(

@@ -351,7 +351,7 @@ def _drift_kinds(
     runs: list[Cassette], drifts: list[list[Drift]]
 ) -> tuple[dict[str, int], set[str]]:
     """Runs each node drifted in, and the root nodes. "root" = the first node to drift
-    in some run, in execution order; "downstream" nodes drifted only after an earlier one.
+    in some run, in execution order; "propagated" nodes drifted only after an earlier one.
     """
     counts: dict[str, int] = {}
     roots: set[str] = set()
@@ -374,14 +374,14 @@ def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
 def _replay_markdown(
     runs: list[Cassette], drifts: list[list[Drift]], not_checked: tuple[str, ...] = ()
 ) -> list[str]:
-    """Per-node drift table: root or downstream, and in how many runs."""
+    """Per-node drift table: root or propagated, and in how many runs."""
     counts, roots = _drift_kinds(runs, drifts)
     lines = ["### Cassette replay", ""]
     if not counts:
         return [*lines, f"No cassette drift ({len(runs)} runs)."]
     lines += ["| node | drift | runs |", "|---|---|---|"]
     for node in sorted(counts):
-        kind = "root" if node in roots else "downstream"
+        kind = "root" if node in roots else "propagated"
         lines.append(f"| `{node}` | {kind} | {counts[node]}/{len(runs)} |")
     unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys() - set(not_checked))
     if unchanged:
