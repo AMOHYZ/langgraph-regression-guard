@@ -2485,6 +2485,48 @@ def test_cli_bench_lists_the_163_row_as_labels_reviewed(tmp_path: Path) -> None:
     assert "| open_deep_research-163 | — | — | — |" in md and "📝 labels reviewed, not run |" in md
 
 
+# T162: the #163 runs stage 1 kept, hashed so they compare as replay does without the model's text
+# (tests/fixtures/bench_runs/README.md). Scoring them costs nothing.
+SAVED_RUNS = FIXTURES / "bench_runs"
+
+
+def test_cli_bench_from_runs_scores_the_saved_163_runs_without_recording(tmp_path: Path) -> None:
+    rows = Path(__file__).resolve().parents[1] / "docs" / "benchmark"
+    code, results, md = _bench(tmp_path, str(rows), "--from-runs", str(SAVED_RUNS))
+    assert code == 0
+    row = _rows(results)["open_deep_research-163"]
+    assert (row["status"], row["error"]) == ("", "")
+    # First-drift attribution: one root of six, the before state T162 starts from.
+    assert row["found_root"] == ["write_research_brief"]
+    assert row["root"] == {
+        "tp": 1,
+        "fp": 0,
+        "fn": 5,
+        "precision": 1.0,
+        "recall": 1 / 6,
+        "f1": 2 / 7,
+    }
+    assert row["found_propagated"] == ["final_report_generation", "research_supervisor"]
+    assert "--from-runs" in md
+
+
+def test_cli_bench_from_runs_a_missing_run_is_an_error_row(tmp_path: Path) -> None:
+    rows = Path(__file__).resolve().parents[1] / "docs" / "benchmark"
+    code, results, _ = _bench(tmp_path, str(rows), "--from-runs", str(tmp_path / "none"))
+    assert code == 0
+    row = _rows(results)["open_deep_research-163"]
+    assert "base.json" in str(row["error"])
+
+
+@pytest.mark.parametrize("other", [["--live"], ["--keep-runs", "kept"], ["--synthetic"]])
+def test_cli_bench_from_runs_refuses_what_would_run_the_agent(
+    tmp_path: Path, other: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(["bench", "--from-runs", str(SAVED_RUNS), *other])
+    assert code == 2
+    assert "--from-runs" in capsys.readouterr().err
+
+
 # T106: `lgcov taxonomy draft` proposes, `lgcov taxonomy approve` is the human's yes.
 def _draft_args(tmp_path: Path) -> list[str]:
     from fixtures.drafting import TEAM
