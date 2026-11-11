@@ -277,6 +277,53 @@ def test_the_candidate_half_says_how_long_it_took(pr: Path) -> None:
     assert body["seconds"] > body["agent_seconds"] > 0
 
 
+# T162: a node is root when its own code changed and it drifts on base's recorded input. The
+# candidate job runs that probe offline and reports what it returned; this job compares.
+LOOKUP = 'return {"tool_result": "order #42: shipped"}'
+TWO_ROOTS = DEMO_GRAPH.replace(LOOKUP, 'return {"tool_result": "order #42: delivered"}').replace(
+    RESPOND, '    ctx = state.get("tool_result", "").upper()\n'
+)
+CALLS_OUT = DEMO_GRAPH.replace(
+    RESPOND,
+    "    import socket\n\n"
+    "    try:\n"
+    '        socket.create_connection(("127.0.0.1", 9), timeout=0.1)\n'
+    "    except OSError:\n"
+    "        pass\n" + RESPOND,
+).replace("a concise", "a friendly")
+
+
+def test_every_node_whose_own_change_drifts_is_root_not_just_the_first(pr: Path) -> None:
+    _write(pr, {"graph.py": TWO_ROOTS})
+    code, report = _both_ways()
+    assert code == 1
+    assert "| `lookup_order` | root | 1/2 |" in report and "| `respond` | root | 1/2 |" in report
+    _, _, outputs = _evaluate()
+    assert (outputs["root-drift-count"], outputs["first-drift"]) == ("2", "lookup_order")
+    assert outputs["inconclusive-count"] == "0"
+
+
+def test_a_probe_that_needs_the_network_is_inconclusive_and_still_blocks(pr: Path) -> None:
+    _write(pr, {"graph.py": CALLS_OUT})
+    code, report = _both_ways()
+    assert code == 1  # fail-on: root-drift counts inconclusive nodes with the roots
+    why = "needs live probe; noise threshold pending T211"
+    assert f"| `respond` | inconclusive ({why}) | 2/2 |" in report
+    probes = json.loads(FILE.read_text("utf-8"))["probes"]
+    assert {p["raised"] for p in probes if p["node"] == "respond"} == {why}
+    assert _evaluate()[2]["inconclusive-count"] == "1"
+
+
+def test_a_forged_probe_is_a_harness_error(pr: Path) -> None:
+    _write(pr, {"graph.py": TWO_ROOTS})
+    assert _candidate() == 0
+    body = json.loads(FILE.read_text("utf-8"))
+    body["probes"][0]["step"] = 99
+    FILE.write_text(json.dumps(body), encoding="utf-8")
+    code, report, _ = _evaluate()
+    assert code == 2 and "matches no recorded step" in report
+
+
 CODE_TAXONOMY = """\
 version: 1
 system: demo_agent

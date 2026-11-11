@@ -921,6 +921,8 @@ def test_cli_ci_reports_root_drift_and_sets_outputs(
     assert "fail-on: `root-drift`" in report
     assert outputs == {
         "exit-code": "1",
+        "first-drift": "respond",  # T162
+        "inconclusive-count": "0",
         "propagated-drift-count": "0",
         "report-path": str(tmp_path / "out" / "report.md"),
         "root-drift-count": "1",
@@ -1021,7 +1023,8 @@ def test_cli_ci_serves_unchanged_nodes_unless_live(
     # ...and --live re-runs every node, which catches the edit.
     code, report, _ = _run_ci(tmp_path, "--live")
     assert code == 1
-    assert "| `lookup_order` | root | 1/2 |" in report
+    # T162: its code didn't change, so it isn't root; nothing explains the drift, so it blocks.
+    assert "| `lookup_order` | inconclusive (drifted with no changed node before it:" in report
 
 
 # T083: `lgcov coverage` from the recorded runs (nothing re-runs), with trend vs main.

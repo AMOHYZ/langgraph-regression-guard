@@ -220,6 +220,9 @@ def score(found: Collection[str], expected: Collection[str]) -> Score:
 NEEDS_LIVE = "needs live probe; noise threshold pending T211"
 NOT_PROBED = "not probed: scored from saved runs"
 NO_FINGERPRINT = "no fingerprint: a subgraph or the like (T193)"
+UNEXPLAINED = (
+    "drifted with no changed node before it: a change outside node code, or an edited recording"
+)
 
 
 def drift_exceeds_noise(node: str, a: object, b: object) -> bool:
@@ -270,6 +273,20 @@ def classify(
         else:
             inconclusive[node] = probe.reason
     return NodeLabels(tuple(root), tuple(propagated), inconclusive)
+
+
+def explain_runs(
+    labels: NodeLabels, first_drifts: Sequence[str | None], drifted: Sequence[Collection[str]]
+) -> NodeLabels:
+    """T162: a run that drifted with no root or inconclusive node in it has a cause no node's
+    fingerprint shows: an edge, a router, a Send, or an edited recording. Its first drifted node is
+    inconclusive, so `fail-on: root-drift` still fails on it, as first-drift attribution did."""
+    unsure = dict(labels.inconclusive)
+    for first, nodes in zip(first_drifts, drifted, strict=True):
+        if first and not ({*labels.root, *unsure} & set(nodes)):
+            unsure[first] = UNEXPLAINED
+    propagated = tuple(n for n in labels.propagated if n not in unsure)
+    return NodeLabels(labels.root, propagated, unsure)
 
 
 @dataclass(frozen=True)

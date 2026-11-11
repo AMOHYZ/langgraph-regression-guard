@@ -52,8 +52,9 @@ that code never runs where the verdict is decided:
 | **Runs** | The graph and the replay | The comparison, the judges, the report and the comment |
 | **Holds** | `contents: read`, and your agent's own model key if you add it | The judge keys, `LANGSMITH_API_KEY` and `pull-requests: write` |
 
-The candidate job hands over one file, `candidate.json`, as an artifact: each run's steps and how each
-call ran. The job that decides recomputes drift from those steps, with the PR's cassette from git and
+The candidate job hands over one file, `candidate.json`, as an artifact: each run's steps, how each
+call ran, and what each node whose code changed returned when run again, offline, on the input the
+cassette recorded for it (T162's probes, or why it couldn't run). The job that decides recomputes drift from those steps, with the PR's cassette from git and
 the policy from the base. The file has no field for drift, a verdict or an exit code. A missing file,
 or one that isn't exactly this shape, gives no verdict and exit 2.
 
@@ -69,7 +70,9 @@ token in `.git/config`, or if its job that decides can be skipped.
 
 ## What is NOT covered
 
-1. **What the PR's code says it did.** The steps in `candidate.json` are that code's word. It can
+1. **What the PR's code says it did.** The steps and probes in `candidate.json` are that code's word.
+   A probe that matches no recorded step gives no verdict, but a forged probe output can make a
+   changed node read as propagated, just as forged steps can hide drift. It can
    write a file saying nothing changed, and the job that decides can't re-run the code to check, so
    that passes. `test_the_known_limit_a_file_reporting_the_recorded_outputs_passes` pins this. It
    gets no further than limit 6 does, but it is easier. So the gate catches regressions in code that

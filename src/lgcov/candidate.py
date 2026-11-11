@@ -17,10 +17,7 @@ from lgcov.cassette import Call, Cassette, Halt, How, ProbeStep, Step
 from lgcov.messages import decode, encode
 from lgcov.snapshot import GraphSnapshot
 
-SCHEMA = 1  # what this version writes
-# T162, step 1 of 2: 2 adds the probes. Read before it's written, so a job that decides on this
-# version can read a newer candidate job's file.
-READS = (1, 2)
+SCHEMA = 2  # T162: 2 adds the probes
 _HOWS: tuple[How, ...] = ("served", "live", "diverged", "after_divergence")
 _WHYS: tuple[Literal["diverged", "budget"], ...] = ("diverged", "budget")
 _CALL = {"node", "how", "seconds", "rebind_skipped", "raised"}
@@ -50,7 +47,7 @@ class CandidateRun:
     lint_summary: str = ""
     lint_lines: tuple[str, ...] = ()
     fresh: tuple[FreshRun, ...] = ()
-    probes: tuple[ProbeStep, ...] = ()  # T162: read from schema 2; this version writes none
+    probes: tuple[ProbeStep, ...] = ()  # T162: each changed node run offline on base's inputs
     agent_seconds: float = 0.0
     budget_hit: tuple[str, float] | None = None
     seconds: float = 0.0  # all of it, when it ran in another job
@@ -84,6 +81,7 @@ def candidate_to_json(run: CandidateRun) -> str:
         "schema": SCHEMA,
         "head": run.head.to_dict() if run.head else None,
         "runs": [_run_body(r) for r in run.fresh],
+        "probes": [asdict(p) for p in run.probes],
     }
     return json.dumps(body, indent=2, default=_saved) + "\n"
 
@@ -169,26 +167,24 @@ def _budget_hit(raw: object) -> tuple[str, float] | None:
     return raw[0], _seconds(raw[1])
 
 
-_FIELDS = {
-    *(f.name for f in fields(CandidateRun) if f.name not in ("fresh", "probes")),
-    "runs",
-    "schema",
-}
+_FIELDS = {*(f.name for f in fields(CandidateRun) if f.name != "fresh"), "runs", "schema"}
 
 
 def parse_candidate(text: str) -> CandidateRun:
     """The run in a file. ValueError if it isn't exactly one."""
     try:
         raw: object = json.loads(text, object_hook=decode)
-        if not isinstance(raw, dict) or raw.get("schema") not in READS:
-            raise ValueError(f"not a schema {' or '.join(map(str, READS))} candidate file")
-        want = _FIELDS | ({"probes"} if raw["schema"] == 2 else set())
-        if set(raw) != want:
-            raise ValueError(f"its fields differ: {sorted(set(raw) ^ want)}")
-        if not isinstance(raw.get("probes", []), list):
-            raise ValueError("probes isn't a list")
-        if not isinstance(raw["runs"], list):
-            raise ValueError("runs isn't a list")
+        if not isinstance(raw, dict) or raw.get("schema") not in (1, SCHEMA):
+            raise ValueError(f"not a schema {SCHEMA} candidate file")
+        if raw["schema"] != SCHEMA:
+            raise ValueError(
+                f"candidate file schema {raw['schema']}, evaluator needs {SCHEMA}: "
+                "run the same lgcov version in both jobs"
+            )
+        if set(raw) != _FIELDS:
+            raise ValueError(f"its fields differ: {sorted(set(raw) ^ _FIELDS)}")
+        if not isinstance(raw["runs"], list) or not isinstance(raw["probes"], list):
+            raise ValueError("runs or probes isn't a list")
         run = CandidateRun(
             commit=_text(raw, "commit"),
             tier=_text(raw, "tier"),
@@ -198,7 +194,7 @@ def parse_candidate(text: str) -> CandidateRun:
             lint_summary=_text(raw, "lint_summary"),
             lint_lines=_lines(raw, "lint_lines"),
             fresh=tuple(_fresh(r) for r in raw["runs"]),
-            probes=tuple(_probe(p) for p in raw.get("probes", [])),
+            probes=tuple(_probe(p) for p in raw["probes"]),
             agent_seconds=_seconds(raw["agent_seconds"]),
             budget_hit=_budget_hit(raw["budget_hit"]),
             seconds=_seconds(raw["seconds"]),

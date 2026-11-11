@@ -3,11 +3,11 @@ anything in it, so it says what ran, never what that means, and one that isn't e
 is refused."""
 
 import json
-from dataclasses import replace
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
+from lgcov.attribution import NEEDS_LIVE
 from lgcov.candidate import CandidateRun, FreshRun, candidate_to_json, parse_candidate
 from lgcov.cassette import Call, Halt, ProbeStep, Step
 from lgcov.snapshot import Edge, GraphSnapshot
@@ -30,6 +30,7 @@ RUN = CandidateRun(
         ),
         FreshRun((), ()),
     ),
+    probes=(ProbeStep(0, 0, "a", {"x": 2}, ROUTED), ProbeStep(0, 1, "b", raised=NEEDS_LIVE)),
     agent_seconds=1.5,
     budget_hit=("b", 1.25),
     seconds=2.5,
@@ -63,6 +64,7 @@ def test_the_file_says_what_ran_and_never_what_it_means() -> None:
         "head",
         "lint_lines",
         "lint_summary",
+        "probes",
         "runs",
         "schema",
         "seconds",
@@ -98,6 +100,7 @@ def _with_run(**changes: object) -> dict[str, object]:
 
 
 GOOD_CALL = {"node": "a", "how": "live", "seconds": 0.5, "rebind_skipped": False, "raised": False}
+GOOD_PROBE = {"run": 0, "step": 0, "node": "a", "output": None, "goto": None, "raised": ""}
 REFUSED = {
     "a list": [],
     "empty": {},
@@ -117,6 +120,11 @@ REFUSED = {
     "runs that aren't a list": {**BODY, "runs": {}},
     "a run that isn't one": {**BODY, "runs": [1]},
     "a run with a verdict": _with_run(verdict="pass"),
+    "probes that aren't a list": {**BODY, "probes": {}},
+    "a probe with a verdict": {**BODY, "probes": [{**GOOD_PROBE, "drifted": True}]},
+    "a probe with text for its run": {**BODY, "probes": [{**GOOD_PROBE, "run": "0"}]},
+    "a probe with no node": {**BODY, "probes": [{**GOOD_PROBE, "node": None}]},
+    "a probe that raised a number": {**BODY, "probes": [{**GOOD_PROBE, "raised": 1}]},
     "steps that aren't a list": _with_run(steps={}),
     "a step with no node": _with_run(steps=[{"output": 1}]),
     "a node that isn't text": _with_run(steps=[{"node": 1, "output": 1}]),
@@ -151,43 +159,9 @@ def test_what_is_not_json_is_refused() -> None:
         parse_candidate("not json")
 
 
-# T162, step 1 of 2: this version reads schema 2, which adds the probes, but still writes schema 1.
-# So a job on this version can decide from a newer candidate job's file, and an older job can
-# still decide from this one's.
-GOOD_PROBE = {"run": 0, "step": 0, "node": "a", "output": {"x": 2}, "goto": None, "raised": ""}
-
-
-def test_it_still_writes_schema_1_with_no_probes() -> None:
-    assert (BODY["schema"], "probes" in BODY) == (1, False)
-
-
-def test_a_schema_2_file_and_its_probes_are_read() -> None:
-    run = parse_candidate(json.dumps({**BODY, "schema": 2, "probes": [GOOD_PROBE]}))
-    assert run.probes == (ProbeStep(0, 0, "a", {"x": 2}),)
-    assert run == replace(RUN, probes=run.probes)
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        {**BODY, "schema": 2},  # no probes
-        {**BODY, "probes": []},  # schema 1 has none
-        {**BODY, "schema": 2, "probes": {}},
-        {**BODY, "schema": 2, "probes": [{**GOOD_PROBE, "drifted": True}]},
-        {**BODY, "schema": 2, "probes": [{**GOOD_PROBE, "run": "0"}]},
-        {**BODY, "schema": 2, "probes": [{**GOOD_PROBE, "node": None}]},
-        {**BODY, "schema": 2, "probes": [{**GOOD_PROBE, "raised": 1}]},
-    ],
-    ids=[
-        "schema 2 with no probes",
-        "schema 1 with probes",
-        "probes that aren't a list",
-        "a probe with a verdict",
-        "text for a run",
-        "no node",
-        "a number for raised",
-    ],
-)
-def test_probes_that_are_not_exactly_probes_are_refused(body: object) -> None:
-    with pytest.raises(ValueError):
-        parse_candidate(json.dumps(body))
+def test_a_file_from_another_lgcov_version_says_so() -> None:
+    # T162: schema 2 carries the probes; both jobs must run the same lgcov.
+    with pytest.raises(
+        ValueError, match="^candidate file schema 1, evaluator needs 2: run the same"
+    ):
+        parse_candidate(json.dumps({**BODY, "schema": 1}))

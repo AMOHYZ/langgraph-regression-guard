@@ -38,9 +38,9 @@ nothing checked what the new prompts did to the nodes downstream.
 
 ## What lgcov does differently
 
-**(a) Root vs propagated drift, per node.** When a PR changes an agent, the PR comment calls
-the first node to drift in each run root, and the nodes that drift after it downstream
-(propagated). On [open_deep_research #163](benchmark.md#real-prs), `write_research_brief`
+**(a) Root vs propagated drift, per node.** When a PR changes an agent, the PR comment calls a
+node root when its own code changed and it drifts on its recorded input (T162), and the nodes that
+drift only because their input did propagated. A changed model node is inconclusive until T211. On [open_deep_research #163](benchmark.md#real-prs), `write_research_brief`
 writes the rewritten supervisor prompt into the state. lgcov named it root and
 `final_report_generation` propagated, as [the human labels](benchmark/open_deep_research-163.yaml)
 do. It also called `research_supervisor` propagated, though that subgraph holds the other

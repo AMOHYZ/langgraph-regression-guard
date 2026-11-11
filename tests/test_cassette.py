@@ -1,3 +1,4 @@
+import contextlib
 import random
 import socket
 import time
@@ -15,7 +16,15 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
 
 from lgcov.attribution import NEEDS_LIVE, Probe
-from lgcov.cassette import Cassette, probe_nodes, record, replay
+from lgcov.cassette import (
+    Cassette,
+    ProbeStep,
+    judge_probes,
+    probe_nodes,
+    probe_steps,
+    record,
+    replay,
+)
 
 
 def _b_changed(state: S) -> S:
@@ -520,3 +529,33 @@ def test_probe_a_node_that_reaches_for_the_network_needs_a_live_probe() -> None:
 
     base = record(_one_node(lambda s: s), {"x": 1})
     assert probe_nodes(_one_node(calls_out), [base], ["n"]) == {"n": Probe(None, NEEDS_LIVE)}
+
+
+def test_probe_steps_say_what_ran_and_judge_probes_says_what_it_means() -> None:
+    # T162: the job that runs the PR's code reports raw output; the one that decides compares it.
+    base = record(_one_node(lambda s: {"x": s["x"] + 1}), {"x": 1})
+    [ran] = probe_steps(_one_node(lambda s: {"x": s["x"] + 2}), [base], ["n"])
+    assert ran == ProbeStep(0, 0, "n", {"x": 3})
+    assert judge_probes([base], [ran]) == {"n": Probe(True)}
+    assert judge_probes([base], [ProbeStep(0, 0, "n", {"x": 2})]) == {"n": Probe(False)}
+
+
+def test_a_probe_that_reaches_for_the_network_is_recorded_as_raised_not_a_crash() -> None:
+    def swallows(s: S) -> S:
+        with contextlib.suppress(Exception):  # an SDK's retry loop must not catch the refusal
+            socket.create_connection(("127.0.0.1", 9), timeout=0.1)
+        return s
+
+    base = record(_one_node(lambda s: s), {"x": 1})
+    [ran] = probe_steps(_one_node(swallows), [base], ["n"])
+    assert ran == ProbeStep(0, 0, "n", raised=NEEDS_LIVE)
+    assert judge_probes([base], [ran]) == {"n": Probe(None, NEEDS_LIVE)}
+
+
+@pytest.mark.parametrize(
+    "forged", [ProbeStep(0, 1, "n"), ProbeStep(-1, 0, "n"), ProbeStep(0, 0, "m")]
+)
+def test_a_probe_that_matches_no_recorded_step_is_refused(forged: ProbeStep) -> None:
+    base = record(_one_node(lambda s: s), {"x": 1})
+    with pytest.raises(ValueError, match="matches no recorded step"):
+        judge_probes([base], [forged])

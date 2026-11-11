@@ -23,7 +23,7 @@ from pathlib import Path
 from lgcov.cassette import (
     Cassette,
     Replay,
-    _codes,
+    changed_nodes,
     probe_nodes,
     record,
     replay_run,
@@ -43,13 +43,7 @@ def _save(path: Path, runs: list[Cassette]) -> None:
 
 def _probes(graph: object, recorded: list[Cassette], drifted: list[list[str]]) -> object:
     # T162: each node whose code changed and that drifted, run on base's input, offline.
-    codes = _codes(graph)
-    changed = {
-        s.node
-        for r in recorded
-        for s in r.steps
-        if s.code is not None and codes.get(s.node) not in (None, s.code)
-    }
+    changed = changed_nodes(graph, recorded)
     probes = probe_nodes(graph, recorded, changed & {n for d in drifted for n in d})
     return {n: [p.drifted, p.reason] for n, p in probes.items()}
 
