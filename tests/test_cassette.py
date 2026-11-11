@@ -1,4 +1,5 @@
 import random
+import socket
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -13,7 +14,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
 
-from lgcov.cassette import Cassette, record, replay
+from lgcov.attribution import NEEDS_LIVE, Probe
+from lgcov.cassette import Cassette, probe_nodes, record, replay
 
 
 def _b_changed(state: S) -> S:
@@ -489,3 +491,32 @@ def test_a_node_inside_a_subgraph_that_raises_is_named_subgraph_dot_node() -> No
     with pytest.raises(NodeError) as info:
         replay(g.compile(), Cassette({"x": 1}, []))
     assert (info.value.node, info.value.transport) == ("sub.inner", False)
+
+
+# T162: the probe runs head's node on base's recorded input, with the network blocked.
+def _one_node(node: Callable[[S], S]) -> CompiledStateGraph[S]:
+    def n(state: S) -> S:
+        return node(state)
+
+    builder = StateGraph(S)
+    builder.add_node("n", n)
+    builder.add_edge(START, "n")
+    builder.add_edge("n", END)
+    return builder.compile()
+
+
+def test_probe_runs_a_changed_plain_node_on_base_input_and_says_whether_it_drifts() -> None:
+    base = record(_one_node(lambda s: {"x": s["x"] + 1}), {"x": 1})
+    refactored = _one_node(lambda s: {"x": sum([s["x"], 1])})
+    changed = _one_node(lambda s: {"x": s["x"] + 2})
+    assert probe_nodes(refactored, [base], ["n"]) == {"n": Probe(False)}
+    assert probe_nodes(changed, [base], ["n"]) == {"n": Probe(True)}
+
+
+def test_probe_a_node_that_reaches_for_the_network_needs_a_live_probe() -> None:
+    def calls_out(s: S) -> S:
+        socket.create_connection(("example.invalid", 443), timeout=1)
+        return s
+
+    base = record(_one_node(lambda s: s), {"x": 1})
+    assert probe_nodes(_one_node(calls_out), [base], ["n"]) == {"n": Probe(None, NEEDS_LIVE)}

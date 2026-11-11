@@ -61,7 +61,7 @@ Against these seven, as documented. Each has a limit next to it.
   this way. The nearest are Kitaru's node listings, which you read by hand, and root-cause
   diagnosis of a failing trace in LangSmith Engine, Opik's Ollie and Braintrust's Loop.
   lgcov's evidence is a [pilot][lg-real], not proof: one PR, and 1 of 1 roots. Recall is
-  capped at about 1/5 to 1/6, because only the first node to drift is called root (T162), and
+  about 1/5 to 1/6 with first-drift roots, none with the multi-root rule (T162) on its saved runs, and
   a subgraph is scored as one node. A noise check, base against base on a real model (T173),
   gave the same root as the PR, so these runs can't separate cause from model noise: lgcov's
   root has no noise threshold yet.

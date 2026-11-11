@@ -2365,16 +2365,27 @@ def test_cli_bench_reports_the_subgraph_miss_as_a_known_gap(tmp_path: Path) -> N
     code, results, md = _bench(tmp_path, str(BENCH))
     assert code == 0  # a report, not a gate
     rows = _rows(results)
-    assert sorted(rows) == ["linear", "send_fanout", "subgraph"]
+    assert sorted(rows) == ["linear", "multi_root", "send_fanout", "subgraph"]
     assert (rows["send_fanout"]["found_root"], rows["send_fanout"]["found_propagated"]) == (
         ["worker_b"],
         ["reducer"],
     )
-    # Drift inside a subgraph is still blamed on `sub`, not `sub.inner`: T109 names crashes only.
-    assert (rows["subgraph"]["found_root"], rows["subgraph"]["expected_root"]) == (
+    # Drift inside a subgraph: `sub` drifts first, but has no fingerprint, so T162 can't call it
+    # root; `sub.inner` isn't recorded (T193).
+    assert (rows["subgraph"]["first_drift"], rows["subgraph"]["expected_root"]) == (
         ["sub"],
         ["sub.inner"],
     )
+    assert (rows["subgraph"]["found_root"], rows["subgraph"]["inconclusive"]) == (
+        [],
+        {"sub": "no fingerprint: a subgraph or the like (T193)"},
+    )
+    # T162: both nodes whose own code changed are root, not just the first to drift.
+    assert (rows["multi_root"]["found_root"], rows["multi_root"]["found_propagated"]) == (
+        ["b", "c"],
+        ["d", "e"],
+    )
+    assert rows["multi_root"]["first_drift"] == ["b"]
     assert "❌ known gap (subgraph)" in md and "## Known gaps" in md
 
 
@@ -2496,17 +2507,17 @@ def test_cli_bench_from_runs_scores_the_saved_163_runs_without_recording(tmp_pat
     assert code == 0
     row = _rows(results)["open_deep_research-163"]
     assert (row["status"], row["error"]) == ("", "")
-    # First-drift attribution: one root of six, the before state T162 starts from.
-    assert row["found_root"] == ["write_research_brief"]
-    assert row["root"] == {
-        "tp": 1,
-        "fp": 0,
-        "fn": 5,
-        "precision": 1.0,
-        "recall": 1 / 6,
-        "f1": 2 / 7,
+    # T162: first-drift attribution said root `write_research_brief` (1 of 6). Saved runs can't
+    # be probed, and a probe of a model node would need a live call (T211), so the nodes whose
+    # code changed are INCONCLUSIVE, not root. `research_supervisor` is a subgraph with no
+    # fingerprint, and the other five roots are its inner nodes, which aren't recorded (T193).
+    assert (row["found_root"], row["first_drift"]) == ([], ["write_research_brief"])
+    assert row["inconclusive"] == {
+        "final_report_generation": "not probed: scored from saved runs",
+        "research_supervisor": "no fingerprint: a subgraph or the like (T193)",
+        "write_research_brief": "not probed: scored from saved runs",
     }
-    assert row["found_propagated"] == ["final_report_generation", "research_supervisor"]
+    assert row["root"] == {"tp": 0, "fp": 0, "fn": 6, "precision": 0.0, "recall": 0.0, "f1": 0.0}
     assert "--from-runs" in md
 
 

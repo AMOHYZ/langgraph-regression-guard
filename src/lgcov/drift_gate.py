@@ -33,8 +33,8 @@ def parse_fail_on(value: str) -> FailOn:
 def drift_exit_code(fail_on: FailOn, root: int, propagated: int) -> int:
     """EXIT_DRIFT when drift that `fail_on` cares about was found, else EXIT_PASS.
 
-    Until replay records node inputs, every run that drifts has a root (its first
-    drifted node), so root-drift and any-drift fail on the same PRs.
+    `lgcov ci` still calls each drifting run's first drifted node root (T162's probe is
+    bench-only so far), so root-drift and any-drift fail on the same PRs.
     """
     if fail_on == "never":
         return EXIT_PASS
