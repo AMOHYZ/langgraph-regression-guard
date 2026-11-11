@@ -1,0 +1,13 @@
+# T162 synthetic fixture: one PR, two roots. First-drift attribution names only b.
+graph: graph.py:graph
+base_patch: multi_root/base.py
+head_patch: multi_root/head.py
+cases:
+  - {question: "Where is my order?"}
+expected:
+  root: [b, c]
+  propagated: [d, e]
+notes: >-
+  The PR edits b's prompt and c's format, and renames a local in d. On base's input d gives
+  base's output, so it only drifts because c did; e is unchanged.
+hard_cases: []

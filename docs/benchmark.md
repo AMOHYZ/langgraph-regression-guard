@@ -1,6 +1,6 @@
 # Attribution benchmark
 
-**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. On 72 synthetic cases from 24 edits, lgcov's root misses 14 of 31 regressed cases (5 of 12 by edit) and flags all 24 harmless ones, as do both node-naming baselines.
+**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. Re-scored offline with the multi-root rule (T162), the pilot's saved runs name no root: see [Multi-root re-score](#multi-root-re-score-t162). On 72 synthetic cases from 24 edits, lgcov's root misses 14 of 31 regressed cases (5 of 12 by edit) and flags all 24 harmless ones, as do both node-naming baselines.
 
 ## What was measured
 
@@ -20,19 +20,20 @@ Each kind of evidence has its own section, and their numbers never combine: demo
 
 ## Demo fixtures
 
-Run 2026-10-31: does lgcov name the node a change broke (root) and the nodes that only inherited the damage (propagated)? Each benchmark records its cases on base, replays head, and compares lgcov's labels with hand-written ones: the 3 benchmark files in `tests/fixtures/bench`. Precision / recall / F1:
+Run 2026-11-11: does lgcov name the node a change broke (root) and the nodes that only inherited the damage (propagated)? Each benchmark records its cases on base, replays head, and compares lgcov's labels with hand-written ones: the 4 benchmark files in `tests/fixtures/bench`. Precision / recall / F1:
 
 | benchmark | root | propagated | found root | expected root | time | |
 |---|---|---|---|---|---|---|
-| linear | 1.00 / 1.00 / 1.00 | 1.00 / 1.00 / 1.00 | `b` | `b` | 0.01 s | ✓ |
-| send_fanout | 1.00 / 1.00 / 1.00 | 1.00 / 1.00 / 1.00 | `worker_b` | `worker_b` | 0.02 s | ✓ |
-| subgraph | 0.00 / 0.00 / 0.00 | 1.00 / 1.00 / 1.00 | `sub` | `sub.inner` | 0.01 s | ❌ known gap (subgraph) |
-| **micro** | 0.67 / 0.67 / 0.67 | 1.00 / 1.00 / 1.00 | | | | |
-| **macro** | 0.67 / 0.67 / 0.67 | 1.00 / 1.00 / 1.00 | | | | |
+| linear | 1.00 / 1.00 / 1.00 | 1.00 / 1.00 / 1.00 | `b` | `b` | 4.54 s | ✓ |
+| multi_root | 1.00 / 1.00 / 1.00 | 1.00 / 1.00 / 1.00 | `b`, `c` | `b`, `c` | 4.34 s | ✓ |
+| send_fanout | 1.00 / 1.00 / 1.00 | 1.00 / 1.00 / 1.00 | `worker_b` | `worker_b` | 4.78 s | ✓ |
+| subgraph | 0.00 / 0.00 / 0.00 | 1.00 / 1.00 / 1.00 | — | `sub.inner` | 5.13 s | ❌ known gap (subgraph) |
+| **micro** | 1.00 / 0.80 / 0.89 | 1.00 / 1.00 / 1.00 | | | | |
+| **macro** | 0.75 / 0.75 / 0.75 | 1.00 / 1.00 / 1.00 | | | | |
 
 ### Known gaps
 
-- `subgraph` (subgraph): lgcov said root `sub`, expected `sub.inner`. The PR edits inner, inside the subgraph node sub; after only drifts because of it.
+- `subgraph` (subgraph): lgcov said root —, expected `sub.inner`. Inconclusive: `sub` (no fingerprint: a subgraph or the like (T193)). The PR edits inner, inside the subgraph node sub; after only drifts because of it.
 
 Reproduce:
 
@@ -151,11 +152,30 @@ Measured by `lgcov bench`, apart from the last two rows.
 
 lgcov said root `write_research_brief`, propagated `final_report_generation` and `research_supervisor`.
 
-- **Recall is capped at about 1/6.** lgcov calls only the first node to drift root, and this PR has 6 labelled roots. Multi-root is T162. This is a known limit, not a bug.
+- **Recall is capped at about 1/6.** This run called only the first node to drift root, and this PR has 6 labelled roots. T162 changed that rule, but on these runs it names no root: see [Multi-root re-score](#multi-root-re-score-t162).
 - **The propagated false positive comes from the same limit.** `research_supervisor` is the subgraph holding the other 5 labelled roots, and lgcov scores it as one node.
 - **Root precision is 1 of 1,** so it says little: the 95% Wilson interval is 0.21 to 1.00.
 - **The hit has a real cause, but this run can't separate cause from noise.** The supervisor's system prompt, which the PR rewrote, differs between the sides. But a node whose code changed runs live, and a live model answer differs anyway. A later base-against-base run gave the same labels, so this hit can't be told apart from noise: see [A/A noise floor](#aa-noise-floor).
 - **Clarification off removes the likeliest false root.** `clarify_with_user` only renamed locals, and with clarification off it calls no model, so it can't drift. With it on, it would run live and probably be called root. That wasn't measured.
+
+### Multi-root re-score (T162)
+
+T162 calls a node root when its own fingerprint changed and it drifts when run with head's code on base's recorded input. That run is a probe with the network blocked, so it costs nothing. A node that reaches for the network would need a live call, and the [A/A run](#aa-noise-floor) shows one live sample drifts with no change, so it's inconclusive until T211 adds a noise threshold. The first node to drift is still reported, as `first_drift`.
+
+Scored from the pilot's saved runs with `lgcov bench docs/benchmark --only open_deep_research-163 --from-runs <stage1/runs>`, no call made. Saved runs can't be probed, so every changed node that drifted is inconclusive here:
+
+| | first drift (before) | T162 (after) |
+|---|---|---|
+| Root precision / recall / F1 | 1.00 / 0.17 / 0.29 | no root named / 0.00 / 0.00 |
+| Propagated precision / recall / F1 | 0.50 / 1.00 / 0.67 | no node named / 0.00 / 0.00 |
+| Root | `write_research_brief` | none |
+| Propagated | `final_report_generation`, `research_supervisor` | none |
+| Inconclusive | | `write_research_brief`, `final_report_generation` (not probed), `research_supervisor` (no fingerprint) |
+
+- **Five of the six roots can't be reached by any rule yet.** They're inside the `research_supervisor` subgraph, whose inner nodes aren't recorded (T193).
+- **`write_research_brief` is a model node.** After masking, it gets the same input on both sides and drifts, but that drift is one live sample. A probe would need a live call, so it stays inconclusive until T211.
+- **`final_report_generation` is now inconclusive, not propagated.** Its code changed and its input changed, and without a probe on base's input lgcov can't say which one made it drift.
+- **Docstring edits are a known false-root source.** The fingerprint still includes docstrings (T212), so a node whose only change is a docstring is probed, and a probe that drifts would be called root.
 
 ### Agent KPIs
 
@@ -253,7 +273,7 @@ On single-node synthetic edits, edited node from the diff matches or beats lgcov
 
 Seen in a benchmark run:
 
-- **Every root after the first (T162).** Only the first node to drift is called root, which caps recall on #163 at about 1/6 on the pilot and 1/5 on the rerun.
+- **Roots it can't check (T162).** Since T162 every node whose own code changed and that drifts on base's recorded input is root, not just the first to drift: the `multi_root` demo fixture scores 2 of 2. On #163 it names none. Five of the six roots are inside a subgraph, which isn't recorded (T193), and checking `write_research_brief` would need a live model call, which one sample can't tell from noise (T211), so it's inconclusive.
 - **Nodes inside a subgraph.** A subgraph is scored as one node. On #163 that made `research_supervisor` a propagated false positive, and it holds most of the labelled roots. The [demo fixture](#known-gaps) misses `sub.inner` the same way.
 
 Known from the [replay audit](validation/replay-audit.md#matrix), with no benchmark case yet:

@@ -2,6 +2,7 @@ import asyncio
 import atexit
 import inspect
 import json
+import socket
 import threading
 import time
 from collections import Counter
@@ -13,7 +14,7 @@ from dataclasses import asdict, dataclass, field, replace
 from functools import partial, wraps
 from statistics import fmean
 from types import CodeType, FunctionType
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NoReturn, TypedDict
 
 import httpx
 from langgraph.errors import GraphBubbleUp
@@ -21,6 +22,7 @@ from langgraph.graph import START
 from langgraph.pregel import Pregel
 from langgraph.types import Command, Send
 
+from lgcov.attribution import NEEDS_LIVE, NO_FINGERPRINT, Probe, drift_exceeds_noise
 from lgcov.fingerprint import fingerprint
 from lgcov.messages import decode, encode
 from lgcov.normalize import key_view, normalize
@@ -700,6 +702,64 @@ def compared_run(
         if expected.get(n) != actual.get(n)
     )
     return Replay(drifts, tuple(fresh), tuple(calls), halt, not_checked)
+
+
+@contextmanager
+def _offline(reached: list[str]) -> Iterator[None]:
+    # T162: every way out to the network refuses, and says it was tried.
+    def refuse(*args: object, **kwargs: object) -> NoReturn:
+        reached.append(repr(args[-1])[:80] if args else "")
+        raise ConnectionRefusedError("lgcov's probe runs offline (T162)")
+
+    saved = [
+        (socket, "getaddrinfo", socket.getaddrinfo),
+        (socket.socket, "connect", socket.socket.connect),
+        (socket.socket, "connect_ex", socket.socket.connect_ex),
+    ]
+    for owner, name, _ in saved:
+        setattr(owner, name, refuse)
+    try:
+        yield
+    finally:
+        for owner, name, original in saved:
+            setattr(owner, name, original)
+
+
+def _probe(step: Step, fn: FunctionType | None, ignore_paths: Sequence[str]) -> Probe:
+    if fn is None:
+        return Probe(None, NO_FINGERPRINT)
+    reached: list[str] = []
+    out: Any = None
+    try:
+        with _offline(reached):
+            config: dict[str, object] = {"config": {"configurable": {}}}  # what a node can ask for
+            asks = "config" in inspect.signature(fn).parameters
+            out = fn(deepcopy(step.input), **(config if asks else {}))
+            if inspect.iscoroutine(out):
+                out = asyncio.run(out)
+    except Exception as exc:  # user node code can raise anything
+        if not reached:
+            return Probe(None, f"raised {type(exc).__name__} on base's input")
+    if reached:
+        return Probe(None, NEEDS_LIVE)
+    goto = _goto_saved(out.goto) if isinstance(out, Command) else None
+    routed = {step.node} if step.goto is not None else set()
+    fresh = _compared(Step(step.node, _streamed(out), goto=goto), ignore_paths, routed)
+    return Probe(drift_exceeds_noise(step.node, _compared(step, ignore_paths, routed), fresh))
+
+
+def probe_nodes(
+    graph: Any, runs: Sequence[Cassette], nodes: Container[str], ignore_paths: Sequence[str] = ()
+) -> dict[str, Probe]:
+    """T162: run each of `nodes` with this graph's code on every input base recorded for it, with
+    the network blocked. A node that finishes says whether its output drifts; one that reaches for
+    the network would need a live call, and one live sample can't be told from noise (T211)."""
+    fns = {name: _plain(spec.bound) for name, spec in getattr(graph, "nodes", {}).items()}
+    found: dict[str, Probe] = {}
+    for step in (s for run in runs for s in run.steps if s.node in nodes):
+        if found.get(step.node, Probe(False)).drifted is False:  # stop once one says more
+            found[step.node] = _probe(step, fns.get(step.node), ignore_paths)
+    return found
 
 
 def accept_nodes(

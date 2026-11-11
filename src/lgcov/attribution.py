@@ -216,6 +216,62 @@ def score(found: Collection[str], expected: Collection[str]) -> Score:
     return Score(len(hit), len(set(found) - hit), len(set(expected) - hit))
 
 
+# T162: why a node whose code changed and that drifted is neither root nor propagated.
+NEEDS_LIVE = "needs live probe; noise threshold pending T211"
+NOT_PROBED = "not probed: scored from saved runs"
+NO_FINGERPRINT = "no fingerprint: a subgraph or the like (T193)"
+
+
+def drift_exceeds_noise(node: str, a: object, b: object) -> bool:
+    """T162: is `node`'s output `b` different from `a` by more than the node's own noise? There's
+    no noise threshold yet, so any difference counts (T211 adds one)."""
+    return a != b
+
+
+@dataclass(frozen=True)
+class Probe:
+    """T162: a node run with head's code on the input base recorded for it. `drifted` is None
+    when it couldn't run offline, and `reason` says why."""
+
+    drifted: bool | None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class NodeLabels:
+    root: tuple[str, ...]
+    propagated: tuple[str, ...]
+    inconclusive: dict[str, str]  # node: why
+
+
+def classify(
+    drifted: Collection[str],
+    codes: tuple[Mapping[str, str | None], Mapping[str, str | None]],
+    probes: Mapping[str, Probe],
+) -> NodeLabels:
+    """T162: each drifted node is root when its fingerprint changed (base's code against head's)
+    and it drifts on base's recorded input (`probes`), propagated when it only drifts because its
+    input did. A node only one side ran is root: the PR added or removed it. T212: docstrings are
+    still in the fingerprint, so a docstring edit with a probe that drifts is a false root."""
+    base, head = codes
+    root: list[str] = []
+    propagated: list[str] = []
+    inconclusive: dict[str, str] = {}
+    for node in sorted(set(drifted)):
+        probe = probes.get(node, Probe(None, NOT_PROBED))
+        if node not in base or node not in head:
+            root.append(node)
+        elif base[node] is None or head[node] is None:
+            inconclusive[node] = NO_FINGERPRINT
+        elif base[node] == head[node] or probe.drifted is False:
+            propagated.append(node)
+        elif probe.drifted:
+            root.append(node)
+        else:
+            inconclusive[node] = probe.reason
+    return NodeLabels(tuple(root), tuple(propagated), inconclusive)
+
+
 @dataclass(frozen=True)
 class Result:
     name: str
@@ -230,6 +286,8 @@ class Result:
     notes: str = ""
     error: str = ""  # the benchmark couldn't run: no scores
     status: str = ""  # one of STATUSES: listed, never run or scored
+    first_drift: tuple[str, ...] = ()  # T162: the first node to drift in some run
+    inconclusive: tuple[tuple[str, str], ...] = ()  # T162: (node, why), sorted
 
     @property
     def pending(self) -> bool:
@@ -350,9 +408,12 @@ def render_markdown(results: Sequence[Result], command: str, date: str, source: 
             if r.error:
                 lines.append(f"- `{r.name}`{kinds}: run error: {r.error}")
                 continue
+            unsure = "; ".join(f"`{n}` ({why})" for n, why in r.inconclusive)
             lines.append(
                 f"- `{r.name}`{kinds}: lgcov said root {_nodes(r.found_root)}, expected "
-                f"{_nodes(r.expected_root)}." + (f" {r.notes}" if r.notes else "")
+                f"{_nodes(r.expected_root)}."
+                + (f" Inconclusive: {unsure}." if unsure else "")
+                + (f" {r.notes}" if r.notes else "")
             )
     lines += ["", "Reproduce:", "", "```bash", command, "```", ""]
     return "\n".join(lines)
@@ -386,6 +447,8 @@ def results_json(results: Sequence[Result]) -> str:
                 "notes": r.notes,
                 "error": r.error,
                 "status": r.status,
+                "first_drift": list(r.first_drift),
+                "inconclusive": dict(r.inconclusive),
             }
             for r in results
         ],

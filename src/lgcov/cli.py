@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
@@ -24,8 +24,10 @@ import yaml
 
 from lgcov.attribution import (
     Benchmark,
+    Probe,
     Result,
     Score,
+    classify,
     parse_benchmark,
     pending_result,
     render_markdown,
@@ -2188,17 +2190,21 @@ def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Re
                 base_target, head_target, worktrees = _bench_sides(b, Path(tmp))
                 base_root, head_root = Path(tmp) / "base", Path(tmp) / "head"
                 cases, drifted = Path(tmp) / "cases", Path(tmp) / "drifted"
+                probed = Path(tmp) / "probes"
                 here = Path(tmp) if keep is None else keep / b.name
                 saved, fresh = here / "base.json", here / "head.json"
                 cases.write_text(json.dumps(list(b.cases)), encoding="utf-8")
                 _run_side(b, "head", head_root, "check", head_target)
                 _run_side(b, "base", base_root, "record", base_target, str(cases), str(saved))
-                replaying = [head_target, str(saved), str(drifted), str(fresh)]
+                replaying = [head_target, str(saved), str(drifted), str(fresh), str(probed)]
                 replaying += ["--live"] if live else []
                 _run_side(b, "head", head_root, "replay", *replaying)
                 runs = _load_runs(str(saved))
+                heads = _load_runs(str(fresh))
                 nodes: list[list[str]] = json.loads(drifted.read_text(encoding="utf-8"))
                 drifts = [[Drift(n, None, None) for n in names] for names in nodes]
+                raw = json.loads(probed.read_text(encoding="utf-8"))
+                probes = {n: Probe(drifted, why) for n, (drifted, why) in raw.items()}
             finally:
                 for worktree in worktrees:
                     remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]
@@ -2211,7 +2217,7 @@ def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Re
         failed = getattr(exc, "stderr", "") or str(exc)
         error = f"{type(exc).__name__}: {str(failed).strip()[:200]}"
         return _error_row(b, error, perf_counter() - start)
-    return _labelled(b, runs, drifts, perf_counter() - start)
+    return _labelled(b, (runs, heads), drifts, probes, perf_counter() - start)
 
 
 def _bench_saved(b: Benchmark, folder: Path) -> Result:
@@ -2227,24 +2233,33 @@ def _bench_saved(b: Benchmark, folder: Path) -> Result:
     drifts = [
         list(compared_run(r, f.steps, (), None).drifts) for r, f in zip(runs, fresh, strict=True)
     ]
-    return _labelled(b, runs, drifts, perf_counter() - start)
+    return _labelled(b, (runs, fresh), drifts, {}, perf_counter() - start)
 
 
 def _labelled(
-    b: Benchmark, runs: list[Cassette], drifts: list[list[Drift]], seconds: float
+    b: Benchmark,
+    sides: tuple[list[Cassette], list[Cassette]],
+    drifts: list[list[Drift]],
+    probes: Mapping[str, Probe],
+    seconds: float,
 ) -> Result:
-    counts, roots = _drift_kinds(runs, drifts)
-    found = (tuple(sorted(roots)), tuple(sorted(counts.keys() - roots)))
+    """T162: root by fingerprint and probe (`classify`); the first node to drift is kept too."""
+    counts, first = _drift_kinds(sides[0], drifts)
+    base, head = ({s.node: s.code for r in side for s in r.steps} for side in sides)
+    labels = classify(counts.keys(), (base, head), probes)
     return Result(
         b.name,
-        *found,
-        score(found[0], b.root),
-        score(found[1], b.propagated),
+        labels.root,
+        labels.propagated,
+        score(labels.root, b.root),
+        score(labels.propagated, b.propagated),
         seconds,
         tuple(sorted(b.root)),
         tuple(sorted(b.propagated)),
         b.hard_cases,
         b.notes,
+        first_drift=tuple(sorted(first)),
+        inconclusive=tuple(sorted(labels.inconclusive.items())),
     )
 
 

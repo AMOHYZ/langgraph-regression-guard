@@ -30,7 +30,7 @@ do. It also called `research_supervisor` propagated, though that subgraph holds 
 labelled roots and is scored as one node.
 *Status: built, and a pilot on real PRs.* Root precision is 1 of 1 on that one PR, with a 95%
 Wilson interval of 0.21 to 1.00, so it proves no precision claim. Recall is capped at about
-1/5 to 1/6, because a second root in the same run reads as downstream (T162).
+1/5 to 1/6. The multi-root rule (T162) names no root on the saved runs: the other roots sit inside a subgraph lgcov doesn't record (T193), and the model node is inconclusive until a noise threshold (T211).
 The [replay audit](validation/replay-audit.md) checks the replay this rests on, not these
 labels, and a change replay can't see can give no drift, so no root.
 `diff_cassettes` classifies by each node's recorded input, but only tests call it so far. A
@@ -130,8 +130,8 @@ column against lgcov: [bake-off.md](bake-off.md).
 - Serve a subgraph or a `ToolNode` from the cassette: they always run live. Drift
   inside a subgraph is blamed on the subgraph node (`sub`), not its inner node; a crash
   there does name the inner node (`sub.inner`).
-- Name a second root in the same run: only the first node to drift is called root, so a
-  later independent change reads as downstream (T162).
+- Name a model node as root: since T162 a second root in the same run is named only if a
+  probe with the network blocked shows it drifting, so a model node is inconclusive until T211.
 - See a change that reaches a node only through a message's id, usage or other metadata, or a
   `Store` read, or replay a graph with a checkpointer or an `interrupt`:
   [known replay limits](../README.md#known-replay-limits).
