@@ -2182,7 +2182,6 @@ def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Re
     T173: with `live`, head serves nothing, so base against base measures the model's noise."""
     start = perf_counter()
     worktrees: list[Path] = []
-    expected = (tuple(sorted(b.root)), tuple(sorted(b.propagated)))
     try:
         with tempfile.TemporaryDirectory() as tmp:
             try:
@@ -2212,6 +2211,28 @@ def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Re
         failed = getattr(exc, "stderr", "") or str(exc)
         error = f"{type(exc).__name__}: {str(failed).strip()[:200]}"
         return _error_row(b, error, perf_counter() - start)
+    return _labelled(b, runs, drifts, perf_counter() - start)
+
+
+def _bench_saved(b: Benchmark, folder: Path) -> Result:
+    """T162: score the runs `--keep-runs` saved in <folder>/<benchmark>/, compared as replay
+    compares them. Nothing runs, so it costs nothing, whatever the row's `status`."""
+    start = perf_counter()
+    try:
+        runs, fresh = (_load_runs(str(folder / b.name / name)) for name in _KEPT)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _error_row(b, f"{type(exc).__name__}: {str(exc)[:200]}", perf_counter() - start)
+    if len(runs) != len(fresh):
+        return _error_row(b, f"{len(runs)} runs on base, {len(fresh)} on head", 0.0)
+    drifts = [
+        list(compared_run(r, f.steps, (), None).drifts) for r, f in zip(runs, fresh, strict=True)
+    ]
+    return _labelled(b, runs, drifts, perf_counter() - start)
+
+
+def _labelled(
+    b: Benchmark, runs: list[Cassette], drifts: list[list[Drift]], seconds: float
+) -> Result:
     counts, roots = _drift_kinds(runs, drifts)
     found = (tuple(sorted(roots)), tuple(sorted(counts.keys() - roots)))
     return Result(
@@ -2219,8 +2240,9 @@ def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Re
         *found,
         score(found[0], b.root),
         score(found[1], b.propagated),
-        perf_counter() - start,
-        *expected,
+        seconds,
+        tuple(sorted(b.root)),
+        tuple(sorted(b.propagated)),
         b.hard_cases,
         b.notes,
     )
@@ -2279,7 +2301,18 @@ def _bench_cmd(argv: list[str]) -> int:
         help="save each side's runs in DIR/<benchmark>/{base,head}.json as each one finishes",
     )
     ap.add_argument("--live", action="store_true", help="T173: head runs every node, serving none")
+    ap.add_argument(
+        "--from-runs",
+        metavar="DIR",
+        help="T162: score the runs --keep-runs saved in DIR instead of running the agent",
+    )
     args = ap.parse_args(argv)
+    if args.from_runs and (args.synthetic or args.keep_runs or args.live):
+        print(
+            "lgcov bench: --from-runs runs nothing: no --synthetic, --keep-runs or --live",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     if args.synthetic:
         if args.dir or args.only or args.keep_runs or args.live:
             print("lgcov bench: --synthetic takes only --out and --json", file=sys.stderr)
@@ -2314,12 +2347,16 @@ def _bench_cmd(argv: list[str]) -> int:
     code = 0
     for b in benchmarks:
         try:
-            results.append(pending_result(b) if b.status else _bench_one(b, keep, args.live))
+            if args.from_runs:
+                results.append(_bench_saved(b, Path(args.from_runs)))
+            else:
+                results.append(pending_result(b) if b.status else _bench_one(b, keep, args.live))
         except _CantImport as exc:
             print(f"lgcov bench: {b.name}: {exc}", file=sys.stderr)
             results.append(_error_row(b, str(exc)[:200], 0.0))
             code = EXIT_ERROR
-    command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only)])
+    saved = [f"--from-runs {args.from_runs}"] if args.from_runs else []
+    command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only), *saved])
     source = f"the {len(results)} benchmark file{'' if len(results) == 1 else 's'} in `{folder}`"
     md = render_markdown(results, command, datetime.now(UTC).date().isoformat(), source)
     for path, text in ((Path(args.out), md), (Path(args.json), results_json(results))):
