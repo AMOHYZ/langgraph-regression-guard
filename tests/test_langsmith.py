@@ -93,6 +93,17 @@ def test_from_env_needs_the_key_and_honours_the_endpoint(monkeypatch: pytest.Mon
     assert eu is not None and eu.url == "https://eu.api.smith.langchain.com"
 
 
+def test_an_org_keys_workspace_goes_with_every_get(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An org-scoped key gets 403 unless each request names the workspace, as the SDK does."""
+    monkeypatch.setenv("LANGSMITH_API_KEY", KEY)
+    monkeypatch.delenv("LANGSMITH_ENDPOINT", raising=False)
+    monkeypatch.setenv("LANGSMITH_WORKSPACE_ID", "ws-1")
+    fake = Fake({"/datasets": [Reply(200, [{"id": "d1"}])]})
+    ls = from_env(fake)
+    assert ls is not None and ls.dataset_id("smoke") == "d1"
+    assert fake.calls[0][2] == {"x-api-key": KEY, "X-Tenant-Id": "ws-1"}
+
+
 # T103 PR 2: the experiment on the dataset that ran on this commit, for the PR report.
 def _experiment(sid: str, commit: str | None, start: str) -> dict[str, object]:
     metadata: dict[str, object] = {} if commit is None else {"git": {"commit": commit}}

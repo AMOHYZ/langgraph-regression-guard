@@ -33,8 +33,9 @@ def parse_fail_on(value: str) -> FailOn:
 def drift_exit_code(fail_on: FailOn, root: int, propagated: int) -> int:
     """EXIT_DRIFT when drift that `fail_on` cares about was found, else EXIT_PASS.
 
-    Until replay records node inputs, every run that drifts has a root (its first
-    drifted node), so root-drift and any-drift fail on the same PRs.
+    T162: `root` counts root nodes and the inconclusive ones (a changed node the offline
+    probe can't run, or drift no changed node explains), so root-drift and any-drift still
+    fail on nearly the same PRs: root-drift passes only when every drifted node is cleared.
     """
     if fail_on == "never":
         return EXIT_PASS

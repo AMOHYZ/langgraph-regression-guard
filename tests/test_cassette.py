@@ -1,4 +1,6 @@
+import contextlib
 import random
+import socket
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -13,7 +15,16 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
 
-from lgcov.cassette import Cassette, record, replay
+from lgcov.attribution import NEEDS_LIVE, Probe
+from lgcov.cassette import (
+    Cassette,
+    ProbeStep,
+    judge_probes,
+    probe_nodes,
+    probe_steps,
+    record,
+    replay,
+)
 
 
 def _b_changed(state: S) -> S:
@@ -489,3 +500,62 @@ def test_a_node_inside_a_subgraph_that_raises_is_named_subgraph_dot_node() -> No
     with pytest.raises(NodeError) as info:
         replay(g.compile(), Cassette({"x": 1}, []))
     assert (info.value.node, info.value.transport) == ("sub.inner", False)
+
+
+# T162: the probe runs head's node on base's recorded input, with the network blocked.
+def _one_node(node: Callable[[S], S]) -> CompiledStateGraph[S]:
+    def n(state: S) -> S:
+        return node(state)
+
+    builder = StateGraph(S)
+    builder.add_node("n", n)
+    builder.add_edge(START, "n")
+    builder.add_edge("n", END)
+    return builder.compile()
+
+
+def test_probe_runs_a_changed_plain_node_on_base_input_and_says_whether_it_drifts() -> None:
+    base = record(_one_node(lambda s: {"x": s["x"] + 1}), {"x": 1})
+    refactored = _one_node(lambda s: {"x": sum([s["x"], 1])})
+    changed = _one_node(lambda s: {"x": s["x"] + 2})
+    assert probe_nodes(refactored, [base], ["n"]) == {"n": Probe(False)}
+    assert probe_nodes(changed, [base], ["n"]) == {"n": Probe(True)}
+
+
+def test_probe_a_node_that_reaches_for_the_network_needs_a_live_probe() -> None:
+    def calls_out(s: S) -> S:
+        socket.create_connection(("example.invalid", 443), timeout=1)
+        return s
+
+    base = record(_one_node(lambda s: s), {"x": 1})
+    assert probe_nodes(_one_node(calls_out), [base], ["n"]) == {"n": Probe(None, NEEDS_LIVE)}
+
+
+def test_probe_steps_say_what_ran_and_judge_probes_says_what_it_means() -> None:
+    # T162: the job that runs the PR's code reports raw output; the one that decides compares it.
+    base = record(_one_node(lambda s: {"x": s["x"] + 1}), {"x": 1})
+    [ran] = probe_steps(_one_node(lambda s: {"x": s["x"] + 2}), [base], ["n"])
+    assert ran == ProbeStep(0, 0, "n", {"x": 3})
+    assert judge_probes([base], [ran]) == {"n": Probe(True)}
+    assert judge_probes([base], [ProbeStep(0, 0, "n", {"x": 2})]) == {"n": Probe(False)}
+
+
+def test_a_probe_that_reaches_for_the_network_is_recorded_as_raised_not_a_crash() -> None:
+    def swallows(s: S) -> S:
+        with contextlib.suppress(Exception):  # an SDK's retry loop must not catch the refusal
+            socket.create_connection(("127.0.0.1", 9), timeout=0.1)
+        return s
+
+    base = record(_one_node(lambda s: s), {"x": 1})
+    [ran] = probe_steps(_one_node(swallows), [base], ["n"])
+    assert ran == ProbeStep(0, 0, "n", raised=NEEDS_LIVE)
+    assert judge_probes([base], [ran]) == {"n": Probe(None, NEEDS_LIVE)}
+
+
+@pytest.mark.parametrize(
+    "forged", [ProbeStep(0, 1, "n"), ProbeStep(-1, 0, "n"), ProbeStep(0, 0, "m")]
+)
+def test_a_probe_that_matches_no_recorded_step_is_refused(forged: ProbeStep) -> None:
+    base = record(_one_node(lambda s: s), {"x": 1})
+    with pytest.raises(ValueError, match="matches no recorded step"):
+        judge_probes([base], [forged])

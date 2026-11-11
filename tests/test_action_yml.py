@@ -56,6 +56,8 @@ def test_action_is_composite_with_the_documented_inputs_and_outputs() -> None:
         "report-path",
         "root-drift-count",
         "propagated-drift-count",
+        "inconclusive-count",  # T162
+        "first-drift",
         "verdict",
     }
 

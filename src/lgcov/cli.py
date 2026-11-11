@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
@@ -24,8 +24,12 @@ import yaml
 
 from lgcov.attribution import (
     Benchmark,
+    NodeLabels,
+    Probe,
     Result,
     Score,
+    classify,
+    explain_runs,
     parse_benchmark,
     pending_result,
     render_markdown,
@@ -72,7 +76,10 @@ from lgcov.cassette import (
     Replay,
     Step,
     accept_nodes,
+    changed_nodes,
     compared_run,
+    judge_probes,
+    probe_steps,
     record,
     replay_run,
     runs_from_json,
@@ -115,7 +122,7 @@ from lgcov.langsmith import (
 )
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
-from lgcov.messages import plain
+from lgcov.messages import plain, run_tools
 from lgcov.metrics import format_summary, parse_records, summarize
 from lgcov.normalize import normalize
 from lgcov.review import ReviewDecision, apply_decision
@@ -351,7 +358,7 @@ def _drift_kinds(
     runs: list[Cassette], drifts: list[list[Drift]]
 ) -> tuple[dict[str, int], set[str]]:
     """Runs each node drifted in, and the root nodes. "root" = the first node to drift
-    in some run, in execution order; "downstream" nodes drifted only after an earlier one.
+    in some run, in execution order; "propagated" nodes drifted only after an earlier one.
     """
     counts: dict[str, int] = {}
     roots: set[str] = set()
@@ -372,16 +379,23 @@ def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
 
 
 def _replay_markdown(
-    runs: list[Cassette], drifts: list[list[Drift]], not_checked: tuple[str, ...] = ()
+    runs: list[Cassette],
+    drifts: list[list[Drift]],
+    not_checked: tuple[str, ...] = (),
+    labels: NodeLabels | None = None,
 ) -> list[str]:
-    """Per-node drift table: root or downstream, and in how many runs."""
+    """Per-node drift table: root or propagated, and in how many runs. T162: with `labels`, root,
+    propagated or inconclusive by them; without, root is the first node to drift in some run."""
     counts, roots = _drift_kinds(runs, drifts)
+    roots = roots if labels is None else set(labels.root)
+    unsure = {} if labels is None else labels.inconclusive
     lines = ["### Cassette replay", ""]
     if not counts:
         return [*lines, f"No cassette drift ({len(runs)} runs)."]
     lines += ["| node | drift | runs |", "|---|---|---|"]
     for node in sorted(counts):
-        kind = "root" if node in roots else "downstream"
+        kind = "root" if node in roots else "propagated"
+        kind = f"inconclusive ({unsure[node]})" if node in unsure else kind
         lines.append(f"| `{node}` | {kind} | {counts[node]}/{len(runs)} |")
     unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys() - set(not_checked))
     if unchanged:
@@ -1030,9 +1044,11 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
         return replace(run, crash=f"Node `{exc.node}` raised {original}", crash_node=exc.node)
     except Exception as exc:  # replay itself: no node or router raised it
         return replace(run, harness_error=_harness_message("replay failed outside node code", exc))
+    probes = probe_steps(graph, runs, changed_nodes(graph, runs))  # T162: offline, no verdict
     return replace(
         run,
         fresh=tuple(FreshRun(r.steps, r.calls, r.halt) for r in replays),
+        probes=probes,
         agent_seconds=perf_counter() - agent_start,
         budget_hit=budget.hit,
     )
@@ -1077,11 +1093,24 @@ def _evaluate(
     ]
     pairs = [(list(r.drifts), list(r.steps)) for r in replays]
     drifts = [d for d, _ in pairs]
-    counts, roots = _drift_kinds(runs, drifts)
-    root, downstream = sorted(roots), sorted(counts.keys() - roots)
-    # T199: the comment's tally line: each touched run's root, in run order, once each.
-    run_roots = dict.fromkeys(_run_root(run, d) for run, d in zip(runs, drifts, strict=True))
-    tally = Tally(len(runs), sum(1 for d in drifts if d), tuple(r for r in run_roots if r))
+    try:
+        probes = judge_probes(runs, run.probes, cfg.ignore_paths)
+    except ValueError as exc:
+        return replace(partial, harness_error=_harness_message("cannot use the probes", exc))
+    # T162: root by fingerprint and probe. Under fail-on: root-drift an inconclusive node blocks
+    # with the roots, since a live model node can't be probed until T211.
+    counts, _ = _drift_kinds(runs, drifts)
+    bases = {s.node: s.code for r in runs for s in r.steps}
+    heads = {s.node: s.code for f in run.fresh for s in f.steps}
+    firsts = [_run_root(r, d) for r, d in zip(runs, drifts, strict=True)]
+    nodes = [{x.node for x in d} for d in drifts]
+    labels = explain_runs(classify(counts.keys(), (bases, heads), probes), firsts, nodes)
+    blocking = {*labels.root, *labels.inconclusive}
+    root, downstream = sorted(blocking), list(labels.propagated)
+    # T199: the comment's tally line: each run's root and inconclusive nodes, in run order.
+    in_order = [s.node for r, n in zip(runs, nodes, strict=True) for s in r.steps if s.node in n]
+    named = dict.fromkeys(n for n in [*in_order, *root] if n in blocking)
+    tally = Tally(len(runs), sum(1 for d in drifts if d), tuple(named))
     # T083: coverage of the runs replay just did; nothing executes again for it.
     cov = snapshot_coverage(run.head, [[s.node for s in steps] for _, steps in pairs], args.commit)
     if args.coverage_out:
@@ -1111,12 +1140,14 @@ def _evaluate(
         partial,
         inconclusive_blocks=args.fail_on_inconclusive or cfg.gate.inconclusive_blocks,
         replay_lines=(
-            *_replay_markdown(runs, drifts, not_checked),
+            *_replay_markdown(runs, drifts, not_checked, labels),
             *([""] if diverged else []),
             *diverged,
         ),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
+        first_drift=tuple(n for n in dict.fromkeys(firsts) if n),
+        inconclusive=tuple(sorted(labels.inconclusive)),
         tally=tally,
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
@@ -1126,6 +1157,7 @@ def _evaluate(
             *base_notes,
             *_removed_note(removed, cfg.cassette_dir),
             *policy.llm_notes,
+            *_whole_run_note(l2[0] if l2 else []),
             *([note] if note else []),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
             *_langsmith_notes(cfg.langsmith, args.commit),
@@ -1287,6 +1319,12 @@ def _quoted(names: list[str]) -> str:
     return ", ".join(f"`{n}`" for n in names)
 
 
+def _whole_run_note(specs: list[KPISpec]) -> list[str]:
+    """T181: a tool check reads every tool the run called, not only its KPI's node's (T210)."""
+    tools = [s.name for s in specs if (s.check or {}).get("type") in _TOOL_CHECKS]
+    return [f"⚠️ {_WHOLE_RUN}: {_quoted(tools)}."] if tools else []
+
+
 def _ci_gate(
     args: argparse.Namespace,
     cfg: Config,
@@ -1441,6 +1479,8 @@ def _ci(argv: list[str]) -> int:
     if args.github_output:
         outputs = {
             "exit-code": action.exit_code,
+            "first-drift": ",".join(result.first_drift),
+            "inconclusive-count": len(result.inconclusive),
             "propagated-drift-count": len(result.propagated_drift),
             "report-path": report,
             "root-drift-count": len(result.root_drift),
@@ -1492,6 +1532,8 @@ def _verify_result_cmd(argv: list[str]) -> int:
 
 
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
+_TOOL_CHECKS = ("tool_called", "tool_not_called")
+_WHOLE_RUN = "node scope not applied to tool checks yet (whole-run)"
 # T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
 # never runs one, and a nightly run reports the KPIs it couldn't judge.
 _llm_judge: Callable[[KPI], Judge] | None = None
@@ -1564,14 +1606,16 @@ _Cases = dict[str, tuple[NodeState, NodeState]]
 def _l2_cases(spec: KPISpec, runs: list[list[Step]], stopped: Collection[int] = ()) -> _Cases:
     """One case per run: the trace for code judges, else the node's own input and output. A
     run in `stopped` has no whole-run case: its trace is cut off, and its last step isn't the
-    final one, so a code check would read as failed when it was never checked."""
+    final one, so a code check would read as failed when it was never checked. The trace's
+    tools are the whole run's, whatever node the KPI names (T181)."""
     cases: _Cases = {}
     for i, steps in enumerate(runs):
         if i in stopped and (spec.judge == "code" or spec.node == "final"):
             continue
         case_id = f"run-{i}/{spec.node}"
         if spec.judge == "code":
-            cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps]}})
+            tools = run_tools([s.output for s in steps])
+            cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps], "tools": tools}})
             continue
         if spec.node == "final":
             step = steps[-1] if steps else None
@@ -1749,6 +1793,8 @@ def _judge_cmd(argv: list[str]) -> int:
         return EXIT_ERROR
     if skipped:
         print("Skipped, no llm client: " + ", ".join(f"`{n}`" for n in skipped) + ".")
+    for line in _whole_run_note(specs):
+        print(line)
     try:
         advisory, flagged, calibration = _gate_bands(args.bands, every, replace(cfg, gate=gate))
     except (OSError, ValueError) as exc:
@@ -2157,33 +2203,39 @@ def _error_row(b: Benchmark, error: str, seconds: float) -> Result:
     )
 
 
-def _bench_one(b: Benchmark, keep: Path | None = None) -> Result:
+def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Result:
     """Record the cases on base, replay head (unchanged nodes served, as `lgcov ci` does),
     and score lgcov's root / propagated labels. A benchmark that can't run says why.
 
     T166: each side runs in its own process. Head's import is checked first, and base's is the
     first thing its recording does, so a bad import costs no real call on either side.
 
-    T169: with `keep`, each side's runs stay in <keep>/<benchmark>/, saved as each one finishes."""
+    T169: with `keep`, each side's runs stay in <keep>/<benchmark>/, saved as each one finishes.
+
+    T173: with `live`, head serves nothing, so base against base measures the model's noise."""
     start = perf_counter()
     worktrees: list[Path] = []
-    expected = (tuple(sorted(b.root)), tuple(sorted(b.propagated)))
     try:
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 base_target, head_target, worktrees = _bench_sides(b, Path(tmp))
                 base_root, head_root = Path(tmp) / "base", Path(tmp) / "head"
                 cases, drifted = Path(tmp) / "cases", Path(tmp) / "drifted"
+                probed = Path(tmp) / "probes"
                 here = Path(tmp) if keep is None else keep / b.name
                 saved, fresh = here / "base.json", here / "head.json"
                 cases.write_text(json.dumps(list(b.cases)), encoding="utf-8")
                 _run_side(b, "head", head_root, "check", head_target)
                 _run_side(b, "base", base_root, "record", base_target, str(cases), str(saved))
-                replaying = (head_target, str(saved), str(drifted), str(fresh))
+                replaying = [head_target, str(saved), str(drifted), str(fresh), str(probed)]
+                replaying += ["--live"] if live else []
                 _run_side(b, "head", head_root, "replay", *replaying)
                 runs = _load_runs(str(saved))
+                heads = _load_runs(str(fresh))
                 nodes: list[list[str]] = json.loads(drifted.read_text(encoding="utf-8"))
                 drifts = [[Drift(n, None, None) for n in names] for names in nodes]
+                raw = json.loads(probed.read_text(encoding="utf-8"))
+                probes = {n: Probe(drifted, why) for n, (drifted, why) in raw.items()}
             finally:
                 for worktree in worktrees:
                     remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]
@@ -2196,17 +2248,51 @@ def _bench_one(b: Benchmark, keep: Path | None = None) -> Result:
         failed = getattr(exc, "stderr", "") or str(exc)
         error = f"{type(exc).__name__}: {str(failed).strip()[:200]}"
         return _error_row(b, error, perf_counter() - start)
-    counts, roots = _drift_kinds(runs, drifts)
-    found = (tuple(sorted(roots)), tuple(sorted(counts.keys() - roots)))
+    return _labelled(b, (runs, heads), drifts, probes, perf_counter() - start)
+
+
+def _bench_saved(b: Benchmark, folder: Path) -> Result:
+    """T162: score the runs `--keep-runs` saved in <folder>/<benchmark>/, compared as replay
+    compares them. Nothing runs, so it costs nothing, whatever the row's `status`."""
+    start = perf_counter()
+    try:
+        runs, fresh = (_load_runs(str(folder / b.name / name)) for name in _KEPT)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _error_row(b, f"{type(exc).__name__}: {str(exc)[:200]}", perf_counter() - start)
+    if len(runs) != len(fresh):
+        return _error_row(b, f"{len(runs)} runs on base, {len(fresh)} on head", 0.0)
+    drifts = [
+        list(compared_run(r, f.steps, (), None).drifts) for r, f in zip(runs, fresh, strict=True)
+    ]
+    return _labelled(b, (runs, fresh), drifts, {}, perf_counter() - start)
+
+
+def _labelled(
+    b: Benchmark,
+    sides: tuple[list[Cassette], list[Cassette]],
+    drifts: list[list[Drift]],
+    probes: Mapping[str, Probe],
+    seconds: float,
+) -> Result:
+    """T162: root by fingerprint and probe (`classify`); the first node to drift is kept too."""
+    counts, first = _drift_kinds(sides[0], drifts)
+    base, head = ({s.node: s.code for r in side for s in r.steps} for side in sides)
+    firsts = [_run_root(r, d) for r, d in zip(sides[0], drifts, strict=True)]
+    nodes = [{x.node for x in d} for d in drifts]
+    labels = explain_runs(classify(counts.keys(), (base, head), probes), firsts, nodes)
     return Result(
         b.name,
-        *found,
-        score(found[0], b.root),
-        score(found[1], b.propagated),
-        perf_counter() - start,
-        *expected,
+        labels.root,
+        labels.propagated,
+        score(labels.root, b.root),
+        score(labels.propagated, b.propagated),
+        seconds,
+        tuple(sorted(b.root)),
+        tuple(sorted(b.propagated)),
         b.hard_cases,
         b.notes,
+        first_drift=tuple(sorted(first)),
+        inconclusive=tuple(sorted(labels.inconclusive.items())),
     )
 
 
@@ -2262,9 +2348,21 @@ def _bench_cmd(argv: list[str]) -> int:
         metavar="DIR",
         help="save each side's runs in DIR/<benchmark>/{base,head}.json as each one finishes",
     )
+    ap.add_argument("--live", action="store_true", help="T173: head runs every node, serving none")
+    ap.add_argument(
+        "--from-runs",
+        metavar="DIR",
+        help="T162: score the runs --keep-runs saved in DIR instead of running the agent",
+    )
     args = ap.parse_args(argv)
+    if args.from_runs and (args.synthetic or args.keep_runs or args.live):
+        print(
+            "lgcov bench: --from-runs runs nothing: no --synthetic, --keep-runs or --live",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     if args.synthetic:
-        if args.dir or args.only or args.keep_runs:
+        if args.dir or args.only or args.keep_runs or args.live:
             print("lgcov bench: --synthetic takes only --out and --json", file=sys.stderr)
             return EXIT_ERROR
         return _bench_synthetic(Path(args.out), Path(args.json or "docs/benchmark-synthetic.json"))
@@ -2297,12 +2395,16 @@ def _bench_cmd(argv: list[str]) -> int:
     code = 0
     for b in benchmarks:
         try:
-            results.append(pending_result(b) if b.status else _bench_one(b, keep))
+            if args.from_runs:
+                results.append(_bench_saved(b, Path(args.from_runs)))
+            else:
+                results.append(pending_result(b) if b.status else _bench_one(b, keep, args.live))
         except _CantImport as exc:
             print(f"lgcov bench: {b.name}: {exc}", file=sys.stderr)
             results.append(_error_row(b, str(exc)[:200], 0.0))
             code = EXIT_ERROR
-    command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only)])
+    saved = [f"--from-runs {args.from_runs}"] if args.from_runs else []
+    command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only), *saved])
     source = f"the {len(results)} benchmark file{'' if len(results) == 1 else 's'} in `{folder}`"
     md = render_markdown(results, command, datetime.now(UTC).date().isoformat(), source)
     for path, text in ((Path(args.out), md), (Path(args.json), results_json(results))):

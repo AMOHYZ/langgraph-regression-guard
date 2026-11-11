@@ -1,9 +1,9 @@
 # langgraph-regression-guard
 
-Catch silent regressions in LangGraph agents on every PR. lgcov tells you which LangGraph
-node a PR actually changed and which ones only inherited the damage, gates each KPI in your
-taxonomy with a paired test, and lets a judge block only once it has earned that against
-human labels. A GitHub Action; first report in 2 minutes.
+Catch silent regressions in LangGraph agents on every PR. lgcov replays your agent, re-runs
+only the nodes a PR can reach, and shows which node's output changed first and which changed
+after it. Each KPI in your taxonomy gets a paired test, and a judge can block only once it
+has earned that against human labels. A GitHub Action; first report in 2 minutes.
 
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
 
@@ -22,8 +22,9 @@ Three layers, one per level of confidence:
 
 - **L1 — Cassettes.** Record each node's input and output once. On every PR,
   nodes the change left alone are served from the recording and the rest re-run
-  and are compared with it. The diff tells you whether a change breaks a node at
-  its root or only propagates from upstream. [Known limits](#known-replay-limits).
+  and are compared with it. The diff shows which node's output changed first and
+  which changed after it; on nodes that call a live model, that can be noise, not
+  the PR. [Known limits](#known-replay-limits).
 - **L2 — Judge gate.** Typed LLM judges and deterministic code checks score
   KPIs, each verdict with a confidence, and a paired test per KPI decides SHIP,
   BLOCK or INCONCLUSIVE: an unclear or low-confidence result goes to a human
@@ -44,7 +45,7 @@ nothing else should come from there):
 
 ```bash
 pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
-pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.1.0
+pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.2.0
 ```
 
 Or from GitHub, as the quickstart does. Once on PyPI: `pip install lgcov`.
@@ -76,9 +77,9 @@ Minutes to first report: 2 (clean venv, steps below pasted as-is; measured 2026-
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install "git+https://github.com/AMOHYZ/langgraph-regression-guard"
-# Or 0.1.0 from TestPyPI; dependencies from PyPI, since anyone can upload to TestPyPI:
+# Or 0.2.0 from TestPyPI; dependencies from PyPI, since anyone can upload to TestPyPI:
 #   pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
-#   pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.1.0
+#   pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.2.0
 lgcov --version
 
 # 1. A graph to guard: the demo agent (or point graph_entrypoint at your own).
@@ -169,7 +170,8 @@ on base, replays head, and scores lgcov's labels against hand-written ones, prec
 recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). Each side runs in its
 own process with its own imports, and a bench file can add `pythonpath: [src]` for a src
 layout. `--keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid
-recording. For now its rows are
+recording. `--live` runs every head node instead of serving the unchanged ones, so a row
+with base as head measures a live model's own variation. For now its rows are
 three demo fixtures in `tests/fixtures/bench/`; a pilot on one real PR has its own section
 in [docs/benchmark.md](docs/benchmark.md#real-prs). A miss on a
 hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden. The
@@ -184,6 +186,9 @@ KPI that should catch it and its root and propagated labels, are in
 
 - **The key:** it comes from `LANGSMITH_API_KEY`.
 - **Region or self-hosting:** set `LANGSMITH_ENDPOINT` for an EU or self-hosted LangSmith.
+- **An org-scoped key** (one that works across workspaces) also needs
+  `LANGSMITH_WORKSPACE_ID`, the workspace's id. Without it LangSmith answers 403. The PR
+  report's experiment link reads the same three variables.
 
 With the key set:
 
@@ -242,7 +247,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: AMOHYZ/langgraph-regression-guard@v0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
         with:
           fail-on: root-drift  # root-drift | any-drift | never
 ```
@@ -255,9 +260,10 @@ jobs:
   comment is posted, `lgcov verify-result` checks the result against the commits and that
   policy. On a mismatch no verdict is posted and the run exits 2. What this does and doesn't
   stop: [docs/trust-boundary.md](docs/trust-boundary.md).
-- `root-drift` and `any-drift` fail the same PRs for now: until replay classifies
-  drift by the node inputs it records, the first node to drift in each run counts
-  as root.
+- A node is root when its own code changed and it still drifts when run again, offline, on the
+  input the cassette recorded for it. `root-drift` also fails on the nodes lgcov can't clear: a
+  changed node that reaches for the network (a model call can't be told from noise yet) and drift
+  no changed node explains. So `root-drift` and `any-drift` still fail nearly the same PRs.
 - The report includes coverage of the replayed runs, e.g. `Coverage: Nodes 75% (−25% vs
   main) · Edges 60% (±0)`, and lists nodes main reached that this PR doesn't. Pushes to
   `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
@@ -291,7 +297,7 @@ jobs:
     schedule:
       - cron: "0 3 * * *"  # the nightly tier, on main
   # ...the same job as above, with:
-        - uses: AMOHYZ/langgraph-regression-guard@v0
+        - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
           with:
             tier: ${{ github.event_name == 'schedule' && 'nightly' || 'pr' }}
   ```
@@ -317,8 +323,9 @@ jobs:
   `cassette-dir`, `taxonomy` (turns on the KPI gate; `taxonomy_path` isn't read here),
   `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `tier`,
   `python-version`, `github-token`, `live`, `mode`, `approved-by`, `ci-status`, `phase`. Outputs:
-  `report-path`, `root-drift-count`, `propagated-drift-count`, `verdict` (`pass`, `fail`,
-  `needs_human` or `error`).
+  `report-path`, `root-drift-count` (inconclusive nodes included), `propagated-drift-count`,
+  `inconclusive-count`, `first-drift` (each run's first node to drift), `verdict` (`pass`, `fail`,
+  `needs_human`, `error` or `advisory`).
 - Runs on Linux and macOS runners.
 
 ### Two jobs, so the PR's code can't touch the verdict
@@ -342,7 +349,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: AMOHYZ/langgraph-regression-guard@v0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
         with:
           phase: candidate  # runs the PR's code and decides nothing
   lgcov:
@@ -360,7 +367,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}  # empty on a push: that commit
-      - uses: AMOHYZ/langgraph-regression-guard@v0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
         with:
           phase: evaluate  # decides from what the other job uploaded; installs no project
 ```
@@ -620,6 +627,14 @@ uv run python -m lgcov.docs_lint      # docs/banned-phrases.txt and the tagline;
 ## Roadmap
 
 - Sequential stopping (mSPRT) for the KPI gate.
+- Three case pools, dev, gate and audit, with exposure flowing one way only: what the gate
+  and audit pools contain never reaches whoever writes the PR.
+- Eval pools as an input alongside the baseline cassettes.
+- An adoption path for each change: eligible → human approval → baseline update → merge →
+  deploy.
+
+More planned work is in [the one-pager](docs/guard-one-pager.md#planned-not-on-main-yet)
+and [Why lgcov](docs/why-us.md).
 
 ## License
 

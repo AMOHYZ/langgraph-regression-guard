@@ -2,32 +2,53 @@
 
 ## Unreleased
 
-- `lgcov round init | lock | check` lock a benchmark round's commits and cases, and an exposure ledger catches a moved SHA or a case a candidate has already seen ([docs](docs/benchmark-rounds.md)).
-- `lgcov bench` runs each side in its own process, with its own imports; a bad import exits 2 and names the side (#57).
-- `lgcov bench --keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid recording (#58).
-- `lgcov bench` shows what each side prints, named by side, like the reason a researcher failed (#60).
+- `lgcov bench --live` runs every node on head instead of serving the ones that didn't change. A row with the same commit on both sides then measures how much a live model varies on its own.
+- `tool_called` and `tool_not_called` now see the tools a run called, read from the AI messages in its recorded and replayed steps, in `lgcov ci` and `lgcov judge`. Before, they got node names only, so `tool_called` always failed and `tool_not_called` always passed.
+- **Limit:** a tool check reads the whole run, not only its KPI's `node:`, so a tool called by another node passes it. `lgcov ci` and `lgcov judge` say so for each tool check: "node scope not applied to tool checks yet (whole-run)".
+
+## 0.2.0 (2026-11-08)
+
+Everything merged from 2 to 8 November 2026 (#52 to #93), one line per change, with its PR.
+
+### Changed
+
+- **`uses: AMOHYZ/langgraph-regression-guard@v0` moves from PR 19 (31 October) to this release.** A workflow on `@v0` picks up everything below at once, including the three changes in this section, the `mode`, `approved-by`, `ci-status` and `phase` inputs, and the base-commit gate. The defaults keep a single job (`phase: all`), enforcing.
+- **A node now re-runs when its input changes only in an `id`, a UUID or date-time in text, or a message's `artifact`, `additional_kwargs`, `finish_reason` or `stop_reason`** (#78). These were served stale with no drift. Existing cassettes keep working with no re-record, but more nodes can run live on a PR. To get the old matching back for ids, UUIDs and date-times, set `mask_volatile_in_key: true` in `lgcov.yaml`. To drop one field, use `ignore_paths`. [How a step is matched](docs/validation/replay-audit.md#how-a-step-is-matched).
+- **Re-record after upgrading: these nodes get a new fingerprint** (#88, #90), so each runs live on every replay until it's re-recorded, which costs model calls and can read as drift:
+  - on any Python, a node that reaches a pydantic model or pydantic dataclass defined in your project, decorated or not, including one built at first use (a forward reference, `defer_build`);
+  - in a recording made under `uv run --with`, or with another environment's site-packages on `PYTHONPATH`, a node that reaches installed library code, which now counts by name;
+  - on Python 3.14+, a node that reaches any project class, including plain classes, Enums, TypedDicts and NamedTuples, and under `UV_LINK_MODE=symlink` or `pip install --target` one that reaches an installed class.
+
+  A node that reaches a class with validators, serializers, computed fields or generics, sets an attribute on a pydantic instance, or reaches a LangChain message under `uv run --with` or symlinks was never served before: re-recorded, it is. Plain functions, project helpers and constants, library code in an ordinary environment and, before Python 3.14, plain classes, Enums, TypedDicts and NamedTuples keep their fingerprints. A cassette recorded by `@v0` holds no fingerprints, so its nodes run live until re-recorded, as before.
+- **Re-record after upgrading, too: a node that uses a stdlib `@dataclass` from the graph file, or a class in a graph file named like a real module (`json.py`)**, has a new fingerprint (#89), so it runs live until re-recorded. With `from __future__ import annotations`, a node typed with a narrower input `TypedDict` now gets only those keys, as it does outside lgcov. A graph file named like a package that only its own code adds to `sys.path` no longer loads: put that package on `PYTHONPATH` instead.
+
+### Added and fixed
+
+- Under its heading, the PR comment sums up the run in one line, e.g. "1 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `classify`": the runs where a node drifted, the runs a KPI's judge scored lower than on the base, and the first touched run's root node (#91).
+- On a PR the gate reads `lgcov.yaml`, the taxonomy and the bands from the base commit, so a PR can't change what grades it; the first adoption PR is advisory (#69). [What this doesn't stop yet](docs/trust-boundary.md).
+- `lgcov ci --result-out` binds the result to the commits and the policy, and `lgcov verify-result` checks it before the PR comment; a mismatch posts no verdict and exits 2 (#71).
+- Every `lgcov ci` outcome gives one headline, next step and exit code, in `docs/verdict-actions.md`: INCONCLUSIVE shows as "No decision: needs_human", a PR that edits its own cassettes can't SHIP, `verdict` gains `needs_human`, and the Action gains `mode`, `approved-by` and `ci-status` (#72).
+- A code check that passed on the base and fails on the PR blocks, whatever the paired test says, and a run replay stopped early no longer counts as a failed check (#72).
+- A re-baseline in a PR can't hide a code check's new failure: when a PR edits its cassettes, blocking code checks also run against the base's (#74). A run it removes from them is named in the comment (#75).
+- A gate run can be split in two jobs with the Action's `phase` input: `candidate` runs the PR's code with no keys and no write token, `evaluate` decides from its upload and posts the comment ([trust boundary](docs/trust-boundary.md)). This repo's own PR report runs that way (#83, #84, #85).
+- A node's retry policy and error handler see the node's own error, as they do outside lgcov: a `ValueError` no longer repeats a write, and `on-divergence: fail` now stops a node with a retry policy. Each failed attempt is a live call, and the report names the node (#73).
 - Graphs with `async def` nodes or routers record and replay; served nodes make no real call (#54).
 - State holding LangChain messages records, replays and compares; new ids and metadata aren't drift (#55).
 - A served step's ids are fitted to the run's own; if they can't be, it runs live and reports `rebind_skipped` (#56).
 - A node that returns `Command` is served, and a change to where it sends the run is drift (#59).
-- The first real PR through `lgcov bench`, open_deep_research #163, scored as a pilot: one PR, one question (#61, #62, #63, #64).
-- On a PR the gate reads `lgcov.yaml`, the taxonomy and the bands from the base commit, so a PR can't change what grades it; the first adoption PR is advisory. [What this doesn't stop yet](docs/trust-boundary.md).
-- `lgcov ci --result-out` binds the result to the commits and the policy, and `lgcov verify-result` checks it before the PR comment; a mismatch posts no verdict and exits 2.
-- Every `lgcov ci` outcome gives one headline, next step and exit code, in `docs/verdict-actions.md`: INCONCLUSIVE shows as "No decision: needs_human", a PR that edits its own cassettes can't SHIP, `verdict` gains `needs_human`, and the Action gains `mode`, `approved-by` and `ci-status`.
-- Under its heading, the PR comment sums up the run in one line, e.g. "1 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `classify`": the runs where a node drifted, the runs a KPI's judge scored lower than on the base, and the first touched run's root node.
-- A code check that passed on the base and fails on the PR blocks, whatever the paired test says, and a run replay stopped early no longer counts as a failed check.
-- A re-baseline in a PR can't hide a code check's new failure: when a PR edits its cassettes, blocking code checks also run against the base's. A run it removes from them is named in the comment.
-- A node's retry policy and error handler see the node's own error, as they do outside lgcov: a `ValueError` no longer repeats a write, and `on-divergence: fail` now stops a node with a retry policy. Each failed attempt is a live call, and the report names the node.
-- **Behaviour change:** a node now re-runs when its input changes only in an `id`, a UUID or date-time in text, or a message's `artifact`, `additional_kwargs`, `finish_reason` or `stop_reason`. These were served stale with no drift. Existing cassettes keep working with no re-record, but more nodes can run live on a PR. To get the old matching back for ids, UUIDs and date-times, set `mask_volatile_in_key: true` in `lgcov.yaml`. To drop one field, use `ignore_paths`. [How a step is matched](docs/validation/replay-audit.md#how-a-step-is-matched).
-- A graph file or `--client` file stays in `sys.modules` while it runs, as an import leaves it, so `from __future__ import annotations` with a dataclass, a `TypedDict` state or a pydantic model, and a parametrized pydantic generic, no longer crash lgcov. A file named like a real module doesn't hide it, and an edit to a class in that file now counts.
-- **Behaviour change:** with that fix, these nodes get a new fingerprint, so they run live until you re-record them: one that uses a `@dataclass` from the graph file, one that uses a class from a graph file named like a real module, and one that reaches a pydantic model in the graph file whose annotations, under `from __future__ import annotations`, use more than builtins, which couldn't be built before. With `from __future__ import annotations`, a node typed with a narrower input `TypedDict` now gets only those keys, as it does outside lgcov. A graph file named like a package that only its own code adds to `sys.path` no longer loads: put that package on `PYTHONPATH` instead.
-
-### Fixed
-
 - A node that reaches a pydantic class keeps its fingerprint across processes, so it's served when unchanged (#65).
 - That now holds for a class with a validator, serializer, computed field or generic, and setting an attribute or copying an instance no longer changes a fingerprint. Such a node ran live on every replay, and a model's new answer read as drift (#88).
-- Packages in any `site-packages` folder count as library code, as under `uv run --with`. After upgrading, re-record a node that reaches a project pydantic class: until then it runs live (#88).
-- An edit behind a pydantic class that builds at first use (a forward reference, `defer_build`), or on Python 3.14+ to a TypedDict's or NamedTuple's field types, now changes the fingerprint, and that first use doesn't. Such a node was served stale, so the change passed unseen. On Python 3.14+, re-record a node that reaches any project class but a stdlib dataclass: until then it runs live (#88).
+- Packages in any `site-packages` folder count as library code, as under `uv run --with` (#88).
+- An edit behind a pydantic class that builds at first use (a forward reference, `defer_build`), or on Python 3.14+ to a TypedDict's or NamedTuple's field types, now changes the fingerprint, and that first use doesn't. Such a node was served stale, so the change passed unseen (#88).
+- A graph file or `--client` file stays in `sys.modules` while it runs, as an import leaves it, so `from __future__ import annotations` with a dataclass, a `TypedDict` state or a pydantic model, and a parametrized pydantic generic, no longer crash lgcov. A file named like a real module doesn't hide it, and an edit to a class in that file now counts (#89).
+- `lgcov bench --synthetic` scores 72 base-vs-PR cases from 24 edits on the demo agent, by case and by edit, with A/A re-runs for flip-rate baselines (#68, #81, #82).
+- Per-PR records and `lgcov metrics summary` (#80).
+- `lgcov round init | lock | check` lock a benchmark round's commits and cases, and an exposure ledger catches a moved SHA or a case a candidate has already seen (#86, [docs](docs/benchmark-rounds.md)).
+- `lgcov bench` runs each side in its own process, with its own imports; a bad import exits 2 and names the side (#57).
+- `lgcov bench --keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid recording (#58).
+- `lgcov bench` shows what each side prints, named by side, like the reason a researcher failed (#60).
+- The first real PR through `lgcov bench`, open_deep_research #163, scored as a pilot: one PR, one question (#61, #62, #63, #64).
+- `lgcov --help` lists lgcov's commands instead of graph-diff's usage, and an unknown command is rejected instead of running graph-diff (#53).
 
 ## 0.1.0 (2026-11-02)
 

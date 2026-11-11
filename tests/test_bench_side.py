@@ -572,3 +572,58 @@ def test_a_side_that_prints_nothing_adds_nothing(
     _side_printing(monkeypatch, 0, "")
     _run_side(_row(tmp_path), "base", tmp_path, "check", "g.py:g")
     assert capsys.readouterr().err == ""
+
+
+# T173: --live runs every head node, so base against base measures the model's own variation.
+NOISY = """\
+import random
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+
+class S(TypedDict, total=False):
+    q: str
+    r: str
+
+
+def a(state: S) -> S:
+    return {"r": f"{state['q']}:{random.random()}"}  # a live model: a new answer each time
+
+
+g = StateGraph(S)
+g.add_node("a", a)
+g.add_edge(START, "a")
+g.add_edge("a", END)
+graph = g.compile()
+"""
+
+
+@pytest.mark.parametrize(("flags", "drifted"), [([], [[], []]), (["--live"], [["a"], ["a"]])])
+def test_replay_serves_unchanged_nodes_unless_live(
+    tmp_path: Path, flags: list[str], drifted: list[list[str]]
+) -> None:
+    from lgcov.bench_side import side_main
+
+    graph = tmp_path / "graph.py"
+    graph.write_text(NOISY, encoding="utf-8")
+    runs, out, head = (tmp_path / f for f in ("base.json", "drifted.json", "head.json"))
+    assert side_main(["record", f"{graph}:graph", str(_cases(tmp_path)), str(runs)]) == 0
+    assert side_main(["replay", f"{graph}:graph", str(runs), str(out), str(head), *flags]) == 0
+    assert json.loads(out.read_text(encoding="utf-8")) == drifted
+
+
+@pytest.mark.parametrize("flags", [[], ["--live"]])
+def test_bench_passes_live_to_head_s_replay_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str]
+) -> None:
+    steps: list[tuple[str, ...]] = []
+
+    def side(_b: Benchmark, name: str, _root: Path, *args: str) -> None:
+        steps.append((name, *args))
+
+    monkeypatch.setattr("lgcov.cli._run_side", side)
+    out = ["--out", str(tmp_path / "b.md"), "--json", str(tmp_path / "r.json")]
+    main(["bench", str(LINEAR.parent), "--only", "linear", *flags, *out])
+    assert [s[:2] for s in steps] == [("head", "check"), ("base", "record"), ("head", "replay")]
+    assert [s for s in steps if "--live" in s] == ([steps[2]] if flags else [])

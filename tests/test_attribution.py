@@ -8,8 +8,17 @@ import pytest
 import yaml
 
 from lgcov.attribution import (
+    NEEDS_LIVE,
+    NO_FINGERPRINT,
+    NOT_PROBED,
+    UNEXPLAINED,
+    NodeLabels,
+    Probe,
     Result,
     Score,
+    classify,
+    drift_exceeds_noise,
+    explain_runs,
     macro,
     micro,
     parse_benchmark,
@@ -207,3 +216,45 @@ def test_pythonpath_must_be_folders_inside_the_side(bad: object) -> None:
     # A folder outside the side would give both sides one copy: what this field exists to stop.
     with pytest.raises(ValueError, match="pythonpath"):
         parse_benchmark("x", {**_ROW, "pythonpath": bad}, Path("."))
+
+
+# T162: a node is root when its own code changed and it drifts on base's recorded input.
+def test_drift_exceeds_noise_is_plain_drift_until_t211() -> None:
+    assert drift_exceeds_noise("n", {"x": 1}, {"x": 2})
+    assert not drift_exceeds_noise("n", {"x": 1}, {"x": 1})
+
+
+def test_classify_names_every_changed_node_that_drifts_on_its_own_input_root() -> None:
+    labels = classify(
+        drifted=["b", "c", "d", "e"],
+        codes=(
+            {"a": "1", "b": "1", "c": "1", "d": "1", "e": "1"},
+            {"a": "1", "b": "2", "c": "2", "d": "2", "e": "1"},
+        ),
+        probes={"b": Probe(True), "c": Probe(True), "d": Probe(False)},
+    )
+    assert (labels.root, labels.propagated, labels.inconclusive) == (("b", "c"), ("d", "e"), {})
+
+
+def test_classify_a_changed_node_with_no_offline_probe_is_inconclusive_not_root() -> None:
+    labels = classify(
+        drifted=["b", "c", "sub"],
+        codes=({"b": "1", "c": "1", "sub": None}, {"b": "2", "c": "2", "sub": None}),
+        probes={"b": Probe(None, NEEDS_LIVE)},
+    )
+    assert labels.root == labels.propagated == ()
+    assert labels.inconclusive == {"b": NEEDS_LIVE, "c": NOT_PROBED, "sub": NO_FINGERPRINT}
+    assert NEEDS_LIVE == "needs live probe; noise threshold pending T211"
+
+
+def test_classify_a_node_only_one_side_ran_is_root() -> None:
+    labels = classify(drifted=["new"], codes=({}, {"new": "1"}), probes={})
+    assert labels.root == ("new",)
+
+
+def test_a_run_that_drifted_with_no_changed_node_still_has_an_inconclusive_node() -> None:
+    # A change outside node code (an edge, a router, a Send) or an edited recording: nothing is
+    # root, so the run's first drifted node is inconclusive and fail-on: root-drift still blocks.
+    labels = NodeLabels(root=("b",), propagated=("c", "w"), inconclusive={})
+    out = explain_runs(labels, first_drifts=["b", "w", None], drifted=[["b", "c"], ["w"], []])
+    assert (out.root, out.propagated, out.inconclusive) == (("b",), ("c",), {"w": UNEXPLAINED})

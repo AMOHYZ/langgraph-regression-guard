@@ -7,8 +7,9 @@ import json
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
+from lgcov.attribution import NEEDS_LIVE
 from lgcov.candidate import CandidateRun, FreshRun, candidate_to_json, parse_candidate
-from lgcov.cassette import Call, Halt, Step
+from lgcov.cassette import Call, Halt, ProbeStep, Step
 from lgcov.snapshot import Edge, GraphSnapshot
 
 HEAD = GraphSnapshot(frozenset({"a", "b"}), frozenset({Edge("a", "b")}))
@@ -29,6 +30,7 @@ RUN = CandidateRun(
         ),
         FreshRun((), ()),
     ),
+    probes=(ProbeStep(0, 0, "a", {"x": 2}, ROUTED), ProbeStep(0, 1, "b", raised=NEEDS_LIVE)),
     agent_seconds=1.5,
     budget_hit=("b", 1.25),
     seconds=2.5,
@@ -62,6 +64,7 @@ def test_the_file_says_what_ran_and_never_what_it_means() -> None:
         "head",
         "lint_lines",
         "lint_summary",
+        "probes",
         "runs",
         "schema",
         "seconds",
@@ -97,6 +100,7 @@ def _with_run(**changes: object) -> dict[str, object]:
 
 
 GOOD_CALL = {"node": "a", "how": "live", "seconds": 0.5, "rebind_skipped": False, "raised": False}
+GOOD_PROBE = {"run": 0, "step": 0, "node": "a", "output": None, "goto": None, "raised": ""}
 REFUSED = {
     "a list": [],
     "empty": {},
@@ -116,6 +120,11 @@ REFUSED = {
     "runs that aren't a list": {**BODY, "runs": {}},
     "a run that isn't one": {**BODY, "runs": [1]},
     "a run with a verdict": _with_run(verdict="pass"),
+    "probes that aren't a list": {**BODY, "probes": {}},
+    "a probe with a verdict": {**BODY, "probes": [{**GOOD_PROBE, "drifted": True}]},
+    "a probe with text for its run": {**BODY, "probes": [{**GOOD_PROBE, "run": "0"}]},
+    "a probe with no node": {**BODY, "probes": [{**GOOD_PROBE, "node": None}]},
+    "a probe that raised a number": {**BODY, "probes": [{**GOOD_PROBE, "raised": 1}]},
     "steps that aren't a list": _with_run(steps={}),
     "a step with no node": _with_run(steps=[{"output": 1}]),
     "a node that isn't text": _with_run(steps=[{"node": 1, "output": 1}]),
@@ -148,3 +157,11 @@ def test_what_is_not_exactly_a_run_is_refused(body: object) -> None:
 def test_what_is_not_json_is_refused() -> None:
     with pytest.raises(ValueError):
         parse_candidate("not json")
+
+
+def test_a_file_from_another_lgcov_version_says_so() -> None:
+    # T162: schema 2 carries the probes; both jobs must run the same lgcov.
+    with pytest.raises(
+        ValueError, match="^candidate file schema 1, evaluator needs 2: run the same"
+    ):
+        parse_candidate(json.dumps({**BODY, "schema": 1}))

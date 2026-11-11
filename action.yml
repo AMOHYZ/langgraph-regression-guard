@@ -71,11 +71,17 @@ outputs:
     description: "Markdown report written by this run."
     value: ${{ steps.lgcov.outputs.report-path }}
   root-drift-count:
-    description: "Nodes that were the first to drift in some run."
+    description: "Nodes whose own code changed and that drift on the recorded input, plus the inconclusive ones (fail-on: root-drift blocks on both)."
     value: ${{ steps.lgcov.outputs.root-drift-count }}
   propagated-drift-count:
-    description: "Nodes that drifted only after an earlier node in the same run."
+    description: "Nodes that drifted only because their input did."
     value: ${{ steps.lgcov.outputs.propagated-drift-count }}
+  inconclusive-count:
+    description: "Of root-drift-count, nodes whose code changed and that drifted, but that couldn't be checked offline, such as a model node (no noise threshold yet)."
+    value: ${{ steps.lgcov.outputs.inconclusive-count }}
+  first-drift:
+    description: "Each run's first node to drift, comma-separated: what root meant before multi-root attribution."
+    value: ${{ steps.lgcov.outputs.first-drift }}
   verdict:
     description: "pass | fail | needs_human | error | advisory (needs_human: no decision, a human decides; error: harness error, not a regression; advisory: first adoption PR, nothing enforced yet). See docs/verdict-actions.md."
     value: ${{ steps.verify.outputs.verdict || steps.lgcov.outputs.verdict }}
@@ -382,6 +388,7 @@ runs:
           printf '%s\n' "<!-- lgcov-report -->" "## ⚠️ lgcov: harness error, not a regression" "" \
             "⚠️ Harness error, not a regression: lgcov could not start (exit $code)." > "$report"
           printf '%s\n' "report-path=$report" "root-drift-count=0" "propagated-drift-count=0" \
+            "inconclusive-count=0" "first-drift=" \
             "verdict=error" "exit-code=2" >> "$GITHUB_OUTPUT"
         fi
 

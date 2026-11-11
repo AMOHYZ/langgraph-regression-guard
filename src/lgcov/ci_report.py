@@ -58,7 +58,7 @@ class Tally:
 
     runs: int  # replay compared
     touched: int  # runs where some node drifted
-    roots: tuple[str, ...] = ()  # each touched run's first node to drift, in run order, once each
+    roots: tuple[str, ...] = ()  # T162: root and inconclusive nodes, in run order, once each
     worse: int | None = None  # runs some KPI scored lower than on the base; None: no KPI judged
     worse_by_kpi: tuple[tuple[str, int], ...] = ()  # (KPI, runs it scored lower), table order
 
@@ -82,6 +82,8 @@ class CiResult:
     replay_lines: tuple[str, ...] = ()
     root_drift: tuple[str, ...] = ()
     propagated_drift: tuple[str, ...] = ()
+    first_drift: tuple[str, ...] = ()  # T162: each touched run's first node to drift, once each
+    inconclusive: tuple[str, ...] = ()  # T162: in root_drift, but the probe couldn't run offline
     notes: tuple[str, ...] = ()
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
     harness_error: str = ""
@@ -202,7 +204,9 @@ def render_ci_report(r: CiResult) -> str:
     lines += [r.locked, ""] if r.locked else []
     lines.append(
         f"fail-on: `{r.fail_on}`{f' · tier: `{r.tier}`' if r.tier else ''} · "
-        f"root drift: {len(r.root_drift)} · "
+        f"root drift: {len(r.root_drift)}"
+        + (f" ({len(r.inconclusive)} inconclusive)" if r.inconclusive else "")
+        + " · "
         f"propagated drift: {len(r.propagated_drift)} · verdict: **{action.verdict}**"
     )
     body = "\n".join(lines) + "\n"
