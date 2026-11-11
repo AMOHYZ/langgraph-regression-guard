@@ -13,15 +13,16 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Literal
 
-from lgcov.cassette import Call, Cassette, Halt, How, Step
+from lgcov.cassette import Call, Cassette, Halt, How, ProbeStep, Step
 from lgcov.messages import decode, encode
 from lgcov.snapshot import GraphSnapshot
 
-SCHEMA = 1
+SCHEMA = 2  # T162: 2 adds the probes
 _HOWS: tuple[How, ...] = ("served", "live", "diverged", "after_divergence")
 _WHYS: tuple[Literal["diverged", "budget"], ...] = ("diverged", "budget")
 _CALL = {"node", "how", "seconds", "rebind_skipped", "raised"}
 _RUN = {"steps", "calls", "halt"}
+_PROBE = {f.name for f in fields(ProbeStep)}
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class CandidateRun:
     lint_summary: str = ""
     lint_lines: tuple[str, ...] = ()
     fresh: tuple[FreshRun, ...] = ()
+    probes: tuple[ProbeStep, ...] = ()  # T162: each changed node run offline on base's inputs
     agent_seconds: float = 0.0
     budget_hit: tuple[str, float] | None = None
     seconds: float = 0.0  # all of it, when it ran in another job
@@ -73,12 +75,13 @@ def _run_body(run: FreshRun) -> dict[str, object]:
 
 def candidate_to_json(run: CandidateRun) -> str:
     """TypeError or ValueError if a step can't be saved, as with a tuple for a dict's key."""
-    body: dict[str, object] = asdict(replace(run, head=None, fresh=()))
-    del body["fresh"]
+    body: dict[str, object] = asdict(replace(run, head=None, fresh=(), probes=()))
+    del body["fresh"], body["probes"]
     body |= {
         "schema": SCHEMA,
         "head": run.head.to_dict() if run.head else None,
         "runs": [_run_body(r) for r in run.fresh],
+        "probes": [asdict(p) for p in run.probes],
     }
     return json.dumps(body, indent=2, default=_saved) + "\n"
 
@@ -145,6 +148,17 @@ def _fresh(raw: object) -> FreshRun:
     )
 
 
+def _probe(raw: object) -> ProbeStep:
+    if not isinstance(raw, dict) or set(raw) != _PROBE:
+        raise ValueError(f"a probe isn't {sorted(_PROBE)}")
+    probe = ProbeStep(**raw)
+    ints = all(isinstance(n, int) and not isinstance(n, bool) for n in (probe.run, probe.step))
+    texts = isinstance(probe.node, str) and isinstance(probe.raised, str)
+    if not ints or not texts or not isinstance(probe.goto, list | None):
+        raise ValueError(f"not a probe: {raw!r}")
+    return probe
+
+
 def _budget_hit(raw: object) -> tuple[str, float] | None:
     if raw is None:
         return None
@@ -160,12 +174,17 @@ def parse_candidate(text: str) -> CandidateRun:
     """The run in a file. ValueError if it isn't exactly one."""
     try:
         raw: object = json.loads(text, object_hook=decode)
-        if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+        if not isinstance(raw, dict) or raw.get("schema") not in (1, SCHEMA):
             raise ValueError(f"not a schema {SCHEMA} candidate file")
+        if raw["schema"] != SCHEMA:
+            raise ValueError(
+                f"candidate file schema {raw['schema']}, evaluator needs {SCHEMA}: "
+                "run the same lgcov version in both jobs"
+            )
         if set(raw) != _FIELDS:
             raise ValueError(f"its fields differ: {sorted(set(raw) ^ _FIELDS)}")
-        if not isinstance(raw["runs"], list):
-            raise ValueError("runs isn't a list")
+        if not isinstance(raw["runs"], list) or not isinstance(raw["probes"], list):
+            raise ValueError("runs or probes isn't a list")
         run = CandidateRun(
             commit=_text(raw, "commit"),
             tier=_text(raw, "tier"),
@@ -175,6 +194,7 @@ def parse_candidate(text: str) -> CandidateRun:
             lint_summary=_text(raw, "lint_summary"),
             lint_lines=_lines(raw, "lint_lines"),
             fresh=tuple(_fresh(r) for r in raw["runs"]),
+            probes=tuple(_probe(p) for p in raw["probes"]),
             agent_seconds=_seconds(raw["agent_seconds"]),
             budget_hit=_budget_hit(raw["budget_hit"]),
             seconds=_seconds(raw["seconds"]),

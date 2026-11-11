@@ -24,10 +24,12 @@ import yaml
 
 from lgcov.attribution import (
     Benchmark,
+    NodeLabels,
     Probe,
     Result,
     Score,
     classify,
+    explain_runs,
     parse_benchmark,
     pending_result,
     render_markdown,
@@ -74,7 +76,10 @@ from lgcov.cassette import (
     Replay,
     Step,
     accept_nodes,
+    changed_nodes,
     compared_run,
+    judge_probes,
+    probe_steps,
     record,
     replay_run,
     runs_from_json,
@@ -374,16 +379,23 @@ def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
 
 
 def _replay_markdown(
-    runs: list[Cassette], drifts: list[list[Drift]], not_checked: tuple[str, ...] = ()
+    runs: list[Cassette],
+    drifts: list[list[Drift]],
+    not_checked: tuple[str, ...] = (),
+    labels: NodeLabels | None = None,
 ) -> list[str]:
-    """Per-node drift table: root or propagated, and in how many runs."""
+    """Per-node drift table: root or propagated, and in how many runs. T162: with `labels`, root,
+    propagated or inconclusive by them; without, root is the first node to drift in some run."""
     counts, roots = _drift_kinds(runs, drifts)
+    roots = roots if labels is None else set(labels.root)
+    unsure = {} if labels is None else labels.inconclusive
     lines = ["### Cassette replay", ""]
     if not counts:
         return [*lines, f"No cassette drift ({len(runs)} runs)."]
     lines += ["| node | drift | runs |", "|---|---|---|"]
     for node in sorted(counts):
         kind = "root" if node in roots else "propagated"
+        kind = f"inconclusive ({unsure[node]})" if node in unsure else kind
         lines.append(f"| `{node}` | {kind} | {counts[node]}/{len(runs)} |")
     unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys() - set(not_checked))
     if unchanged:
@@ -1032,9 +1044,11 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
         return replace(run, crash=f"Node `{exc.node}` raised {original}", crash_node=exc.node)
     except Exception as exc:  # replay itself: no node or router raised it
         return replace(run, harness_error=_harness_message("replay failed outside node code", exc))
+    probes = probe_steps(graph, runs, changed_nodes(graph, runs))  # T162: offline, no verdict
     return replace(
         run,
         fresh=tuple(FreshRun(r.steps, r.calls, r.halt) for r in replays),
+        probes=probes,
         agent_seconds=perf_counter() - agent_start,
         budget_hit=budget.hit,
     )
@@ -1079,11 +1093,24 @@ def _evaluate(
     ]
     pairs = [(list(r.drifts), list(r.steps)) for r in replays]
     drifts = [d for d, _ in pairs]
-    counts, roots = _drift_kinds(runs, drifts)
-    root, downstream = sorted(roots), sorted(counts.keys() - roots)
-    # T199: the comment's tally line: each touched run's root, in run order, once each.
-    run_roots = dict.fromkeys(_run_root(run, d) for run, d in zip(runs, drifts, strict=True))
-    tally = Tally(len(runs), sum(1 for d in drifts if d), tuple(r for r in run_roots if r))
+    try:
+        probes = judge_probes(runs, run.probes, cfg.ignore_paths)
+    except ValueError as exc:
+        return replace(partial, harness_error=_harness_message("cannot use the probes", exc))
+    # T162: root by fingerprint and probe. Under fail-on: root-drift an inconclusive node blocks
+    # with the roots, since a live model node can't be probed until T211.
+    counts, _ = _drift_kinds(runs, drifts)
+    bases = {s.node: s.code for r in runs for s in r.steps}
+    heads = {s.node: s.code for f in run.fresh for s in f.steps}
+    firsts = [_run_root(r, d) for r, d in zip(runs, drifts, strict=True)]
+    nodes = [{x.node for x in d} for d in drifts]
+    labels = explain_runs(classify(counts.keys(), (bases, heads), probes), firsts, nodes)
+    blocking = {*labels.root, *labels.inconclusive}
+    root, downstream = sorted(blocking), list(labels.propagated)
+    # T199: the comment's tally line: each run's root and inconclusive nodes, in run order.
+    in_order = [s.node for r, n in zip(runs, nodes, strict=True) for s in r.steps if s.node in n]
+    named = dict.fromkeys(n for n in [*in_order, *root] if n in blocking)
+    tally = Tally(len(runs), sum(1 for d in drifts if d), tuple(named))
     # T083: coverage of the runs replay just did; nothing executes again for it.
     cov = snapshot_coverage(run.head, [[s.node for s in steps] for _, steps in pairs], args.commit)
     if args.coverage_out:
@@ -1113,12 +1140,14 @@ def _evaluate(
         partial,
         inconclusive_blocks=args.fail_on_inconclusive or cfg.gate.inconclusive_blocks,
         replay_lines=(
-            *_replay_markdown(runs, drifts, not_checked),
+            *_replay_markdown(runs, drifts, not_checked, labels),
             *([""] if diverged else []),
             *diverged,
         ),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
+        first_drift=tuple(n for n in dict.fromkeys(firsts) if n),
+        inconclusive=tuple(sorted(labels.inconclusive)),
         tally=tally,
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
@@ -1450,6 +1479,8 @@ def _ci(argv: list[str]) -> int:
     if args.github_output:
         outputs = {
             "exit-code": action.exit_code,
+            "first-drift": ",".join(result.first_drift),
+            "inconclusive-count": len(result.inconclusive),
             "propagated-drift-count": len(result.propagated_drift),
             "report-path": report,
             "root-drift-count": len(result.root_drift),
@@ -2246,7 +2277,9 @@ def _labelled(
     """T162: root by fingerprint and probe (`classify`); the first node to drift is kept too."""
     counts, first = _drift_kinds(sides[0], drifts)
     base, head = ({s.node: s.code for r in side for s in r.steps} for side in sides)
-    labels = classify(counts.keys(), (base, head), probes)
+    firsts = [_run_root(r, d) for r, d in zip(sides[0], drifts, strict=True)]
+    nodes = [{x.node for x in d} for d in drifts]
+    labels = explain_runs(classify(counts.keys(), (base, head), probes), firsts, nodes)
     return Result(
         b.name,
         labels.root,

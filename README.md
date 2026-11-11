@@ -260,9 +260,10 @@ jobs:
   comment is posted, `lgcov verify-result` checks the result against the commits and that
   policy. On a mismatch no verdict is posted and the run exits 2. What this does and doesn't
   stop: [docs/trust-boundary.md](docs/trust-boundary.md).
-- `root-drift` and `any-drift` fail the same PRs for now: until replay classifies
-  drift by the node inputs it records, the first node to drift in each run counts
-  as root.
+- A node is root when its own code changed and it still drifts when run again, offline, on the
+  input the cassette recorded for it. `root-drift` also fails on the nodes lgcov can't clear: a
+  changed node that reaches for the network (a model call can't be told from noise yet) and drift
+  no changed node explains. So `root-drift` and `any-drift` still fail nearly the same PRs.
 - The report includes coverage of the replayed runs, e.g. `Coverage: Nodes 75% (−25% vs
   main) · Edges 60% (±0)`, and lists nodes main reached that this PR doesn't. Pushes to
   `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
@@ -322,7 +323,8 @@ jobs:
   `cassette-dir`, `taxonomy` (turns on the KPI gate; `taxonomy_path` isn't read here),
   `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `tier`,
   `python-version`, `github-token`, `live`, `mode`, `approved-by`, `ci-status`, `phase`. Outputs:
-  `report-path`, `root-drift-count`, `propagated-drift-count`, `verdict` (`pass`, `fail`,
+  `report-path`, `root-drift-count` (inconclusive nodes included), `propagated-drift-count`,
+  `inconclusive-count`, `first-drift` (each run's first node to drift), `verdict` (`pass`, `fail`,
   `needs_human`, `error` or `advisory`).
 - Runs on Linux and macOS runners.
 

@@ -139,7 +139,8 @@ def test_a_pr_turning_on_mask_volatile_in_key_doesn_t_get_it_for_its_own_run(pr:
     assert _ci(policy=False, taxonomy=False)[0] == 0
     code, report, _ = _ci(taxonomy=False)
     assert code == 1
-    assert "| `worker` | root |" in report
+    # T162: the Send's ids changed, not worker's code: unexplained drift, which still blocks.
+    assert "| `worker` | inconclusive (drifted with no changed node before it:" in report
 
 
 def test_an_absolute_path_into_the_pr_checkout_still_reads_the_base(pr: Path) -> None:

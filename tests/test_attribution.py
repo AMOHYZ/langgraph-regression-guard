@@ -11,11 +11,14 @@ from lgcov.attribution import (
     NEEDS_LIVE,
     NO_FINGERPRINT,
     NOT_PROBED,
+    UNEXPLAINED,
+    NodeLabels,
     Probe,
     Result,
     Score,
     classify,
     drift_exceeds_noise,
+    explain_runs,
     macro,
     micro,
     parse_benchmark,
@@ -247,3 +250,11 @@ def test_classify_a_changed_node_with_no_offline_probe_is_inconclusive_not_root(
 def test_classify_a_node_only_one_side_ran_is_root() -> None:
     labels = classify(drifted=["new"], codes=({}, {"new": "1"}), probes={})
     assert labels.root == ("new",)
+
+
+def test_a_run_that_drifted_with_no_changed_node_still_has_an_inconclusive_node() -> None:
+    # A change outside node code (an edge, a router, a Send) or an edited recording: nothing is
+    # root, so the run's first drifted node is inconclusive and fail-on: root-drift still blocks.
+    labels = NodeLabels(root=("b",), propagated=("c", "w"), inconclusive={})
+    out = explain_runs(labels, first_drifts=["b", "w", None], drifted=[["b", "c"], ["w"], []])
+    assert (out.root, out.propagated, out.inconclusive) == (("b",), ("c",), {"w": UNEXPLAINED})

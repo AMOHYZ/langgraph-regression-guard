@@ -704,12 +704,18 @@ def compared_run(
     return Replay(drifts, tuple(fresh), tuple(calls), halt, not_checked)
 
 
+class _Refused(BaseException):
+    # T162: the probe tried the network. Not an Exception, so an SDK's retry loop can't catch it
+    # and sleep before trying again.
+    pass
+
+
 @contextmanager
 def _offline(reached: list[str]) -> Iterator[None]:
     # T162: every way out to the network refuses, and says it was tried.
     def refuse(*args: object, **kwargs: object) -> NoReturn:
         reached.append(repr(args[-1])[:80] if args else "")
-        raise ConnectionRefusedError("lgcov's probe runs offline (T162)")
+        raise _Refused("lgcov's probe runs offline (T162)")
 
     saved = [
         (socket, "getaddrinfo", socket.getaddrinfo),
@@ -725,9 +731,23 @@ def _offline(reached: list[str]) -> Iterator[None]:
             setattr(owner, name, original)
 
 
-def _probe(step: Step, fn: FunctionType | None, ignore_paths: Sequence[str]) -> Probe:
+@dataclass(frozen=True)
+class ProbeStep:
+    """T162: one changed node run with this code on the input base recorded at `runs[run].steps
+    [step]`: what it returned, or why it didn't. It says what ran, not what that means, so the job
+    that runs a PR's code can hand it over: `judge_probes` compares."""
+
+    run: int
+    step: int
+    node: str
+    output: Any = None
+    goto: list[Any] | None = None
+    raised: str = ""  # why it couldn't run offline; "" when it returned
+
+
+def _probe_step(i: int, j: int, step: Step, fn: FunctionType | None) -> ProbeStep:
     if fn is None:
-        return Probe(None, NO_FINGERPRINT)
+        return ProbeStep(i, j, step.node, raised=NO_FINGERPRINT)
     reached: list[str] = []
     out: Any = None
     try:
@@ -737,29 +757,77 @@ def _probe(step: Step, fn: FunctionType | None, ignore_paths: Sequence[str]) -> 
             out = fn(deepcopy(step.input), **(config if asks else {}))
             if inspect.iscoroutine(out):
                 out = asyncio.run(out)
+    except _Refused:
+        pass  # `reached` says so
     except Exception as exc:  # user node code can raise anything
         if not reached:
-            return Probe(None, f"raised {type(exc).__name__} on base's input")
-    if reached:
-        return Probe(None, NEEDS_LIVE)
+            return ProbeStep(i, j, step.node, raised=f"raised {type(exc).__name__} on base's input")
+    if reached:  # even if the node caught the refusal and went on
+        return ProbeStep(i, j, step.node, raised=NEEDS_LIVE)
     goto = _goto_saved(out.goto) if isinstance(out, Command) else None
-    routed = {step.node} if step.goto is not None else set()
-    fresh = _compared(Step(step.node, _streamed(out), goto=goto), ignore_paths, routed)
-    return Probe(drift_exceeds_noise(step.node, _compared(step, ignore_paths, routed), fresh))
+    return ProbeStep(i, j, step.node, _streamed(out), goto)
+
+
+def changed_nodes(graph: Any, runs: Sequence[Cassette]) -> set[str]:
+    """T162: the recorded nodes whose fingerprint differs in this graph."""
+    codes = _codes(graph)
+    return {
+        s.node
+        for r in runs
+        for s in r.steps
+        if s.code is not None and codes.get(s.node) not in (None, s.code)
+    }
+
+
+def probe_steps(
+    graph: Any, runs: Sequence[Cassette], nodes: Container[str]
+) -> tuple[ProbeStep, ...]:
+    """T162: run each of `nodes` with this graph's code on every input base recorded for it, with
+    the network blocked. A node that reaches for the network would need a live call, and one live
+    sample can't be told from noise (T211), so its probe is `raised`, never a crash."""
+    fns = {name: _plain(spec.bound) for name, spec in getattr(graph, "nodes", {}).items()}
+    return tuple(
+        _probe_step(i, j, s, fns.get(s.node))
+        for i, run in enumerate(runs)
+        for j, s in enumerate(run.steps)
+        if s.node in nodes
+    )
+
+
+def _merged(old: Probe | None, new: Probe) -> Probe:
+    # A node drifts if any of its probes does; it can't be cleared if any couldn't run.
+    if old is None or new.drifted or (old.drifted is False and new.drifted is None):
+        return new
+    return old
+
+
+def judge_probes(
+    runs: Sequence[Cassette], probes: Sequence[ProbeStep], ignore_paths: Sequence[str] = ()
+) -> dict[str, Probe]:
+    """T162: each probed node: does it drift on base's recorded input (`drift_exceeds_noise`), as
+    replay compares it? Pure. ValueError for a probe that matches no recorded step."""
+    found: dict[str, Probe] = {}
+    for p in probes:
+        steps = runs[p.run].steps if 0 <= p.run < len(runs) else []
+        recorded = steps[p.step] if 0 <= p.step < len(steps) else None
+        if recorded is None or recorded.node != p.node:
+            raise ValueError(f"a probe of `{p.node}` matches no recorded step")
+        if p.raised:
+            probe = Probe(None, p.raised)
+        else:
+            routed = {p.node} if recorded.goto is not None else set()
+            fresh = _compared(Step(p.node, p.output, goto=p.goto), ignore_paths, routed)
+            was = _compared(recorded, ignore_paths, routed)
+            probe = Probe(drift_exceeds_noise(p.node, was, fresh))
+        found[p.node] = _merged(found.get(p.node), probe)
+    return found
 
 
 def probe_nodes(
     graph: Any, runs: Sequence[Cassette], nodes: Container[str], ignore_paths: Sequence[str] = ()
 ) -> dict[str, Probe]:
-    """T162: run each of `nodes` with this graph's code on every input base recorded for it, with
-    the network blocked. A node that finishes says whether its output drifts; one that reaches for
-    the network would need a live call, and one live sample can't be told from noise (T211)."""
-    fns = {name: _plain(spec.bound) for name, spec in getattr(graph, "nodes", {}).items()}
-    found: dict[str, Probe] = {}
-    for step in (s for run in runs for s in run.steps if s.node in nodes):
-        if found.get(step.node, Probe(False)).drifted is False:  # stop once one says more
-            found[step.node] = _probe(step, fns.get(step.node), ignore_paths)
-    return found
+    """T162: `probe_steps` and `judge_probes` in one process, as `lgcov bench` uses them."""
+    return judge_probes(runs, probe_steps(graph, runs, nodes), ignore_paths)
 
 
 def accept_nodes(
