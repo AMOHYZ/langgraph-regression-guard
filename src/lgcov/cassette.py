@@ -725,6 +725,20 @@ def _offline(reached: list[str]) -> Iterator[None]:
             setattr(owner, name, original)
 
 
+@dataclass(frozen=True)
+class ProbeStep:
+    """T162: one changed node run with this code on the input base recorded at `runs[run].steps
+    [step]`: what it returned, or why it didn't. It says what ran, not what that means, so the job
+    that runs a PR's code can hand it over: `judge_probes` compares."""
+
+    run: int
+    step: int
+    node: str
+    output: Any = None
+    goto: list[Any] | None = None
+    raised: str = ""  # why it couldn't run offline; "" when it returned
+
+
 def _probe(step: Step, fn: FunctionType | None, ignore_paths: Sequence[str]) -> Probe:
     if fn is None:
         return Probe(None, NO_FINGERPRINT)
