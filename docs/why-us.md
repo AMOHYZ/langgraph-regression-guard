@@ -2,11 +2,28 @@
 
 lgcov replays your agent, re-runs only the nodes a PR can reach, and shows which node's
 output changed first and which changed after it. Each KPI in your taxonomy gets a paired
-test, and a judge can block only once it has earned that against human labels. On real
-agents that attribution is a [pilot so far](benchmark.md#real-prs): one PR, and a
-[base-against-base run](benchmark.md#aa-noise-floor) gave the same root. First report in
-2 minutes (L1 only, measured 27 Oct 2026). Other tools as of 31 Oct 2026; Kitaru and
-LangSmith as of 5 Nov.
+test, and a judge can block only once it has earned that against human labels. The one
+thing here no other tool found does is that node cause, root against propagated, from
+replay, and it is unvalidated: on real agents it is a [pilot](benchmark.md#real-prs) on one
+PR with 6 labelled roots, and a [base-against-base run](benchmark.md#aa-noise-floor) gave
+the same root, so it has no noise threshold yet. First report in 2 minutes (L1 only,
+measured 27 Oct 2026). Other tools as of 31 Oct 2026; Kitaru and LangSmith as of 5 Nov;
+the tools added on 11 Nov as of that day.
+
+## What's still open
+
+Every piece of lgcov exists somewhere else on its own. The claim left is the bundle: (1) a
+sticky PR comment, (2) a three-way statistical verdict, (3) node cause that holds up under
+replay and (4) the judge's TPR and TNR inside the gate. [evalgate-ci](#related-tools) ships
+(1), a paired test against a baseline that can read inconclusive, and (4) in one Action;
+[statgate](#related-tools) ships (1) and (2). No tool found ships (3), so the claim rests
+entirely on (3), which is unvalidated (see (a) below).
+
+What could close it: teams already assemble (1), (2) and (4) from public recipes, such as
+OpenRouter's tutorial on gating pull requests on evals (1 Oct 2026), and nothing durable
+stops LangSmith or Braintrust shipping the bundle within a quarter. Distribution is lopsided
+too: `@evalgate/sdk` had 1,724 npm downloads from 11 Oct to 9 Nov, against 6 a month on PyPI
+for the step-attribution package below (both read 11 Nov).
 
 ## The problem
 
@@ -38,28 +55,40 @@ noise check, base against base on a real model (T173), gave the same root as the
 1 of 1 can't be told apart from model noise: lgcov's root has no noise threshold yet.
 Reenact records each LangGraph node boundary in its trajectory and shows them to its judges,
 but it gates per scenario, at the first call that diverges from the recording; lgcov's rule is the same
-first-divergence idea, labelled per graph node. EvalView names a root tool call. None of the
-tools below labels graph nodes root or propagated between base and PR.
+first-divergence idea, labelled per graph node. EvalView names a root tool call.
+Several tools try node cause; none found ships it replay-proof in a sticky PR Action.
+[SCIPE](https://github.com/garg-ankush/scipe) (Berkeley, 2024) runs an LLM judge on each
+node of a compiled LangGraph graph and separates a node's own failures from those it
+inherits upstream, on one version, with no base-against-PR run and no CI step.
+[trajectory-causal-attribution](https://pypi.org/project/trajectory-causal-attribution/)
+ablates recorded trajectory steps one at a time to find the culprit step, not a graph node.
+None of the tools below labels graph nodes root or propagated between base and PR.
+A plain baseline does as well: on single-node edits in the [synthetic
+benchmark](benchmark.md#synthetic), naming the node the diff edited matches or beats lgcov's
+root (recall 1.00 against 0.85, precision 0.35 against 0.39).
 
 **(c) Judges that earn the right to block.** A KPI's judge may block a PR only once the
 lower bounds of the 95% intervals of its TPR and TNR against human labels both clear
-0.80. Below that it flags or advises, with the number of labels it still needs printed
-next to it.
+0.80. Below that it flags or advises: the PR comment shows its band, and `lgcov calibrate`
+prints how many labels it needs to pin κ within ±0.10.
 *Status: built (T063, [PR #32](https://github.com/AMOHYZ/langgraph-regression-guard/pull/32)):
 `lgcov calibrate` gives TPR and TNR with Wilson intervals, and a judge's band follows their
-lower bounds.* Reenact sets a criterion blocking or advisory from its raw agreement with
-human labels, and graphtrace reports Cohen's kappa per criterion; neither gates on
-interval bounds of TPR and TNR.
+lower bounds.* Partial, not a wedge of its own: graphtrace reports Cohen's kappa per
+criterion and judgegate gives kappa with confidence intervals, evalgate-ci reports TPR and
+TNR and blocks a run when the judge's kappa drops, and llm-evalgate corrects pass rates
+with the judge's sensitivity and specificity. Reenact sets a criterion blocking or advisory
+from its raw agreement with human labels. None found gates on interval bounds of TPR and TNR.
 
 **(e) Calibration that lives in the repo.** A reviewer's override is a label versioned in
 git, and the next PR re-estimates the judge's κ, TPR and TNR from those labels and moves
 the judge between advising and blocking. No hosted service.
 *Status: built (T102, [PR #33](https://github.com/AMOHYZ/langgraph-regression-guard/pull/33)):
 `lgcov review override` saves a label, the judge's band moves on the next PR, and saved
-cases re-judge the judge.* Kitaru also
-calibrates evaluators from human judgments, on a Kitaru server you run.
+cases re-judge the judge.* Partial: Kitaru also calibrates evaluators from human judgments,
+on a Kitaru server you run, and the tools under (c) calibrate from labels too.
 
-**Paired statistics, done properly.** This is standard technique, not a differentiator.
+**Paired statistics, done properly.** This is standard technique, not a differentiator:
+statgate, evalgate-ci and AgentAssay cover a paired or three-valued gate.
 Each case's base and PR scores are paired: an exact McNemar test for binary KPIs, a
 sign-flip test otherwise. Δ gets a BCa bootstrap CI, a non-inferiority margin δ decides
 SHIP, BLOCK or INCONCLUSIVE, and an INCONCLUSIVE KPI shows the cases it needs to detect Δ
@@ -70,9 +99,11 @@ follows [statgate](https://github.com/yashchimata/statgate) (see [NOTICE](../NOT
 and [AgentAssay](https://github.com/qualixar/agentassay) also gives three-valued
 verdicts. What lgcov adds: one test per taxonomy KPI, each tied to the graph node it
 reads, with the root drift node next to its verdict, and Holm across the blocking KPIs
-with Benjamini–Hochberg across the advisory ones. Per-slice scores are planned (T090).
+with Benjamini–Hochberg across the advisory ones. Per-slice scores are built
+([PR #34](https://github.com/AMOHYZ/langgraph-regression-guard/pull/34)): the report has a
+table per node, one row per slice.
 
-**Node-level memoization.** A node whose code fingerprint and masked input both match the
+**Node-level memoization.** Seconds per PR is not a differentiator either. A node whose code fingerprint and masked input both match the
 recording is served from the cassette, so changed nodes run live, and so do nodes whose input
 changed in a part the mask leaves in. A change only to a masked value, such as a message's id
 or usage, doesn't re-run the nodes below it, so they can be served stale
@@ -120,7 +151,19 @@ column against lgcov: [bake-off.md](bake-off.md).
   into issues, evaluators and offline examples. Engine's
   [fix validation](https://docs.langchain.com/langsmith/engine-fix-validation) (private beta)
   replays an issue's traces on a baseline deployment and on a PR preview, with a verdict per
-  trace.
+  trace. Engine also [diagnoses a root cause](https://docs.langchain.com/langsmith/engine-overview)
+  from traces and connected source code and opens the fix as a pull request; not per node.
+- [SCIPE](https://github.com/garg-ankush/scipe) (Berkeley; no licence file; last pushed
+  Nov 2024; [LangChain's write-up](https://www.langchain.com/blog/scipe-systematic-chain-improvement-and-problem-evaluation)):
+  an LLM judge on each node of a LangGraph graph, needing no ground truth, names the node
+  whose independent failures hurt the final answer most. One version at a time.
+- [trajectory-causal-attribution](https://pypi.org/project/trajectory-causal-attribution/)
+  (1.0.0, MIT; imports as `agent_replay`): counterfactual step ablation over a recorded
+  trajectory, with Shapley values and Wilson intervals, names the culprit step. No PR Action.
+- [evalgate-ci](https://pypi.org/project/evalgate-ci/) (0.1.0, MIT): a GitHub Action that
+  posts a sticky PR comment, reads a Wilson lower bound on the pass rate, compares with a
+  baseline by McNemar's test, and checks the judge's kappa, TPR and TNR against human
+  anchors. Exit 0 or 1. One of several unrelated projects named EvalGate.
 
 ## What lgcov does not do (yet)
 
@@ -135,6 +178,11 @@ column against lgcov: [bake-off.md](bake-off.md).
 - See a change that reaches a node only through a message's id, usage or other metadata, or a
   `Store` read, or replay a graph with a checkpointer or an `interrupt`:
   [known replay limits](../README.md#known-replay-limits).
+- Tell root drift from model noise: a base-against-base run on a real model (T173) gave the
+  same root as #163, so the root label has no noise threshold yet.
+- Judge a real PR: the judge gate is built, but no judge has run on one yet.
+- Leave a node served after a comment or docstring edit: that counts as a code change, so
+  the node runs live.
 
 ## How this was checked
 
@@ -158,6 +206,14 @@ On 31 Oct 2026, from each tool's README and, where named, its source:
   docs and its CI example; open_deep_research's `deep_researcher.py` at `6532a41`
   (`write_research_brief` builds the supervisor's prompt); and lgcov's `cli.py` (`_run_root`)
   and `fingerprint.py`.
+- Read on 11 Nov 2026, not run: SCIPE's repo and LangChain's post on it;
+  trajectory-causal-attribution's, evalgate-ci's and llm-evalgate's PyPI pages and
+  pypistats; `@evalgate/sdk` on npm and evalgate.com; LangSmith Engine's overview. Sources
+  for the claims under "What's still open": the author's claim matrix of 7 Nov and a
+  competitor report of 6 Nov, checked against those pages. judgegate is from that report,
+  not re-read. Culprit and maida-assert, named in the claim matrix, weren't found and are
+  left out.
+- lgcov's synthetic and #163 numbers: [benchmark.md](benchmark.md) at this commit.
 - Not compared live: Reenact records LangChain chat-model and tool calls through
   callbacks, and the demo agent's fake LLM is plain Python, so Reenact would record
   nothing on demo PR #7. A fair run needs the demo to call a LangChain chat model.

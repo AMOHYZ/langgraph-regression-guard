@@ -5,8 +5,10 @@ described them on 5 Nov 2026. Nothing was installed or run, so this compares wha
 documented, not how well it works.
 
 Reenact, EvalView, graphtrace, AgentAssay and statgate are in
-[why-us.md](why-us.md#related-tools). rubric-eval, Shadow and Evalgate aren't compared in
-either doc, and this one makes no claims about them.
+[why-us.md](why-us.md#related-tools). Thirteen newer tools get one row each in
+[Newer tools](#newer-tools-one-row-each), read on 11 Nov 2026 and not scored by the columns
+below. rubric-eval and Shadow aren't compared in either doc, and this one makes no claims
+about them.
 
 ## How the cells are scored
 
@@ -53,6 +55,35 @@ The same table, with the evidence for each cell:
 | **DeepEval** in CI | **Partial.** `deepeval test run` [fails the build][de-ci] on a metric threshold. Comparing with an [`--official` run][de-official] needs Confident AI, its hosted side. | **Partial.** [Nodes become spans][de-lg], and you [stage a metric on one][de-node]. You wire each, and it's [single-turn only][de-comp]. | **No.** The CLI reports per-metric pass or fail. Nothing found on Confident AI either. | **Partial.** Thresholds and a [flaky marker][de-flaky] in CI. [Eval Alignment][ca-align] on Confident AI reports agreement and a confusion matrix; you decide what gates. | **Yes, hosted.** [Annotation and verdict validation][ca-hitl] on Confident AI. Nothing in the open-source CLI. | **Unknown.** Nothing found. |
 | **lgcov** | **Yes.** The [Action][lg-action] replays the PR against a committed cassette and comments. Base isn't re-run on the PR. | **Yes.** The comment has a row per node. A [subgraph counts as one node][lg-gaps], so nodes inside it can't be named. | **Yes, pilot.** The [first node to drift][lg-root] in each run is root, later ones downstream. [Root precision 1 of 1 on one PR][lg-real], 95% Wilson interval 0.21 to 1.00. | **Yes, built.** [Paired test per KPI][lg-gate], and a judge's band follows its [TPR and TNR lower bounds][lg-why]. [Not yet judged on a real PR][lg-kpis]. | **Yes, built.** [`lgcov review override`][lg-why] saves a label in the repo, and the next PR re-estimates the judge. [Labels so far are the demo's][lg-labels]. | **216 s and 538 s** on [one PR][lg-real], capped settings. [Under 1 s on the demo][lg-speed], no real model. |
 
+## Newer tools (one row each)
+
+Read on 11 Nov 2026 from each tool's own page, PyPI or npm entry, and pypistats or npm's
+download API; nothing installed or run. Adoption is downloads in the last month where a
+registry gives them, else GitHub stars. "Not found" means the pages read are silent.
+
+| Tool | What it does | Verdict | Adoption | Overlap with lgcov |
+|---|---|---|---|---|
+| [EvalGate][eg-site]¹ | Hosted: reruns agreed examples after each change and posts a regression-gate comment on the PR | Pass or fail per check | `@evalgate/sdk` 1,724 npm (11 Oct to 9 Nov) | PR comment. TPR or TNR gating not found on the pages read |
+| [evalgate-ci][eg-ci]¹ | Action: sticky PR comment, Wilson lower bound on the pass rate, McNemar against a baseline, judge kappa, TPR and TNR against human anchors | Exit 0 or 1; the readout can say inconclusive | 15 PyPI, 0 stars | (1), most of (2) and (4) of the [bundle](why-us.md#whats-still-open); no graph nodes |
+| [statgate][sg-pypi] | Paired test against a non-inferiority margin, sticky comment Action | SHIP / BLOCK / INCONCLUSIVE | 16 PyPI | (1) and (2); lgcov's `stats.py` follows it |
+| [llm-evalgate][le-pypi] | Fails CI on a significant regression against a saved baseline; corrects pass rates by the judge's sensitivity and specificity | Pass or fail, with bootstrap intervals | 25 PyPI, 0 stars | (4)-adjacent; no PR comment found |
+| [SCIPE][scipe] | An LLM judge on each node of a LangGraph graph; separates a node's own failures from inherited ones and names the node to fix | A ranked node, no gate | 25 stars; last pushed Nov 2024 | Node cause on one version; no base vs PR, no CI |
+| [trajectory-causal-attribution][tca] (`agent_replay`) | Ablates recorded trajectory steps one at a time; Shapley values with Wilson intervals | A culprit step | 6 PyPI, 2 stars | Cause by replay, per step not per node; no PR Action |
+| graphtrace | pytest plugin: LangGraph cassettes, path and tool asserts, `calibrate` gives kappa | Pass or fail asserts | 1 star (6 Nov) | Cassettes and kappa; no root labels ([why-us](why-us.md#related-tools)) |
+| [agentverify][av-pypi] | pytest plugin: cassettes that fail when a prompt or tool schema changed; LangGraph adapter | Pass or fail, `min_pass_rate` | 60 PyPI, 8 stars | Cassette replay; its README pitches nightly runs, not every PR |
+| [evalshift][es-gh] | CLI and Action: compares models, catches tool-call regressions, gates model changes | Not found | 12 stars | CI gate for model swaps; no nodes |
+| [Regrada][rg-gh] | Action wrapper for the Regrada CLI, updates a PR comment | Not found | 0 stars | PR comment |
+| [Evalship][ev-site] | Hosted: writes and audits evals, compares `main` with the PR in a comment, can block merges; free tier, then $29 and $99 a month | Pass or fail per eval | Not found | PR comment against base |
+| [Raindrop Simulations][rd-sim] | Hosted public beta: replays production conversations against the PR's code, side by side | "7 of the 10 conversations" touched, "2 got worse" | Not found; pricing before GA | Base vs PR by conversation; no root cause shown |
+| [LangSmith Engine][ls-engine-ov] | Diagnoses a root cause from traces and connected source code and opens the fix as a PR | Per-trace verdict in fix validation (beta) | Not found | Root cause by trace, not per node; see the LangSmith row above |
+
+¹ At least five unrelated projects use the name EvalGate: evalgate.com and, on GitHub,
+AOTP-Ventures/evalgate, dylanmccavitt/evalgate, josep-audenis/evalgate and
+puneethkotha/evalgate (evalgate-ci on PyPI). The first two rows are the first and last of these.
+
+Left out because one search each found nothing to source: Culprit, maida-assert, checkwash,
+evaldelta, agentstats and agent-tracegraph.
+
 ## Where lgcov is different (evidence-backed)
 
 Against these seven, as documented. Each has a limit next to it.
@@ -64,11 +95,20 @@ Against these seven, as documented. Each has a limit next to it.
   capped at about 1/5 to 1/6, because only the first node to drift is called root (T162), and
   a subgraph is scored as one node. A noise check, base against base on a real model (T173),
   gave the same root as the PR, so these runs can't separate cause from model noise: lgcov's
-  root has no noise threshold yet.
+  root has no noise threshold yet. Among the newer tools, several try node cause; none found
+  ships it replay-proof in a sticky PR Action. [SCIPE][scipe] separates a node's own failures
+  from inherited ones with an LLM judge, on one version, and
+  [trajectory-causal-attribution][tca] finds a culprit step by replay, not a node. A plain
+  baseline matches or beats lgcov on single-node edits: naming the node the diff edited has
+  recall 1.00 against lgcov's 0.85 and precision 0.35 against 0.39
+  ([synthetic benchmark](benchmark.md#synthetic)).
 - **A judge earns the right to block.** lgcov lets a judge block only when the lower bounds of
   its TPR and TNR against human labels clear 0.80. Langfuse reports kappa and F1, Confident AI
   a confusion matrix and Kitaru a calibration protocol, and LangSmith and Opik tune judges from
-  corrections, but none documents a gate that reads such bounds. This is built, but it hasn't
+  corrections, but none documents a gate that reads such bounds. It isn't unique among the
+  newer tools: [evalgate-ci][eg-ci] reports TPR and TNR and blocks on the judge's kappa, and
+  [llm-evalgate][le-pypi] uses sensitivity and specificity, though neither gates on their
+  interval bounds. This is built, but it hasn't
   judged a real PR: `lgcov judge` replays the graph, so judging costs live calls, and the Jev
   judge is untested at this payload size.
 - **A paired test per KPI in the PR result.** None of the seven documents a test or interval
@@ -196,6 +236,18 @@ They do better:
 [de-comp]: https://github.com/confident-ai/deepeval/blob/fec0da671d861ba8a8b15c7679bad380be1945f6/docs/content/docs/evaluation-component-level-llm-evals.mdx
 [ca-align]: https://www.confident-ai.com/docs/human-in-the-loop/eval-alignment
 [ca-hitl]: https://www.confident-ai.com/docs/human-in-the-loop/introduction
+[eg-site]: https://evalgate.com
+[eg-ci]: https://pypi.org/project/evalgate-ci/
+[sg-pypi]: https://pypi.org/project/statgate/
+[le-pypi]: https://pypi.org/project/llm-evalgate/
+[scipe]: https://github.com/garg-ankush/scipe
+[tca]: https://pypi.org/project/trajectory-causal-attribution/
+[av-pypi]: https://pypi.org/project/agentverify/
+[es-gh]: https://github.com/evalshift/evalshift-cli
+[rg-gh]: https://github.com/regrada-ai/regrada-ci
+[ev-site]: https://evalship.com/
+[rd-sim]: https://www.raindrop.ai/simulate/
+[ls-engine-ov]: https://docs.langchain.com/langsmith/engine-overview
 [lg-action]: ../action.yml
 [lg-root]: https://github.com/AMOHYZ/langgraph-regression-guard/blob/f5b313c8de32e415770cd78804bbe3865ec40915/src/lgcov/cli.py#L286-L307
 [lg-gaps]: benchmark.md#known-gaps
