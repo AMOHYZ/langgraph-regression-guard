@@ -3,12 +3,13 @@ anything in it, so it says what ran, never what that means, and one that isn't e
 is refused."""
 
 import json
+from dataclasses import replace
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from lgcov.candidate import CandidateRun, FreshRun, candidate_to_json, parse_candidate
-from lgcov.cassette import Call, Halt, Step
+from lgcov.cassette import Call, Halt, ProbeStep, Step
 from lgcov.snapshot import Edge, GraphSnapshot
 
 HEAD = GraphSnapshot(frozenset({"a", "b"}), frozenset({Edge("a", "b")}))
@@ -148,3 +149,45 @@ def test_what_is_not_exactly_a_run_is_refused(body: object) -> None:
 def test_what_is_not_json_is_refused() -> None:
     with pytest.raises(ValueError):
         parse_candidate("not json")
+
+
+# T162, step 1 of 2: this version reads schema 2, which adds the probes, but still writes schema 1.
+# So a job on this version can decide from a newer candidate job's file, and an older job can
+# still decide from this one's.
+GOOD_PROBE = {"run": 0, "step": 0, "node": "a", "output": {"x": 2}, "goto": None, "raised": ""}
+
+
+def test_it_still_writes_schema_1_with_no_probes() -> None:
+    assert (BODY["schema"], "probes" in BODY) == (1, False)
+
+
+def test_a_schema_2_file_and_its_probes_are_read() -> None:
+    run = parse_candidate(json.dumps({**BODY, "schema": 2, "probes": [GOOD_PROBE]}))
+    assert run.probes == (ProbeStep(0, 0, "a", {"x": 2}),)
+    assert run == replace(RUN, probes=run.probes)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {**BODY, "schema": 2},  # no probes
+        {**BODY, "probes": []},  # schema 1 has none
+        {**BODY, "schema": 2, "probes": {}},
+        {**BODY, "schema": 2, "probes": [{**GOOD_PROBE, "drifted": True}]},
+        {**BODY, "schema": 2, "probes": [{**GOOD_PROBE, "run": "0"}]},
+        {**BODY, "schema": 2, "probes": [{**GOOD_PROBE, "node": None}]},
+        {**BODY, "schema": 2, "probes": [{**GOOD_PROBE, "raised": 1}]},
+    ],
+    ids=[
+        "schema 2 with no probes",
+        "schema 1 with probes",
+        "probes that aren't a list",
+        "a probe with a verdict",
+        "text for a run",
+        "no node",
+        "a number for raised",
+    ],
+)
+def test_probes_that_are_not_exactly_probes_are_refused(body: object) -> None:
+    with pytest.raises(ValueError):
+        parse_candidate(json.dumps(body))
