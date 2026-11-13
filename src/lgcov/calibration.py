@@ -15,7 +15,7 @@ import json
 import math
 import random
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from statistics import fmean
 from typing import Literal
@@ -211,6 +211,51 @@ def tune_threshold(
         train = [scored[i] for j, part in enumerate(parts) if j != k for i in part]
         held_out.append(_balanced_accuracy([scored[i] for i in test], _best_cutoff(train)))
     return Threshold(_best_cutoff(scored), fmean(held_out))
+
+
+@dataclass(frozen=True)
+class Fold:
+    fit: tuple[int, ...]  # row indexes whose labels a fit may read
+    validate: tuple[int, ...]  # the held-out rows: every row of the fold's cases
+
+
+def case_folds(case_ids: Sequence[str], folds: int = 5, seed: int = 0) -> tuple[Fold, ...]:
+    """T125: seeded folds split by case, so every row of a case (one per judge, question form
+    or sample) is held out together and no label is on both sides of a fold. `case_ids` has
+    one id per row; which cases share a fold doesn't depend on the rows' order."""
+    cases = sorted(set(case_ids))
+    if folds < 2:
+        raise ValueError(f"cross-fitting needs at least 2 folds, got {folds}")
+    if len(cases) < folds:
+        raise ValueError(f"{folds} folds need {folds} cases or more: {len(cases)} cases")
+    random.Random(seed).shuffle(cases)
+    fold_of = {case: k for k in range(folds) for case in cases[k::folds]}
+    rows = range(len(case_ids))
+    return tuple(
+        Fold(
+            fit=tuple(i for i in rows if fold_of[case_ids[i]] != k),
+            validate=tuple(i for i in rows if fold_of[case_ids[i]] == k),
+        )
+        for k in range(folds)
+    )
+
+
+def cross_fit[R, M](
+    case_ids: Sequence[str],
+    rows: Sequence[R],
+    fit: Callable[[Sequence[R]], M],
+    estimate: Callable[[M, Sequence[R]], float],
+    folds: int = 5,
+    seed: int = 0,
+) -> list[float]:
+    """T125: one estimate per fold, each from a model fitted on the other folds' rows only, so
+    a label never reaches both a fit and the estimate that fit is scored by."""
+    if len(case_ids) != len(rows):
+        raise ValueError(f"{len(case_ids)} case ids for {len(rows)} rows")
+    return [
+        estimate(fit([rows[i] for i in fold.fit]), [rows[i] for i in fold.validate])
+        for fold in case_folds(case_ids, folds, seed)
+    ]
 
 
 @dataclass(frozen=True)

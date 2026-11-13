@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `jev_timeout_s` in `lgcov.yaml` sets how long a Jev judge waits for each attempt (default 10 seconds, as before), so a long case such as a whole report doesn't time out.
+- `lgcov.calibration.case_folds` and `cross_fit`: seeded folds split by case, so a case with several label rows is never on both sides of a fold. Nothing uses them for the bands yet; `tune_threshold` still splits by row.
 - The gate table's N* for a blocking KPI is now sized at α/K_gate, Holm's strictest step, so it no longer understates the cases a BLOCK needs when more than one KPI blocks. With one blocking KPI, and for advisory KPIs, it is unchanged. MDE stays at α.
 - `lgcov judge --from-runs DIR` judges the `base.json` and `head.json` that `lgcov bench --keep-runs` saved, with no replay, so the agent makes no call. Model judges still cost their own calls.
 - `lgcov bench --live` runs every node on head instead of serving the ones that didn't change. A row with the same commit on both sides then measures how much a live model varies on its own.
