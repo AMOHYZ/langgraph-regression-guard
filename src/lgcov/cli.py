@@ -1751,7 +1751,7 @@ def _l2_gate(
                 case_roots=roots,
             )
         )
-    return gate_kpis(stats, advisory, gate.alpha, flagged=flagged)
+    return gate_kpis(stats, advisory, gate.alpha, flagged=flagged, power=gate.power)
 
 
 def _saved_pair(folder: Path) -> tuple[list[Cassette], list[tuple[list[Drift], list[Step]]]]:
