@@ -562,25 +562,25 @@ def test_a_client_kept_across_runs_works_on_every_run() -> None:
 
 def test_work_a_failed_node_left_running_does_not_carry_into_the_next_run() -> None:
     spy = Mock()  # a real call, still running and billing after its node failed
+    left: list[asyncio.Future[None]] = []
 
     async def slow() -> None:
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(60)  # far longer than the test: only a cancel ends it
         spy()
 
     async def fail() -> None:
         raise ValueError("bad draft")
 
     async def fans_out(state: S) -> S:
-        await asyncio.gather(slow(), fail())  # open_deep_research fans out this way
-        return state
-
-    async def next_run(state: S) -> S:
-        await asyncio.sleep(0.1)  # time for `slow` to finish, if it were still there
+        left.append(asyncio.ensure_future(slow()))
+        await asyncio.gather(left[0], fail())  # open_deep_research fans out this way
         return state
 
     with pytest.raises(NodeError):
         record(_pair(fans_out, _anoop), {"x": 1})
-    record(_pair(next_run, _anoop), {"x": 1})
+    # No clock in this check: a 50 ms timer racing the cancel failed on a slow CI runner.
+    assert left[0].cancelled()
+    record(_pair(_anoop, _anoop), {"x": 1})  # the next run, on the same loop
     assert spy.call_count == 0
 
 
