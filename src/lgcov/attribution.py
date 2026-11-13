@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import fmean
 from typing import Literal
@@ -375,6 +375,7 @@ class Result:
     status: str = ""  # one of STATUSES: listed, never run or scored
     first_drift: tuple[str, ...] = ()  # T162: the first node to drift in some run
     inconclusive: tuple[tuple[str, str], ...] = ()  # T162: (node, why), sorted
+    noise: tuple[tuple[str, NoiseCheck], ...] = ()  # T211: each repeated node's evidence, sorted
 
     @property
     def pending(self) -> bool:
@@ -502,6 +503,14 @@ def render_markdown(results: Sequence[Result], command: str, date: str, source: 
                 + (f" Inconclusive: {unsure}." if unsure else "")
                 + (f" {r.notes}" if r.notes else "")
             )
+    if any(r.noise for r in results):  # T211: the evidence, whichever way each check went
+        lines += ["", "## Noise checks", ""]
+        lines += [
+            f"- `{r.name}`: `{n}`: {c.verdict}: spread {c.spread:.3f}, nearest head sample "
+            f"{c.min_head_to_base:.3f}"
+            for r in results
+            for n, c in r.noise
+        ]
     lines += ["", "Reproduce:", "", "```bash", command, "```", ""]
     return "\n".join(lines)
 
@@ -536,6 +545,7 @@ def results_json(results: Sequence[Result]) -> str:
                 "status": r.status,
                 "first_drift": list(r.first_drift),
                 "inconclusive": dict(r.inconclusive),
+                "noise": {n: {**asdict(c), "verdict": c.verdict} for n, c in r.noise},
             }
             for r in results
         ],

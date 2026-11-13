@@ -9,6 +9,8 @@ each side here, with that side's folders first on its path, and a run crosses ov
     replay <target> <runs.json> <drifted> <fresh>  replay them, and save the nodes that drifted in
            [<probes>] [--live]                     each, the fresh runs, and T162's probe of each
                                                    changed node that drifted; --live runs every node
+    repeat <target> <runs.json> <nodes> <out> <k>  T211: run each named node live, k times on each
+                                                   input it was recorded with, and save the samples
 
 T169: runs are saved as each one finishes, so a crash can't lose what was already paid for.
 
@@ -18,6 +20,7 @@ nothing ran. Exit 1: it failed later.
 
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from lgcov.cassette import (
@@ -26,11 +29,13 @@ from lgcov.cassette import (
     changed_nodes,
     probe_nodes,
     record,
+    repeat_steps,
     replay_run,
     runs_from_json,
     runs_to_json,
 )
 from lgcov.cli import CANT_IMPORT, _load_graph, _say_replay_notes
+from lgcov.messages import encode
 
 
 def _save(path: Path, runs: list[Cassette]) -> None:
@@ -78,6 +83,11 @@ def side_main(argv: list[str]) -> int:
             Path(paths[1]).write_text(json.dumps(drifted), encoding="utf-8")
             if len([p for p in paths if p != "--live"]) > 3:  # T162: the probes' file
                 Path(paths[3]).write_text(json.dumps(_probes(graph, recorded, drifted)), "utf-8")
+        elif mode == "repeat":
+            recorded = runs_from_json(Path(paths[0]).read_text(encoding="utf-8"))
+            nodes = json.loads(Path(paths[1]).read_text(encoding="utf-8"))
+            samples = [asdict(p) for p in repeat_steps(graph, recorded, nodes, int(paths[3]))]
+            Path(paths[2]).write_text(json.dumps(samples, default=encode), encoding="utf-8")
     except Exception as exc:  # user graph code can raise anything: the parent reports it
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

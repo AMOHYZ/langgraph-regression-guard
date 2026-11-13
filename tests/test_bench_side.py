@@ -627,3 +627,99 @@ def test_bench_passes_live_to_head_s_replay_only(
     main(["bench", str(LINEAR.parent), "--only", "linear", *flags, *out])
     assert [s[:2] for s in steps] == [("head", "check"), ("base", "record"), ("head", "replay")]
     assert [s for s in steps if "--live" in s] == ([steps[2]] if flags else [])
+
+
+# T211: --noise-repeats K runs base's code K more times on a node's recorded input, and head's K
+# times, so a node is named only when head sits outside base's own spread.
+REPEATED = """\
+import os
+import socket
+from pathlib import Path
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+WORDS = ("alpha", "beta", "gamma")
+
+
+class S(TypedDict, total=False):
+    q: str
+    r: str
+
+
+def a(state: S) -> S:
+    version = VERSION
+    socket.getaddrinfo("localhost", 80)  # a model call, as lgcov's offline probe sees it
+    calls = Path(os.environ["LGCOV_TEST_CALLS"])
+    n = int(calls.read_text()) if calls.exists() else 0
+    calls.write_text(str(n + 1))
+    return {"r": f"{state['q']} ANSWER {WORDS[n % 3]}"}  # a live model: a new word each time
+
+
+g = StateGraph(S)
+g.add_node("a", a)
+g.add_edge(START, "a")
+g.add_edge("a", END)
+graph = g.compile()
+"""
+SHIPS, REFUNDS = "the order ships on friday", "refunds take ten working days sorry"
+
+
+def _repeated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, head: tuple[str, str], *flags: str
+) -> dict[str, Any]:
+    monkeypatch.setenv("LGCOV_TEST_CALLS", str(tmp_path / "calls"))
+    for side, (version, answer) in (("base", ("1", SHIPS)), ("head", head)):
+        text = REPEATED.replace("VERSION", version).replace("ANSWER", answer)
+        (tmp_path / f"{side}.py").write_text(text, encoding="utf-8")
+    row = "graph: graph.py:graph\nbase_patch: base.py\nhead_patch: head.py\ncases:\n  - {q: hi}\n"
+    (tmp_path / "row.yaml").write_text(row + "expected: {root: [], propagated: []}\n", "utf-8")
+    out = ["--out", str(tmp_path / "b.md"), "--json", str(tmp_path / "r.json")]
+    assert main(["bench", str(tmp_path), *flags, "--noise-repeats", "3", *out]) == 0
+    [found] = json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))["benchmarks"]
+    assert isinstance(found, dict)
+    return found
+
+
+@pytest.mark.slow
+def test_base_against_base_with_repeats_names_no_root_and_nothing_inconclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = _repeated(tmp_path, monkeypatch, ("1", SHIPS), "--live")
+    assert (found["found_root"], found["inconclusive"], found["first_drift"]) == ([], {}, ["a"])
+    assert found["found_propagated"] == []  # not "it only inherited the damage" either
+    [check] = found["noise"].values()
+    assert (check["k"], check["min_head_to_base"]) == (3, 0.0) and check["spread"] > 0
+    assert check["verdict"] == "no drift detected above noise (K=3)"
+
+
+@pytest.mark.slow
+def test_a_changed_model_node_outside_base_s_spread_is_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = _repeated(tmp_path, monkeypatch, ("2", REFUNDS))
+    assert (found["found_root"], found["inconclusive"]) == (["a"], {})
+    assert found["noise"]["a"]["verdict"] == "drift above noise (K=3)"
+
+
+@pytest.mark.slow
+def test_a_changed_model_node_inside_base_s_spread_is_inconclusive_never_cleared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = _repeated(tmp_path, monkeypatch, ("2", SHIPS))
+    assert (found["found_root"], found["found_propagated"]) == ([], [])
+    assert found["inconclusive"] == {"a": "no drift detected above noise (K=3)"}
+
+
+def test_without_noise_repeats_nothing_is_repeated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LGCOV_TEST_CALLS", str(tmp_path / "calls"))
+    for side in ("base", "head"):
+        text = REPEATED.replace("VERSION", "1").replace("ANSWER", SHIPS)
+        (tmp_path / f"{side}.py").write_text(text, encoding="utf-8")
+    row = "graph: graph.py:graph\nbase_patch: base.py\nhead_patch: head.py\ncases:\n  - {q: hi}\n"
+    (tmp_path / "row.yaml").write_text(row + "expected: {root: [], propagated: []}\n", "utf-8")
+    out = ["--out", str(tmp_path / "b.md"), "--json", str(tmp_path / "r.json")]
+    assert main(["bench", str(tmp_path), "--live", *out]) == 0
+    assert (tmp_path / "calls").read_text(encoding="utf-8") == "2"  # one record, one replay

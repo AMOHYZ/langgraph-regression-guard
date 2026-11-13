@@ -23,9 +23,11 @@ from typing import Any
 import yaml
 
 from lgcov.attribution import (
+    NEEDS_LIVE,
     ROUTING,
     Benchmark,
     NodeLabels,
+    NoiseCheck,
     Probe,
     Result,
     Score,
@@ -74,12 +76,14 @@ from lgcov.cassette import (
     Drift,
     NodeError,
     OnDivergence,
+    ProbeStep,
     Replay,
     Step,
     accept_nodes,
     changed_nodes,
     compared_run,
     judge_probes,
+    judge_repeats,
     probe_steps,
     record,
     replay_run,
@@ -123,7 +127,7 @@ from lgcov.langsmith import (
 )
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
-from lgcov.messages import plain, run_tools
+from lgcov.messages import decode, plain, run_tools
 from lgcov.metrics import format_summary, parse_records, summarize
 from lgcov.normalize import normalize
 from lgcov.review import ReviewDecision, apply_decision
@@ -2243,7 +2247,31 @@ def _error_row(b: Benchmark, error: str, seconds: float) -> Result:
     )
 
 
-def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Result:
+def _repeats(
+    b: Benchmark,
+    tmp: Path,
+    sides: Mapping[str, tuple[Path, str]],
+    saved: Path,
+    repeat: set[str],
+    k: int,
+) -> dict[str, NoiseCheck]:
+    """T211: `repeat`'s nodes run live `k` more times on each side, each in its own process, and
+    what the samples say of each node."""
+    (tmp / "repeat").write_text(json.dumps(sorted(repeat)), encoding="utf-8")
+    samples: list[list[ProbeStep]] = []
+    for side, (root, target) in sides.items():
+        out = tmp / f"{side}-samples"
+        _run_side(
+            b, side, root, "repeat", target, str(saved), str(tmp / "repeat"), str(out), str(k)
+        )
+        raw = json.loads(out.read_text(encoding="utf-8"), object_hook=decode)
+        samples.append([ProbeStep(**p) for p in raw])
+    return judge_repeats(_load_runs(str(saved)), samples[0], samples[1])
+
+
+def _bench_one(
+    b: Benchmark, keep: Path | None = None, live: bool = False, repeats: int = 0
+) -> Result:
     """Record the cases on base, replay head (unchanged nodes served, as `lgcov ci` does),
     and score lgcov's root / propagated labels. A benchmark that can't run says why.
 
@@ -2252,7 +2280,10 @@ def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Re
 
     T169: with `keep`, each side's runs stay in <keep>/<benchmark>/, saved as each one finishes.
 
-    T173: with `live`, head serves nothing, so base against base measures the model's noise."""
+    T173: with `live`, head serves nothing, so base against base measures the model's noise.
+
+    T211: with `repeats`, a changed node that needs a live probe, and under `live` each run's
+    first drifted node, runs that many more times on each side: 2 x `repeats` calls per input."""
     start = perf_counter()
     worktrees: list[Path] = []
     try:
@@ -2276,6 +2307,15 @@ def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Re
                 drifts = [[Drift(n, None, None) for n in names] for names in nodes]
                 raw = json.loads(probed.read_text(encoding="utf-8"))
                 probes = {n: Probe(drifted, why) for n, (drifted, why) in raw.items()}
+                firsts = (
+                    {_run_root(r, d) for r, d in zip(runs, drifts, strict=True)} if live else set()
+                )
+                repeat = {n for n, p in probes.items() if p.reason == NEEDS_LIVE}
+                repeat |= {n for n in firsts if n and probes.get(n, Probe(None)).drifted is None}
+                noise: dict[str, NoiseCheck] = {}
+                if repeats and repeat:
+                    sides = {"base": (base_root, base_target), "head": (head_root, head_target)}
+                    noise = _repeats(b, Path(tmp), sides, saved, repeat, repeats)
             finally:
                 for worktree in worktrees:
                     remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]
@@ -2288,7 +2328,7 @@ def _bench_one(b: Benchmark, keep: Path | None = None, live: bool = False) -> Re
         failed = getattr(exc, "stderr", "") or str(exc)
         error = f"{type(exc).__name__}: {str(failed).strip()[:200]}"
         return _error_row(b, error, perf_counter() - start)
-    return _labelled(b, (runs, heads), drifts, probes, perf_counter() - start)
+    return _labelled(b, (runs, heads), drifts, probes, perf_counter() - start, noise)
 
 
 def _bench_saved(b: Benchmark, folder: Path) -> Result:
@@ -2313,8 +2353,14 @@ def _labelled(
     drifts: list[list[Drift]],
     probes: Mapping[str, Probe],
     seconds: float,
+    noise: Mapping[str, NoiseCheck] | None = None,
 ) -> Result:
-    """T162: root by fingerprint and probe (`classify`); the first node to drift is kept too."""
+    """T162: root by fingerprint and probe (`classify`); the first node to drift is kept too.
+
+    T211: with `noise`, a changed node is root only when it drifts above its noise, and otherwise
+    inconclusive: its code changed, and the check misses a shift smaller than the spread. An
+    unchanged node under its noise explains its own drift, so it gets no label, and a run it was
+    first to drift in needs no other cause."""
     counts, first = _drift_kinds(sides[0], drifts)
     base, head = ({s.node: s.code for r in side for s in r.steps} for side in sides)
     firsts = [_run_root(r, d) for r, d in zip(sides[0], drifts, strict=True)]
@@ -2323,7 +2369,13 @@ def _labelled(
     base_routers = {s.node: s.router for r in sides[0] for s in r.steps}
     routers = (base_routers, {s.node: s.router for r in sides[1] for s in r.steps})
     ran = [[s.node for s in r.steps] for r in sides[0]]
-    by_node = classify(counts.keys(), (base, head), probes)
+    checks = dict(noise or {})
+    changed = {n for n in checks if base.get(n) != head.get(n)}
+    judged = {n: Probe(checks[n].drifted or None, checks[n].verdict) for n in changed}
+    quiet = {n for n, c in checks.items() if not c.drifted} - changed
+    firsts = [None if f in quiet else f for f in firsts]
+    nodes = [n - quiet for n in nodes]
+    by_node = classify(counts.keys() - quiet, (base, head), {**probes, **judged})
     labels = explain_runs(by_node, firsts, nodes, routers, ran)
     return Result(
         b.name,
@@ -2338,6 +2390,7 @@ def _labelled(
         b.notes,
         first_drift=tuple(sorted(first)),
         inconclusive=tuple(sorted(labels.inconclusive.items())),
+        noise=tuple(sorted(checks.items())),
     )
 
 
@@ -2407,15 +2460,24 @@ def _bench_cmd(argv: list[str]) -> int:
         metavar="DIR",
         help="T162: score the runs --keep-runs saved in DIR instead of running the agent",
     )
+    ap.add_argument(
+        "--noise-repeats",
+        type=int,
+        default=0,
+        metavar="K",
+        help="T211: run a changed model node, and under --live each run's first drifted node, K "
+        "more times on each side, and name drift only above base's own spread (2K calls per input)",
+    )
     args = ap.parse_args(argv)
-    if args.from_runs and (args.synthetic or args.keep_runs or args.live):
+    if args.from_runs and (args.synthetic or args.keep_runs or args.live or args.noise_repeats):
         print(
-            "lgcov bench: --from-runs runs nothing: no --synthetic, --keep-runs or --live",
+            "lgcov bench: --from-runs runs nothing: no --synthetic, --keep-runs, --live or "
+            "--noise-repeats",
             file=sys.stderr,
         )
         return EXIT_ERROR
     if args.synthetic:
-        if args.dir or args.only or args.keep_runs or args.live:
+        if args.dir or args.only or args.keep_runs or args.live or args.noise_repeats:
             print("lgcov bench: --synthetic takes only --out and --json", file=sys.stderr)
             return EXIT_ERROR
         return _bench_synthetic(Path(args.out), Path(args.json or "docs/benchmark-synthetic.json"))
@@ -2451,7 +2513,8 @@ def _bench_cmd(argv: list[str]) -> int:
             if args.from_runs:
                 results.append(_bench_saved(b, Path(args.from_runs)))
             else:
-                results.append(pending_result(b) if b.status else _bench_one(b, keep, args.live))
+                one = pending_result(b) if b.status else None
+                results.append(one or _bench_one(b, keep, args.live, args.noise_repeats))
         except _CantImport as exc:
             print(f"lgcov bench: {b.name}: {exc}", file=sys.stderr)
             results.append(_error_row(b, str(exc)[:200], 0.0))

@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Container, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import copy_context
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field, replace
@@ -23,7 +23,14 @@ from langgraph.graph import START
 from langgraph.pregel import Pregel
 from langgraph.types import Command, Send
 
-from lgcov.attribution import NEEDS_LIVE, NO_FINGERPRINT, Probe, drift_exceeds_noise
+from lgcov.attribution import (
+    NEEDS_LIVE,
+    NO_FINGERPRINT,
+    NoiseCheck,
+    Probe,
+    drift_exceeds_noise,
+    noise_check,
+)
 from lgcov.fingerprint import fingerprint
 from lgcov.messages import decode, encode
 from lgcov.normalize import key_view, normalize
@@ -770,13 +777,15 @@ class ProbeStep:
     raised: str = ""  # why it couldn't run offline; "" when it returned
 
 
-def _probe_step(i: int, j: int, step: Step, fn: FunctionType | None) -> ProbeStep:
+def _probe_step(
+    i: int, j: int, step: Step, fn: FunctionType | None, live: bool = False
+) -> ProbeStep:
     if fn is None:
         return ProbeStep(i, j, step.node, raised=NO_FINGERPRINT)
     reached: list[str] = []
     out: Any = None
     try:
-        with _offline(reached):
+        with nullcontext() if live else _offline(reached):  # T211: a repeat runs live
             config: dict[str, object] = {"config": {"configurable": {}}}  # what a node can ask for
             asks = "config" in inspect.signature(fn).parameters
             out = fn(deepcopy(step.input), **(config if asks else {}))
@@ -853,6 +862,47 @@ def probe_nodes(
 ) -> dict[str, Probe]:
     """T162: `probe_steps` and `judge_probes` in one process, as `lgcov bench` uses them."""
     return judge_probes(runs, probe_steps(graph, runs, nodes), ignore_paths)
+
+
+def repeat_steps(
+    graph: Any, runs: Sequence[Cassette], nodes: Container[str], k: int
+) -> tuple[ProbeStep, ...]:
+    """T211: `probe_steps` with the network open, `k` times per recorded input: this graph's
+    samples of each of `nodes`. Each is a real call, so a model node costs `k` calls per input."""
+    fns = {name: _plain(spec.bound) for name, spec in getattr(graph, "nodes", {}).items()}
+    return tuple(
+        _probe_step(i, j, s, fns.get(s.node), live=True)
+        for i, run in enumerate(runs)
+        for j, s in enumerate(run.steps)
+        if s.node in nodes
+        for _ in range(k)
+    )
+
+
+def judge_repeats(
+    runs: Sequence[Cassette],
+    base: Sequence[ProbeStep],
+    head: Sequence[ProbeStep],
+    ignore_paths: Sequence[str] = (),
+) -> dict[str, NoiseCheck]:
+    """T211: each repeated node's `noise_check`: the recorded output and `base`'s repeats against
+    `head`'s, per recorded input, compared as replay compares them. A node with several inputs
+    keeps the check furthest above its spread. One whose repeat raised on either side has no
+    check, so its label stays as it was. Pure."""
+    failed = {p.node for p in (*base, *head) if p.raised}
+    found: dict[str, NoiseCheck] = {}
+    for i, j, node in sorted({(p.run, p.step, p.node) for p in head if p.node not in failed}):
+        recorded = runs[i].steps[j]
+        routed = {node} if recorded.goto is not None else set()
+        samples = [
+            [_compared(Step(node, p.output, goto=p.goto), ignore_paths, routed) for p in side]
+            for side in ([p for p in ps if (p.run, p.step) == (i, j)] for ps in (base, head))
+        ]
+        check = noise_check([_compared(recorded, ignore_paths, routed), *samples[0]], samples[1])
+        old = found.get(node)
+        if old is None or check.min_head_to_base - check.spread > old.min_head_to_base - old.spread:
+            found[node] = check
+    return found
 
 
 def accept_nodes(
