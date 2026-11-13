@@ -456,5 +456,31 @@
       "drifted": 0,
       "outcome_flips": 0
     }
+  ],
+  "noise_rule": [
+    {
+      "agent": "demo",
+      "arm": "no change",
+      "what": "base against base, so every flag is a false alarm",
+      "k": 3,
+      "runs": 200,
+      "flagged": 1
+    },
+    {
+      "agent": "demo",
+      "arm": "small shift",
+      "what": "the prompt becomes friendly and detailed",
+      "k": 3,
+      "runs": 200,
+      "flagged": 68
+    },
+    {
+      "agent": "demo",
+      "arm": "large shift",
+      "what": "the prompt ends on a word the outcome check looks for",
+      "k": 3,
+      "runs": 200,
+      "flagged": 112
+    }
   ]
 }

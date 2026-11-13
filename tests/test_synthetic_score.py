@@ -6,7 +6,7 @@ from functools import cache
 
 from examples.synthetic_agents import AGENTS, DEMO, FANOUT
 from lgcov.cassette import Cassette, Step, record
-from lgcov.synthetic import Case, GroundTruth, aa_arms, every_case, generate
+from lgcov.synthetic import Case, GroundTruth, NoiseRate, aa_arms, every_case, generate
 from lgcov.synthetic_score import (
     METHODS,
     Rate,
@@ -199,6 +199,23 @@ def test_the_json_holds_the_numbers() -> None:
     assert first["method"] == "lgcov root"
     assert set(first["cases"]) == {"precision", "recall", "coverage", "false_flag"}
     assert raw["aa"][0]["agent"] == "demo"
+    assert raw["noise_rule"] == []
+
+
+def test_the_noise_rule_table_states_false_alarms_and_misses_and_never_says_cleared() -> None:
+    noise = [
+        ("demo", NoiseRate("no change", "base against base", 3, 200, 1)),
+        ("demo", NoiseRate("small shift", "the prompt becomes friendly", 3, 200, 68)),
+    ]
+    report = build_report(_suite(), _lgcov, [], "2026-01-02", noise)
+    section = render_section(report)
+    assert (
+        "| demo | no change | base against base | 200 | 0.01 (1 of 200) | false alarm |" in section
+    )
+    assert "| 0.34 (68 of 200) | caught; missed 0.66 (132 of 200) |" in section
+    assert "`no drift detected above noise (K=3)`: not cleared" in section
+    assert json.loads(report_json(report))["noise_rule"][1]["flagged"] == 68
+    assert "### Noise rule" not in render_section(_report())  # nothing measured: no table
 
 
 REAL = "# T\n\n## Demo\n\nx\n\n## Real PRs\n\nkeep\n"

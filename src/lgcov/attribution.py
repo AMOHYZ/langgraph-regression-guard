@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import fmean
@@ -226,10 +226,59 @@ UNEXPLAINED = (
 ROUTING = "routing change at {}"  # T175: why a node whose own output didn't drift is root
 
 
-def drift_exceeds_noise(node: str, a: object, b: object) -> bool:
-    """T162: is `node`'s output `b` different from `a` by more than the node's own noise? There's
-    no noise threshold yet, so any difference counts (T211 adds one)."""
-    return a != b
+# T211: what a node under its noise threshold reads as. Never "cleared": a one-number regression
+# in a long report sits inside the spread, and the KPI judge decides that, not this check.
+NO_DRIFT_ABOVE_NOISE = "no drift detected above noise (K={})"
+DRIFT_ABOVE_NOISE = "drift above noise (K={})"
+Distance = Callable[[object, object], float]
+
+
+def _words(value: object) -> frozenset[str]:
+    return frozenset(json.dumps(value, sort_keys=True, default=str).split())
+
+
+def word_jaccard(a: object, b: object) -> float:
+    """T211: 0 for equal outputs, else how little their word sets overlap, up to 1. Never 0 for
+    unequal ones: the extra 1 below counts the difference a word set doesn't show, like order."""
+    if a == b:
+        return 0.0
+    first, second = _words(a), _words(b)
+    return 1 - len(first & second) / (len(first | second) + 1)
+
+
+@dataclass(frozen=True)
+class NoiseCheck:
+    """T211: the evidence behind one node's verdict. `k`: head's samples."""
+
+    k: int
+    spread: float  # the largest distance between two of base's samples: the node's A/A spread
+    min_head_to_base: float
+
+    @property
+    def drifted(self) -> bool:
+        return self.min_head_to_base > self.spread
+
+    @property
+    def verdict(self) -> str:
+        return (DRIFT_ABOVE_NOISE if self.drifted else NO_DRIFT_ABOVE_NOISE).format(self.k)
+
+
+def noise_check(
+    base: Sequence[object], head: Sequence[object], distance: Distance = word_jaccard
+) -> NoiseCheck:
+    """T211: `base`: the node's recorded output and base's code run again on the same input;
+    `head`: head's code on that input. Drift needs head's nearest sample to be further from base
+    than base's samples are from each other, so it misses a shift smaller than the spread. One
+    base sample has no spread: any difference is drift, as for a node that repeats exactly."""
+    spread = max((distance(a, b) for i, a in enumerate(base) for b in base[i + 1 :]), default=0.0)
+    return NoiseCheck(len(head), spread, min(distance(a, b) for a in base for b in head))
+
+
+def drift_exceeds_noise(
+    base: Sequence[object], head: Sequence[object], distance: Distance = word_jaccard
+) -> bool:
+    """T162, T211: do head's samples of a node differ from base's by more than its own noise?"""
+    return noise_check(base, head, distance).drifted
 
 
 @dataclass(frozen=True)

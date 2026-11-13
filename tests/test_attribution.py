@@ -9,6 +9,7 @@ import yaml
 
 from lgcov.attribution import (
     NEEDS_LIVE,
+    NO_DRIFT_ABOVE_NOISE,
     NO_FINGERPRINT,
     NOT_PROBED,
     ROUTING,
@@ -22,10 +23,12 @@ from lgcov.attribution import (
     explain_runs,
     macro,
     micro,
+    noise_check,
     parse_benchmark,
     pending_result,
     render_markdown,
     score,
+    word_jaccard,
 )
 
 
@@ -219,10 +222,50 @@ def test_pythonpath_must_be_folders_inside_the_side(bad: object) -> None:
         parse_benchmark("x", {**_ROW, "pythonpath": bad}, Path("."))
 
 
-# T162: a node is root when its own code changed and it drifts on base's recorded input.
-def test_drift_exceeds_noise_is_plain_drift_until_t211() -> None:
-    assert drift_exceeds_noise("n", {"x": 1}, {"x": 2})
-    assert not drift_exceeds_noise("n", {"x": 1}, {"x": 1})
+# T211: drift counts only above the node's own A/A spread: base's samples against each other.
+def test_one_base_sample_has_no_spread_so_any_difference_is_drift() -> None:
+    assert drift_exceeds_noise([{"x": 1}], [{"x": 2}])
+    assert not drift_exceeds_noise([{"x": 1}], [{"x": 1}])
+    assert word_jaccard({"x": "a b"}, {"x": "b a"}) > 0  # unequal is never distance 0
+
+
+def test_head_no_further_from_base_than_base_is_from_itself_is_not_drift() -> None:
+    base = [
+        {"a": "the brief covers cats"},
+        {"a": "the brief covers dogs"},
+        {"a": "a brief on cats"},
+    ]
+    check = noise_check(base, [{"a": "the brief covers birds"}, {"a": "a brief on dogs"}])
+    assert not check.drifted
+    assert (check.k, check.spread > 0, check.min_head_to_base <= check.spread) == (2, True, True)
+    assert check.verdict == NO_DRIFT_ABOVE_NOISE.format(2) == "no drift detected above noise (K=2)"
+
+
+def test_head_outside_the_spread_is_drift_and_one_near_sample_withdraws_it() -> None:
+    base = [{"a": "the brief covers cats"}, {"a": "the brief covers dogs"}]
+    far = {"a": "refund policy: thirty days, receipt required"}
+    assert noise_check(base, [far, far]).verdict == "drift above noise (K=2)"
+    assert not drift_exceeds_noise(base, [far, {"a": "the brief covers cats"}])  # the smallest
+
+
+def test_the_distance_is_a_parameter() -> None:
+    def by_length(a: object, b: object) -> float:
+        return float(abs(len(str(a)) - len(str(b))))
+
+    assert not drift_exceeds_noise(["aa", "aa"], ["cc"], by_length)  # same length: distance 0
+    assert drift_exceeds_noise(["aa", "aa"], ["cc"])
+
+
+def test_a_short_changed_passage_in_a_long_output_registers_only_with_no_spread() -> None:
+    # 100k+ characters. The default distance is over word sets, so one changed sentence is a
+    # small distance: drift for a node that repeats exactly, under the spread of one that doesn't.
+    report = " ".join(f"finding{i} holds." for i in range(9000))
+    changed = report.replace("finding4500 holds.", "finding4500 was withdrawn in 2024.")
+    assert len(report) > 100_000
+    assert 0 < word_jaccard(report, changed) < 0.001
+    assert drift_exceeds_noise([report], [changed])
+    reworded = report.replace("finding7 holds.", "finding7 mostly holds, with two caveats.")
+    assert not drift_exceeds_noise([report, reworded], [changed])
 
 
 def test_classify_names_every_changed_node_that_drifts_on_its_own_input_root() -> None:

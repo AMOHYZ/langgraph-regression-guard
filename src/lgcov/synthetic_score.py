@@ -5,10 +5,10 @@ import json
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from lgcov.stats import wilson
-from lgcov.synthetic import AaResult, Case
+from lgcov.synthetic import AaResult, Case, NoiseRate
 
 Method = Callable[[Case], set[str]]
 
@@ -135,6 +135,7 @@ class Report:
     end_to_end_caught: Rate  # of regressions, the final answer changed
     end_to_end_false: Rate  # of edits that changed the run and did not regress, the same
     aa: tuple[tuple[str, AaResult], ...]
+    noise: tuple[tuple[str, NoiseRate], ...] = ()  # T211
 
 
 def _row(name: str, method: Method, cases: Sequence[Case]) -> Row:
@@ -146,7 +147,11 @@ def _row(name: str, method: Method, cases: Sequence[Case]) -> Row:
 
 
 def build_report(
-    cases: Sequence[Case], lgcov: Method, aa: Sequence[tuple[str, AaResult]], date: str
+    cases: Sequence[Case],
+    lgcov: Method,
+    aa: Sequence[tuple[str, AaResult]],
+    date: str,
+    noise: Sequence[tuple[str, NoiseRate]] = (),
 ) -> Report:
     methods = {"lgcov root": lgcov, **METHODS}
     single = [case for case in cases if case.truth.edit_kind == "node_body"]
@@ -164,6 +169,7 @@ def build_report(
         Rate(sum(map(end_to_end_flags, regressed)), len(regressed)),
         Rate(sum(map(end_to_end_flags, harmless)), len(harmless)),
         tuple(aa),
+        tuple(noise),
     )
 
 
@@ -199,6 +205,39 @@ def _table(
 
 def _method(rows: Sequence[Row], name: str) -> Rates:
     return next(row.cases for row in rows if row.method == name)
+
+
+def _noise_lines(noise: Sequence[tuple[str, NoiseRate]]) -> list[str]:
+    """T211: the noise rule's false alarms and catches. A missed shift is its stated limit."""
+    if not noise:
+        return []
+    k = noise[0][1].k
+    rows = []
+    for agent, n in noise:
+        missed = Rate(n.runs - n.flagged, n.runs)
+        reads = "false alarm" if n.arm == "no change" else f"caught; missed {_plain(missed)}"
+        rows.append(
+            f"| {agent} | {n.arm} | {n.what} | {n.runs} | {_plain(Rate(n.flagged, n.runs))} "
+            f"| {reads} |"
+        )
+    return [
+        "### Noise rule",
+        "",
+        f"The noise rule (`drift_exceeds_noise`), on the seeded-noise agent at K={k}: the "
+        f"recording and {k} repeats on base, {k} samples on head. Nothing runs repeats on a real "
+        "agent yet: `lgcov bench` and the gate still compare one sample. It names drift only when "
+        "head's nearest sample "
+        "is further from base than base's samples are from each other, so it misses a shift "
+        "smaller than the spread. Below the threshold a node reads `no drift detected above noise "
+        f"(K={k})`: not cleared, since a small regression can sit inside the spread and the KPI "
+        "judge decides that. The noise here is ours (1 answer in 5 is cut short), so these rates "
+        "say how the rule behaves, not what a real model would give.",
+        "",
+        "| Agent | Arm | Head's edit | Runs | Named drift | Reads as |",
+        "|---|---|---|---|---|---|",
+        *rows,
+        "",
+    ]
 
 
 def render_section(report: Report) -> str:
@@ -275,6 +314,7 @@ def render_section(report: Report) -> str:
             for agent, a in report.aa
         ),
         "",
+        *_noise_lines(report.noise),
         "### Limitations",
         "",
         "- Exact match on the edited node: parent-only naming counts as a miss, so lgcov's `sub` "
@@ -341,6 +381,7 @@ def report_json(report: Report) -> str:
                     }
                     for agent, a in report.aa
                 ],
+                "noise_rule": [{"agent": agent, **asdict(n)} for agent, n in report.noise],
             },
             indent=2,
         )
