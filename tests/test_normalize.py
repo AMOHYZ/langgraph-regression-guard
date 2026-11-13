@@ -324,3 +324,62 @@ def test_a_dataclass_compares_and_keys_as_the_cassette_saves_it() -> None:
     value = {"notes": [_Note("at 2026-11-10T09:00:00Z", "n1")]}
     assert normalize(value) == {"notes": [{"text": "at <timestamp>", "id": "<id>"}]}
     assert key_view(value) == {"notes": [{"text": "at 2026-11-10T09:00:00Z", "id": "n1"}]}
+
+
+# T213: a provider's response ids written into text, as when a message list is turned into a
+# string. The ids below are made up.
+_HEX = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f607182"
+_IDS = [
+    f"rs_{_HEX}",
+    f"fc_{_HEX}",
+    f"resp_{_HEX}",
+    "call_Ab3dEf6hIj9kLm2nOp5qRs8t",
+    "chatcmpl-Ab3dEf6hIj9kLm2nOp5qRs8tUv",
+    "msg_01Ab3dEf6hIj9kLm2nOp5qRs",
+    "toolu_01Ab3dEf6hIj9kLm2nOp5qRs",
+    "tooluse_Ab3dEf6hIj9kLm2nOp5q",
+    "req_011Ab3dEf6hIj9kLm2nOp5qR",
+]
+
+
+def _notes(ids: list[str]) -> str:
+    return " ".join(f"[{{'id': '{i}', 'type': 'reasoning'}}]" for i in ids)
+
+
+def test_provider_ids_inside_text_are_masked_and_counted() -> None:
+    other = [i[:-4] + "9Z9Z" for i in _IDS]
+    masked, count = normalize_counted(_notes(_IDS))
+    assert masked == normalize(_notes(other)) == _notes(["<id>"] * len(_IDS))
+    assert count == len(_IDS)
+
+
+@pytest.mark.parametrize(
+    "kept",
+    [
+        "call_id",
+        "call_me_later",
+        "order_12345",
+        "msg_count",
+        "msg_count_of_all_messages_total",  # a long snake_case name
+        "msg_countofallmessagesintotalsofar",  # a long lowercase word after a prefix
+        "xmsg_01Ab3dEf6hIj9kLm2nOp5qRs",  # a prefix in the middle of a word
+        "my_req_011Ab3dEf6hIj9kLm2nOp5qR",
+        "msg_01Ab3dEf6hIj9kLm2nOp5qRs_total",  # the tail runs into an underscore
+    ],
+)
+def test_text_that_only_looks_like_a_provider_id_is_kept(kept: str) -> None:
+    assert normalize_counted(f"see {kept} here") == (f"see {kept} here", 0)
+
+
+def test_the_replay_key_keeps_provider_ids_unless_told_to_mask_them() -> None:
+    raw = {"notes": _notes(_IDS[:2])}
+    assert key_view(raw) == raw
+    assert key_view(raw, mask_volatile=True) == {"notes": _notes(["<id>"] * 2)}
+
+
+def test_an_encrypted_reasoning_blob_in_text_still_differs() -> None:
+    # A limit, pinned: it is no id. Masking a volatile key's value inside text is T213b.
+    a, b = (
+        f"[{{'id': '{_IDS[0]}', 'encrypted_content': '{blob}'}}]" for blob in ("gAAAx", "gAAAy")
+    )
+    assert normalize(a) != normalize(b)

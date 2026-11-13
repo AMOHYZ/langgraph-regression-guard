@@ -131,7 +131,11 @@ its recorded output without running it, when two things match the recording:
   leaves in, including an `id` in plain state or a UUID or date-time in text. A change only to
   a masked value still matches, so that node can be served from the cassette. If your state
   gets a new id or time on every run, `mask_volatile_in_key: true` masks `id` values, UUIDs and
-  date-times too, and `ignore_paths` drops a single field.
+  date-times too, and `ignore_paths` drops a single field. The same goes for a provider's id
+  inside text (`rs_`, `fc_`, `resp_`, `call_`, `chatcmpl-`, `msg_`, `toolu_`, `tooluse_` or
+  `req_`, then 20 or more letters and digits): the comparison masks it, but the key leaves it
+  by default, so a node whose input text carries one misses the cassette and runs live unless
+  `mask_volatile_in_key` is on. An id with any other prefix goes through `ignore_paths`.
 - **Its code fingerprint**: the node function's source, defaults and closure
   values, plus the values of the module-level names it uses, following the
   functions, classes and modules of your project the same way. Library code
