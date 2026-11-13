@@ -985,7 +985,7 @@ def _gate_policy(args: argparse.Namespace) -> _GatePolicy | str:
         llm = [s.name for s in every if s.judge == "llm"]
         runs_llm = rules.llm_judges and _llm_judge is not None
         specs = every if runs_llm else [s for s in every if s.judge != "llm"]
-        l2 = (specs, [_l2_judge(spec, cfg.jev_model) for spec in specs])
+        l2 = (specs, [_l2_judge(spec, cfg.jev_model, cfg.jev_timeout_s) for spec in specs])
     except (OSError, ValueError) as exc:
         return f"invalid taxonomy: {exc}{from_base}"
     try:
@@ -1588,7 +1588,7 @@ def _in_band(bands: Bands, band: Band) -> frozenset[str]:
     return frozenset(kpi for kpi, b in bands.of.items() if b == band)
 
 
-def _l2_judge(spec: KPISpec, jev_model: str | None = None) -> Judge:
+def _l2_judge(spec: KPISpec, jev_model: str | None = None, jev_timeout_s: float = 10.0) -> Judge:
     kpi = spec.to_kpi()
     if spec.judge == "code":
         return code_judge(kpi, spec.check or {})
@@ -1608,7 +1608,7 @@ def _l2_judge(spec: KPISpec, jev_model: str | None = None) -> Judge:
             raise ValueError(f"KPI '{spec.name}': fail_every must be a whole number")
         when = check.get("when_input_contains", "")
         return FakeJudge(kpi, "pass", fail_every=int(every), when_input_contains=when)
-    return JevJudge(kpi, model=jev_model)
+    return JevJudge(kpi, model=jev_model, timeout_s=jev_timeout_s)
 
 
 _Cases = dict[str, tuple[NodeState, NodeState]]
@@ -1821,7 +1821,7 @@ def _judge_cmd(argv: list[str]) -> int:
         every = list(load_taxonomy(taxonomy_path).kpi_specs)
         skipped = [s.name for s in every if s.judge == "llm" and _llm_judge is None]
         specs = [s for s in every if s.name not in skipped]
-        judges = [_l2_judge(spec, cfg.jev_model) for spec in specs]
+        judges = [_l2_judge(spec, cfg.jev_model, cfg.jev_timeout_s) for spec in specs]
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid taxonomy: {exc}", file=sys.stderr)
         return EXIT_ERROR

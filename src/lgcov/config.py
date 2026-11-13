@@ -83,6 +83,7 @@ class Config:
     gate: GateConfig = field(default_factory=GateConfig)
     tier: Tier = "pr"
     jev_model: str | None = None  # T063: the Jev model judges use; labels are only good for it
+    jev_timeout_s: float = 10.0  # T195: seconds a Jev judge waits for each attempt
     group_by: tuple[str, ...] = ("node", "slice")  # T090: report.group_by
     langsmith: LangSmithConfig = field(default_factory=LangSmithConfig)  # T103
 
@@ -93,6 +94,7 @@ _KEYS = (
     "graph_entrypoint",
     "ignore_paths",
     "jev_model",
+    "jev_timeout_s",
     "langsmith",
     "mask_volatile_in_key",
     "report",
@@ -135,6 +137,16 @@ def _str_list(value: object, key: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ValueError(f"lgcov.yaml: '{key}' must be a list of strings")
     return tuple(value)
+
+
+def _positive_seconds(value: object, key: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not 0 < value < float("inf")
+    ):
+        raise ValueError(f"lgcov.yaml: '{key}' must be a positive number of seconds")
+    return float(value)
 
 
 def _positive_int(value: object, key: str) -> int:
@@ -271,6 +283,7 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         gate=_gate(d.get("gate", {})),
         tier=_tier(d.get("tier", "pr")),
         jev_model=None if "jev_model" not in d else _str(d["jev_model"], "jev_model"),
+        jev_timeout_s=_positive_seconds(d.get("jev_timeout_s", 10.0), "jev_timeout_s"),
         group_by=_group_by(d.get("report", {})),
         langsmith=_langsmith(d.get("langsmith", {})),
     )

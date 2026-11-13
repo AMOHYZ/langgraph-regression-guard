@@ -43,11 +43,16 @@ class JevJudge:
     """Scores one KPI by sending the node I/O to the Jev API as one typed question."""
 
     def __init__(
-        self, kpi: KPI, client: _PostClient | None = None, model: str | None = None
+        self,
+        kpi: KPI,
+        client: _PostClient | None = None,
+        model: str | None = None,
+        timeout_s: float = TIMEOUT_S,
     ) -> None:
         self.kpi = kpi
         self._client = client
         self.model = model or "jev-latest"  # T063: jev_model, pinned in lgcov.yaml
+        self.timeout_s = timeout_s  # T195: jev_timeout_s; each of the ATTEMPTS gets this long
 
     def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
         url = os.environ.get("JEV_API_URL")
@@ -75,7 +80,7 @@ class JevJudge:
         last: Exception | None = None
         for _ in range(ATTEMPTS):
             try:
-                response = client.post(url, json=payload, timeout=TIMEOUT_S, headers=headers)
+                response = client.post(url, json=payload, timeout=self.timeout_s, headers=headers)
             except httpx.HTTPError as exc:  # transport errors and timeouts: retry
                 last = exc
                 continue

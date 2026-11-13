@@ -111,6 +111,9 @@ def test_missing_file_uses_defaults_but_still_needs_entrypoint(tmp_path: Path) -
         ({"graph_entrypoint": "a.py:g", "tier": "weekly"}, "tier"),
         ({"graph_entrypoint": "a.py:g", "gate": {"uncalibrated": "blocking"}}, "uncalibrated"),
         ({"graph_entrypoint": "a.py:g", "jev_model": ""}, "jev_model"),
+        ({"graph_entrypoint": "a.py:g", "jev_timeout_s": 0}, "jev_timeout_s"),
+        ({"graph_entrypoint": "a.py:g", "jev_timeout_s": "120"}, "jev_timeout_s"),
+        ({"graph_entrypoint": "a.py:g", "jev_timeout_s": True}, "jev_timeout_s"),
         ({"graph_entrypoint": "a.py:g", "report": {"group_by": ["kpi"]}}, "group_by"),
         ({"graph_entrypoint": "a.py:g", "gate": {"alpha": 0}}, "alpha"),
         ({"graph_entrypoint": "a.py:g", "gate": {"power": 1}}, "power"),
@@ -231,3 +234,10 @@ def test_langsmith_names_the_dataset_and_links_unless_told_not_to() -> None:
     off = {"dataset": "support-qa", "link": False}
     assert parse_config({"graph_entrypoint": "a.py:g", "langsmith": off}).langsmith.link is False
     assert parse_config({"graph_entrypoint": "a.py:g"}).langsmith == LangSmithConfig()
+
+
+def test_jev_timeout_s_defaults_to_ten_seconds_and_takes_a_positive_number() -> None:
+    assert parse_config({"graph_entrypoint": "a.py:g"}).jev_timeout_s == 10.0
+    for given in (120, 2.5):
+        raw = {"graph_entrypoint": "a.py:g", "jev_timeout_s": given}
+        assert parse_config(raw).jev_timeout_s == float(given)
