@@ -136,6 +136,12 @@ its recorded output without running it, when two things match the recording:
   `req_`, then 20 or more letters and digits): the comparison masks it, but the key leaves it
   by default, so a node whose input text carries one misses the cassette and runs live unless
   `mask_volatile_in_key` is on. An id with any other prefix goes through `ignore_paths`.
+  A provider's per-call blob is handled the same way: the value of `encrypted_content`,
+  `signature`, `thought_signature` or `thoughtSignature`, when it is 40 or more base64
+  characters with no space. In a structured block, a plain `signature` is masked only when the
+  same dict has `type: thinking`. In text turned into a string there is no sibling to check, so
+  the 40-character rule is the only guard there. A `redacted_thinking` block's `data`, and a
+  blob under any other key, go through `ignore_paths`.
 - **Its code fingerprint**: the node function's source, defaults and closure
   values, plus the values of the module-level names it uses, following the
   functions, classes and modules of your project the same way. Library code

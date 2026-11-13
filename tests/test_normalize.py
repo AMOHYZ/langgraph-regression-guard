@@ -1,6 +1,7 @@
 """T085: mask volatile fields (UUIDs, ISO timestamps, ids, ignore_paths) before comparing."""
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -377,9 +378,69 @@ def test_the_replay_key_keeps_provider_ids_unless_told_to_mask_them() -> None:
     assert key_view(raw, mask_volatile=True) == {"notes": _notes(["<id>"] * 2)}
 
 
-def test_an_encrypted_reasoning_blob_in_text_still_differs() -> None:
-    # A limit, pinned: it is no id. Masking a volatile key's value inside text is T213b.
-    a, b = (
-        f"[{{'id': '{_IDS[0]}', 'encrypted_content': '{blob}'}}]" for blob in ("gAAAx", "gAAAy")
+# T213b: an encrypted reasoning blob or a thinking signature, new on every call. Made up.
+_BLOB = "gAAAAABq" + "8v1Hw-_Zk3" * 6 + "=="
+_KEYS = ["encrypted_content", "signature", "thought_signature", "thoughtSignature"]
+_STYLES = ["'{k}': '{v}'", '"{k}": "{v}"', '\\"{k}\\": \\"{v}\\"', "'{k}' : '{v}'"]
+
+
+@pytest.mark.parametrize("key", _KEYS)
+@pytest.mark.parametrize("style", _STYLES)
+def test_a_volatile_blob_inside_text_is_masked_and_counted(key: str, style: str) -> None:
+    a, b = (f"[{{'id': 'x', {style.format(k=key, v=v)}, 'n': 1}}]" for v in (_BLOB, _BLOB[::-1]))
+    assert normalize_counted(a) == (
+        f"[{{'id': 'x', {style.format(k=key, v='<blob>')}, 'n': 1}}]",
+        1,
     )
-    assert normalize(a) != normalize(b)
+    assert normalize(a) == normalize(b)
+
+
+@pytest.mark.parametrize(
+    "kept",
+    [
+        "'signature': 'short'",
+        "'signature': 'Dr. Jane Smith, on behalf of the whole review board, Riyadh'",
+        f"'email_signature': '{_BLOB}'",  # the key inside a longer key
+        f"signature: {_BLOB}",  # prose, no quotes
+        f"'signature': '{_BLOB} and more'",  # the value goes on after the token
+    ],
+)
+def test_text_that_only_looks_like_a_volatile_blob_is_kept(kept: str) -> None:
+    assert normalize_counted(f"see {kept} here") == (f"see {kept} here", 0)
+
+
+def test_a_volatile_blob_in_a_structured_block_is_masked_by_its_key() -> None:
+    blocks: list[str | dict[str, object]] = [
+        {"type": "reasoning", "encrypted_content": _BLOB, "summary": []},
+        {"type": "thinking", "thinking": "hm", "signature": _BLOB},
+        {"functionCall": {"name": "f"}, "thoughtSignature": _BLOB, "thought_signature": _BLOB},
+    ]
+    masked, count = normalize_counted(AIMessage(content=blocks))
+    assert json.dumps(masked).count("<blob>") == count == 4
+    assert _BLOB not in json.dumps(masked)
+
+
+def test_a_plain_signature_field_is_kept_outside_a_thinking_block() -> None:
+    # A webhook or commit signature in a tool result is real data; so is a short value.
+    raw = {"type": "tool_result", "signature": _BLOB, "encrypted_content": "short"}
+    assert normalize_counted(raw) == (raw, 0)
+
+
+def test_the_replay_key_keeps_volatile_blobs_unless_told_to_mask_them() -> None:
+    raw = {"notes": f"'encrypted_content': '{_BLOB}'", "encrypted_content": _BLOB}
+    assert key_view(raw) == raw
+    assert key_view(raw, mask_volatile=True) == {
+        "notes": "'encrypted_content': '<blob>'",
+        "encrypted_content": "<blob>",
+    }
+
+
+def test_masking_text_stays_linear_on_a_long_string_of_long_tokens() -> None:
+    # Node outputs reach 860,000 characters. Unclosed blobs and near-ids make a pattern retry.
+    token = "Ab3dEf6hIj" * 50
+    part = f"'signature': '{token} 'encrypted_content': '{token}' call_{token}_x rs_{token} "
+    text = part * 1200  # about 2.5 million characters
+    start = time.perf_counter()
+    _, count = normalize_counted(text)
+    assert time.perf_counter() - start < 5  # linear is well under a second; quadratic is minutes
+    assert count == 2400  # each part: one blob, one rs_ id
