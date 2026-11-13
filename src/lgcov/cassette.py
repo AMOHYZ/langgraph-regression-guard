@@ -843,7 +843,7 @@ def judge_probes(
             routed = {p.node} if recorded.goto is not None else set()
             fresh = _compared(Step(p.node, p.output, goto=p.goto), ignore_paths, routed)
             was = _compared(recorded, ignore_paths, routed)
-            probe = Probe(drift_exceeds_noise(p.node, was, fresh))
+            probe = Probe(drift_exceeds_noise([was], [fresh]))
         found[p.node] = _merged(found.get(p.node), probe)
     return found
 

@@ -3,6 +3,7 @@ docs/mutations.yaml. That file's entries name open_deep_research's nodes, so onl
 carry over. Each edit changes the agent's code, and the fake LLM keeps the re-run offline."""
 
 from collections.abc import Callable
+from functools import cache, partial
 from random import Random
 from types import FunctionType
 from typing import Any, Literal
@@ -196,7 +197,24 @@ MORE_MUTATIONS: dict[str, tuple[Mutation, ...]] = {
 NOISE_RATE = 0.2  # ours, for the A/A wiring test: it says nothing about a real model
 
 
-def noisy_graph(seed: int) -> Any:
-    """The unedited agent, except that its fake model sometimes keeps too little of the prompt."""
-    window = 12 if Random(seed).random() < NOISE_RATE else 40
-    return build(answer=_respond_with(fake_llm=_model(window)))
+@cache
+def _noisy(window: int, prompt: str) -> Any:
+    return build(answer=_respond_with(fake_llm=_model(window), SYSTEM_PROMPT=prompt))
+
+
+def noisy_graph(seed: int, prompt: str = RECORDED_PROMPT) -> Any:
+    """The unedited agent, except that its fake model sometimes keeps too little of the prompt.
+    T211: `prompt` edits respond as a PR would, under the same noise."""
+    return _noisy(12 if Random(seed).random() < NOISE_RATE else 40, prompt)
+
+
+# T211: two prompt edits from above, on the noisy agent: (size, what it does, the agent by seed).
+SMALL_SHIFT, LARGE_SHIFT = MUTATIONS["prompt_edit"][0], MORE_MUTATIONS["prompt_edit"][0]
+SHIFTS = (
+    (
+        "small",
+        SMALL_SHIFT.variant,
+        partial(noisy_graph, prompt="You are a friendly, detailed support agent."),
+    ),
+    ("large", LARGE_SHIFT.variant, partial(noisy_graph, prompt="Say when an item has shipped.")),
+)

@@ -102,6 +102,16 @@ Each question re-run with no edit. These runs aren't in the case count.
 | subgraph | re-record | 30 | 0.00 (0 of 30) | 0.00 (0 of 30) | 0 by construction: a control, not a measurement |
 | subgraph | served replay | 30 | 0.00 (0 of 30) | 0.00 (0 of 30) | 0 by construction: a control, not a measurement |
 
+### Noise rule
+
+The noise rule (`drift_exceeds_noise`), on the seeded-noise agent at K=3: the recording and 3 repeats on base, 3 samples on head. Nothing runs repeats on a real agent yet: `lgcov bench` and the gate still compare one sample. It names drift only when head's nearest sample is further from base than base's samples are from each other, so it misses a shift smaller than the spread. Below the threshold a node reads `no drift detected above noise (K=3)`: not cleared, since a small regression can sit inside the spread and the KPI judge decides that. The noise here is ours (1 answer in 5 is cut short), so these rates say how the rule behaves, not what a real model would give.
+
+| Agent | Arm | Head's edit | Runs | Named drift | Reads as |
+|---|---|---|---|---|---|
+| demo | no change | base against base, so every flag is a false alarm | 200 | 0.01 (1 of 200) | false alarm |
+| demo | small shift | the prompt becomes friendly and detailed | 200 | 0.34 (68 of 200) | caught; missed 0.66 (132 of 200) |
+| demo | large shift | the prompt ends on a word the outcome check looks for | 200 | 0.56 (112 of 200) | caught; missed 0.44 (88 of 200) |
+
 ### Limitations
 
 - Exact match on the edited node: parent-only naming counts as a miss, so lgcov's `sub` doesn't score for an edit to `sub.inner`. That is every single-node miss lgcov makes.

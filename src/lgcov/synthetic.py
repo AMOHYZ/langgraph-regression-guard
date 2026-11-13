@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from random import Random
 from typing import Any, Literal
 
+from lgcov.attribution import drift_exceeds_noise
 from lgcov.cassette import Cassette, record, replay_run
 
 EditKind = Literal["node_body", "conditional_edge"]
@@ -65,6 +66,8 @@ class Agent:
     mutations: Mapping[str, tuple[Mutation, ...]]
     outcome_ok: Callable[[Cassette], bool]
     noisy: Callable[[int], Any] | None = None  # the unedited agent with a seeded noisy model
+    # T211: (size, what the edit does, the noisy agent with that edit in), smallest first.
+    shifts: tuple[tuple[str, str, Callable[[int], Any]], ...] = ()
 
 
 def _trace(run: Cassette) -> list[tuple[str, str]]:
@@ -172,3 +175,50 @@ def aa_arms(agent: Agent, reruns: int = 10) -> tuple[AaResult, ...]:
 
         arms.append(_aa("seeded noise", NOISE_NOTE, bases, with_noise, agent.outcome_ok, reruns))
     return tuple(arms)
+
+
+@dataclass(frozen=True)
+class NoiseRate:
+    """T211: how often the noise rule named drift in one arm's seeded runs."""
+
+    arm: str
+    what: str
+    k: int
+    runs: int
+    flagged: int
+
+
+NO_CHANGE = "base against base, so every flag is a false alarm"
+
+
+def noise_rule_rates(agent: Agent, k: int = 3, runs: int = 200) -> tuple[NoiseRate, ...]:
+    """T211: `drift_exceeds_noise` on the agent's noisy model, at the run's last node. Each run
+    draws k+1 base samples (the recording and k repeats) and k head samples, each with its own
+    seed. Head is the same agent (no change), then each of `agent.shifts`, where a flag is a
+    catch."""
+    noisy = agent.noisy
+    if noisy is None:
+        return ()
+
+    seen: dict[tuple[int, str], tuple[Any, Any]] = {}  # a seeded graph answers one way: run it once
+
+    def sample(graph: Callable[[int], Any], seed: int, question: str) -> Any:
+        built = graph(seed)
+        if (id(built), question) not in seen:  # the graph is kept, so its id stays its own
+            output = record(built, {"question": question}).steps[-1].output
+            seen[id(built), question] = (built, output)
+        return seen[id(built), question][1]
+
+    arms = [("no change", NO_CHANGE, noisy)]
+    arms += [(f"{size} shift", what, graph) for size, what, graph in agent.shifts]
+    rates = []
+    for arm, what, head in arms:
+        flagged = 0
+        for n in range(runs):
+            question = agent.questions[n % len(agent.questions)]
+            seeds = range(n * (2 * k + 1), (n + 1) * (2 * k + 1))
+            base = [sample(noisy, seed, question) for seed in seeds[: k + 1]]
+            heads = [sample(head, seed, question) for seed in seeds[k + 1 :]]
+            flagged += drift_exceeds_noise(base, heads)
+        rates.append(NoiseRate(arm, what, k, runs, flagged))
+    return tuple(rates)

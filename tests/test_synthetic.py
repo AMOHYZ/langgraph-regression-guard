@@ -24,6 +24,7 @@ from lgcov.synthetic import (
     aa_arms,
     every_case,
     generate,
+    noise_rule_rates,
     same_run,
 )
 
@@ -395,3 +396,16 @@ def test_a_fan_out_that_only_finished_in_another_order_is_labelled_inert(
 
 def test_t121_has_no_todos_left() -> None:
     assert "TODO(T121)" not in (ROOT / "src" / "lgcov" / "synthetic.py").read_text("utf-8")
+
+
+# T211: how often the noise rule names drift, on the seeded-noise agent. Offline.
+def test_the_noise_rule_is_measured_with_no_change_and_at_two_shift_sizes() -> None:
+    rates = {r.arm: r for r in noise_rule_rates(DEMO, k=3, runs=200)}
+    assert list(rates) == ["no change", "small shift", "large shift"]
+    assert all((r.k, r.runs) == (3, 200) for r in rates.values())
+    assert rates["small shift"].what == "the prompt becomes friendly and detailed"
+    assert rates["large shift"].what == "the prompt ends on a word the outcome check looks for"
+    assert noise_rule_rates(DEMO, k=3, runs=200) == tuple(rates.values())  # seeded
+    assert noise_rule_rates(FANOUT) == ()  # no noisy model
+    flagged = {arm: r.flagged for arm, r in rates.items()}
+    assert flagged == {"no change": 1, "small shift": 68, "large shift": 112}  # of 200 each

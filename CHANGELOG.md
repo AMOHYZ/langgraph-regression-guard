@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A noise rule for root labels, measured but not wired in yet: drift counts only when head's nearest sample of a node is further from base's samples than those are from each other. `lgcov bench --synthetic` reports it on the seeded-noise demo agent at K=3 over 200 runs: 1 false alarm with no change, and a small and a large prompt edit caught 68 and 112 times. `lgcov bench` and `lgcov ci` still compare one sample.
+- **Limit:** the rule misses a shift smaller than the node's own spread (132 and 88 of 200 above), and its default distance is over word sets, so one changed passage in a long output registers only for a node that repeats exactly. A node under the threshold reads `no drift detected above noise (K=n)`, which doesn't clear it.
 - When a judge call doesn't run, `lgcov judge` and `lgcov ci` now say why under "Infra errors", such as `jev: HTTP 401`, with a count per reason. A transport error is named by its type only, so `JEV_API_URL` never appears.
 - `jev_timeout_s` in `lgcov.yaml` sets how long a Jev judge waits for each attempt (default 10 seconds, as before), so a long case such as a whole report doesn't time out.
 - `lgcov.calibration.case_folds` and `cross_fit`: seeded folds split by case, so a case with several label rows is never on both sides of a fold. Nothing uses them for the bands yet; `tune_threshold` still splits by row.

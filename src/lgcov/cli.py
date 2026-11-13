@@ -139,7 +139,7 @@ from lgcov.sampling import (
 )
 from lgcov.slices import Group, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
-from lgcov.synthetic import Agent, Case, aa_arms, every_case
+from lgcov.synthetic import Agent, Case, aa_arms, every_case, noise_rule_rates
 from lgcov.synthetic_score import build_report, render_section, replace_section, report_json
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
 from lgcov.verdict_actions import CI_STATUSES, MODES, CodeFailure, gate_findings
@@ -2371,7 +2371,8 @@ def _bench_synthetic(out: Path, results: Path) -> int:
         return EXIT_ERROR
     cases = [case for agent in agents for case in every_case(agent)]
     aa = [(agent.name, arm) for agent in agents for arm in aa_arms(agent)]
-    report = build_report(cases, _lgcov_root, aa, datetime.now(UTC).date().isoformat())
+    noise = [(agent.name, rate) for agent in agents for rate in noise_rule_rates(agent)]
+    report = build_report(cases, _lgcov_root, aa, datetime.now(UTC).date().isoformat(), noise)
     section = render_section(report)
     doc = out.read_text(encoding="utf-8") if out.exists() else ""
     for path, text in ((out, replace_section(doc, section)), (results, report_json(report))):
