@@ -19,6 +19,7 @@ from lgcov.attribution import NEEDS_LIVE, Probe
 from lgcov.cassette import (
     Cassette,
     ProbeStep,
+    Step,
     judge_probes,
     probe_nodes,
     probe_steps,
@@ -559,3 +560,18 @@ def test_a_probe_that_matches_no_recorded_step_is_refused(forged: ProbeStep) -> 
     base = record(_one_node(lambda s: s), {"x": 1})
     with pytest.raises(ValueError, match="matches no recorded step"):
         judge_probes([base], [forged])
+
+
+# T175, step 1 of 2: a step can hold a fingerprint of its node's routers. Nothing writes one yet;
+# this lgcov only has to read what the next one records.
+def test_a_step_s_router_fingerprint_survives_the_round_trip() -> None:
+    routed = Cassette({"x": 1}, [Step("a", {"x": 1}, router="r1"), Step("b", {"x": 1})])
+    assert routed.body()["steps"] == [
+        {"node": "a", "output": {"x": 1}, "input": None, "code": None, "router": "r1"},
+        {"node": "b", "output": {"x": 1}, "input": None, "code": None},
+    ]
+    assert Cassette.from_json(routed.to_json()) == routed
+
+
+def test_a_cassette_with_no_router_saves_as_it_did_before_routers_were_kept() -> None:
+    assert "router" not in record(linear(), {"x": 1}).to_json()
