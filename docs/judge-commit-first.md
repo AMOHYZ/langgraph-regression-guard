@@ -17,10 +17,11 @@ In commit-first mode the judge works in two steps:
    answer it already wrote.
 
 Zhou reports a judge's false-positive rate falling from 0.719 to 0.012 with this change, and
-attributes the drop to the commit step, not to hidden anchors. That number is theirs, on their
-setup. This repo has not reproduced it, and the reference is not in this repo yet: add the
-citation before any doc repeats the figure. [Section 4](#4-measuring-the-aa-false-positive-rate)
-says how we would measure our own.
+attributes the drop to the commit step, not to hidden anchors
+([arXiv:2607.05904](https://arxiv.org/abs/2607.05904), v1 of 7 Jul 2026, a preprint with one
+author; abstract and section 5.2, read 13 Nov 2026). That number is theirs, on their setup: one
+judge model (Qwen3-4B) on 128 cases. This repo has not reproduced it.
+[Section 4](#4-measuring-the-aa-false-positive-rate) says how we would measure our own.
 
 ## 1. Which KPIs qualify
 
@@ -162,7 +163,6 @@ Limits of this measurement:
 
 ## Open questions
 
-- The citation for Zhou's result.
 - A floor for commit accuracy below which a KPI drops to advisory, and who sets it.
 - A cap on the share of `no_commit` judgments before a KPI stops qualifying.
 - Whether `tool_called`-style checks should count as an independent check for a model judge on
