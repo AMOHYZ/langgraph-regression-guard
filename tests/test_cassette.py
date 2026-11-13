@@ -21,9 +21,11 @@ from lgcov.cassette import (
     ProbeStep,
     Step,
     judge_probes,
+    judge_repeats,
     probe_nodes,
     probe_steps,
     record,
+    repeat_steps,
     replay,
 )
 
@@ -611,3 +613,54 @@ def test_a_step_s_router_fingerprint_survives_the_round_trip() -> None:
 
 def test_a_cassette_with_no_router_saves_as_it_did_before_routers_were_kept() -> None:
     assert "router" not in record(linear(), {"x": 1}).to_json()
+
+
+# T211: repeats run a node live, K times on each input base recorded; `judge_repeats` compares
+# base's samples (the recording and base's repeats) with head's.
+BASE_TEXT = "the order ships on friday"
+HEAD_TEXT = "refunds take ten working days sorry"
+
+
+def _says(text: str) -> CompiledStateGraph[S]:
+    words = iter(("alpha", "beta", "gamma") * 9)  # a model: another word each call
+    return _one_node(lambda s: {"route": f"{text} {next(words)}"})
+
+
+def test_repeat_steps_runs_a_node_k_times_on_each_recorded_input_with_the_network_open() -> None:
+    def looks_up(s: S) -> S:
+        socket.getaddrinfo("localhost", 80)  # the offline probe would refuse this
+        return {"x": s["x"] + 1}
+
+    base = record(_one_node(looks_up), {"x": 1})
+    ran = repeat_steps(_one_node(looks_up), [base], ["n"], 2)
+    assert ran == (ProbeStep(0, 0, "n", {"x": 2}), ProbeStep(0, 0, "n", {"x": 2}))
+
+
+def test_judge_repeats_names_no_drift_when_head_s_samples_sit_inside_base_s_spread() -> None:
+    graph = _says(BASE_TEXT)
+    base = record(graph, {"x": 1})
+    again = repeat_steps(graph, [base], ["n"], 3)
+    [check] = judge_repeats(
+        [base], again, repeat_steps(_says(BASE_TEXT), [base], ["n"], 3)
+    ).values()
+    assert (check.k, check.min_head_to_base, check.drifted) == (3, 0.0, False)
+    assert check.spread > 0
+    assert check.verdict == "no drift detected above noise (K=3)"
+
+
+def test_judge_repeats_names_drift_when_head_s_samples_sit_outside_it() -> None:
+    graph = _says(BASE_TEXT)
+    base = record(graph, {"x": 1})
+    again = repeat_steps(graph, [base], ["n"], 3)
+    found = judge_repeats([base], again, repeat_steps(_says(HEAD_TEXT), [base], ["n"], 3))
+    assert found["n"].drifted and found["n"].verdict == "drift above noise (K=3)"
+
+
+def test_judge_repeats_leaves_out_a_node_whose_repeat_raised() -> None:
+    def breaks(s: S) -> S:
+        raise RuntimeError("no key")
+
+    base = record(_one_node(lambda s: s), {"x": 1})
+    ran = repeat_steps(_one_node(breaks), [base], ["n"], 1)
+    assert ran == (ProbeStep(0, 0, "n", raised="raised RuntimeError on base's input"),)
+    assert judge_repeats([base], ran, ran) == {}

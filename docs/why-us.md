@@ -43,7 +43,7 @@ nothing checked what the new prompts did to the nodes downstream.
 
 **(a) Root vs propagated drift, per node.** When a PR changes an agent, the PR comment calls a
 node root when its own code changed and it drifts on its recorded input (T162), and the nodes that
-drift only because their input did propagated. A node whose router changed is root too, when a node drifts after it (T175): the comment says `routing change at <node>`. That rule is measured on synthetic edits only. A changed model node is inconclusive until T211. On [open_deep_research #163](benchmark.md#real-prs), `write_research_brief`
+drift only because their input did propagated. A node whose router changed is root too, when a node drifts after it (T175): the comment says `routing change at <node>`. That rule is measured on synthetic edits only. A changed model node is inconclusive in the gate; `lgcov bench --noise-repeats K` checks one against base's own spread (T211), measured on a seeded-noise fixture only. On [open_deep_research #163](benchmark.md#real-prs), `write_research_brief`
 writes the rewritten supervisor prompt into the state. lgcov named it root and
 `final_report_generation` propagated, as [the human labels](benchmark/open_deep_research-163.yaml)
 do. It also called `research_supervisor` propagated, though that subgraph holds the other
@@ -236,7 +236,8 @@ Added on 13 Nov 2026, from a research memo's reads of that day (not re-read here
   inside a subgraph is blamed on the subgraph node (`sub`), not its inner node; a crash
   there does name the inner node (`sub.inner`).
 - Name a model node as root: since T162 a second root in the same run is named only if a
-  probe with the network blocked shows it drifting, so a model node is inconclusive until T211.
+  probe with the network blocked shows it drifting, so a model node is inconclusive in the gate. `lgcov bench
+  --noise-repeats K` (T211) names one only above base's own spread, and misses a smaller shift.
 - See a change that reaches a node only through a message's id, usage or other metadata, or a
   `Store` read, or replay a graph with a checkpointer or an `interrupt`:
   [known replay limits](../README.md#known-replay-limits).

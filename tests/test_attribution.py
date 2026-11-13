@@ -1,6 +1,7 @@
 """T101a: the attribution benchmark's scoring and report (pure). T100a: real rows, pending
 human review. T100: rows whose labels a human reviewed but that can't run yet."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from lgcov.attribution import (
     ROUTING,
     UNEXPLAINED,
     NodeLabels,
+    NoiseCheck,
     Probe,
     Result,
     Score,
@@ -27,6 +29,7 @@ from lgcov.attribution import (
     parse_benchmark,
     pending_result,
     render_markdown,
+    results_json,
     score,
     word_jaccard,
 )
@@ -340,3 +343,16 @@ def test_a_changed_router_is_not_root_of_drift_that_came_before_it() -> None:
     routers = ({"respond": "r1"}, {"respond": "r2"})
     out = explain_runs(UNEXPLAINED_RUN, ["lookup"], [["lookup"]], routers, RAN)
     assert (out.root, out.inconclusive) == ((), {"lookup": UNEXPLAINED})
+
+
+def test_a_noise_check_s_evidence_is_in_the_results_json_and_the_report() -> None:
+    # T211: the numbers behind the verdict, per repeated node, and never the word "cleared".
+    row = replace(_result("aa", set(), set()), noise=(("a", NoiseCheck(3, 0.3, 0.0)),))
+    [saved] = json.loads(results_json([row]))["benchmarks"]
+    verdict = "no drift detected above noise (K=3)"
+    assert saved["noise"] == {
+        "a": {"k": 3, "spread": 0.3, "min_head_to_base": 0.0, "verdict": verdict}
+    }
+    md = render_markdown([row], "lgcov bench", "2026-11-13")
+    assert f"- `aa`: `a`: {verdict}: spread 0.300, nearest head sample 0.000" in md
+    assert "Noise checks" not in render_markdown([_result("x", set(), set())], "lgcov bench", "")

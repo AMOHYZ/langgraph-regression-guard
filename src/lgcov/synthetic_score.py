@@ -224,8 +224,9 @@ def _noise_lines(noise: Sequence[tuple[str, NoiseRate]]) -> list[str]:
         "### Noise rule",
         "",
         f"The noise rule (`drift_exceeds_noise`), on the seeded-noise agent at K={k}: the "
-        f"recording and {k} repeats on base, {k} samples on head. Nothing runs repeats on a real "
-        "agent yet: `lgcov bench` and the gate still compare one sample. It names drift only when "
+        f"recording and {k} repeats on base, {k} samples on head. `lgcov bench "
+        "--noise-repeats` runs these repeats on an agent, but not on a real one yet, and the gate "
+        "still compares one sample. It names drift only when "
         "head's nearest sample "
         "is further from base than base's samples are from each other, so it misses a shift "
         "smaller than the spread. Below the threshold a node reads `no drift detected above noise "

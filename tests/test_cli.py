@@ -2630,7 +2630,9 @@ def test_cli_bench_from_runs_a_missing_run_is_an_error_row(tmp_path: Path) -> No
     assert "base.json" in str(row["error"])
 
 
-@pytest.mark.parametrize("other", [["--live"], ["--keep-runs", "kept"], ["--synthetic"]])
+@pytest.mark.parametrize(
+    "other", [["--live"], ["--keep-runs", "kept"], ["--synthetic"], ["--noise-repeats", "3"]]
+)
 def test_cli_bench_from_runs_refuses_what_would_run_the_agent(
     tmp_path: Path, other: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:

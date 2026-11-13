@@ -104,7 +104,7 @@ Each question re-run with no edit. These runs aren't in the case count.
 
 ### Noise rule
 
-The noise rule (`drift_exceeds_noise`), on the seeded-noise agent at K=3: the recording and 3 repeats on base, 3 samples on head. Nothing runs repeats on a real agent yet: `lgcov bench` and the gate still compare one sample. It names drift only when head's nearest sample is further from base than base's samples are from each other, so it misses a shift smaller than the spread. Below the threshold a node reads `no drift detected above noise (K=3)`: not cleared, since a small regression can sit inside the spread and the KPI judge decides that. The noise here is ours (1 answer in 5 is cut short), so these rates say how the rule behaves, not what a real model would give.
+The noise rule (`drift_exceeds_noise`), on the seeded-noise agent at K=3: the recording and 3 repeats on base, 3 samples on head. `lgcov bench --noise-repeats` runs these repeats on an agent, but not on a real one yet, and the gate still compares one sample. It names drift only when head's nearest sample is further from base than base's samples are from each other, so it misses a shift smaller than the spread. Below the threshold a node reads `no drift detected above noise (K=3)`: not cleared, since a small regression can sit inside the spread and the KPI judge decides that. The noise here is ours (1 answer in 5 is cut short), so these rates say how the rule behaves, not what a real model would give.
 
 | Agent | Arm | Head's edit | Runs | Named drift | Reads as |
 |---|---|---|---|---|---|
@@ -171,7 +171,7 @@ lgcov said root `write_research_brief`, propagated `final_report_generation` and
 
 ### Multi-root re-score (T162)
 
-T162 calls a node root when its own fingerprint changed and it drifts when run with head's code on base's recorded input. That run is a probe with the network blocked, so it costs nothing. A node that reaches for the network would need a live call, and the [A/A run](#aa-noise-floor) shows one live sample drifts with no change, so it's inconclusive until T211 adds a noise threshold. The first node to drift is still reported, as `first_drift`.
+T162 calls a node root when its own fingerprint changed and it drifts when run with head's code on base's recorded input. That run is a probe with the network blocked, so it costs nothing. A node that reaches for the network would need a live call, and the [A/A run](#aa-noise-floor) shows one live sample drifts with no change, so it's inconclusive. `lgcov bench --noise-repeats K` (T211) repeats it on both sides and names it root only above base's own spread; the gate still treats a changed model node as inconclusive until base samples are in the cassette. The first node to drift is still reported, as `first_drift`.
 
 Scored from the pilot's saved runs with `lgcov bench docs/benchmark --only open_deep_research-163 --from-runs <stage1/runs>`, no call made. Saved runs can't be probed, so every changed node that drifted is inconclusive here:
 
@@ -184,7 +184,7 @@ Scored from the pilot's saved runs with `lgcov bench docs/benchmark --only open_
 | Inconclusive | | `write_research_brief`, `final_report_generation` (not probed), `research_supervisor` (no fingerprint) |
 
 - **Five of the six roots can't be reached by any rule yet.** They're inside the `research_supervisor` subgraph, whose inner nodes aren't recorded (T193).
-- **`write_research_brief` is a model node.** After masking, it gets the same input on both sides and drifts, but that drift is one live sample. A probe would need a live call, so it stays inconclusive until T211.
+- **`write_research_brief` is a model node.** After masking, it gets the same input on both sides and drifts, but that drift is one live sample. A probe would need a live call, so from saved runs it stays inconclusive; `--noise-repeats` hasn't been run on this agent.
 - **`final_report_generation` is now inconclusive, not propagated.** Its code changed and its input changed, and without a probe on base's input lgcov can't say which one made it drift.
 - **Docstring edits are a known false-root source.** The fingerprint still includes docstrings (T212), so a node whose only change is a docstring is probed, and a probe that drifts would be called root.
 
