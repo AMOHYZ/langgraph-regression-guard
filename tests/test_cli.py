@@ -1245,6 +1245,66 @@ def test_cli_judge_refuses_more_model_calls_than_max_calls(
     assert "--max-calls 5" in err
 
 
+# T195: `lgcov judge --from-runs` judges the pair `lgcov bench --keep-runs` saved. Nothing is
+# replayed, so no graph is loaded and the agent makes no call.
+SAVED_PAIR = FIXTURES / "bench_runs" / "open_deep_research-163"
+SAVED_TAXONOMY = """\
+version: 1
+system: open_deep_research
+failure_modes:
+  - id: unsupported_claim
+    description: The report says something its notes don't back.
+kpis:
+  - name: report_claims_supported
+    failure_mode: unsupported_claim
+    node: final_report_generation
+    judge: fake
+    description: The 2nd report judged fails; with k=1 that is head's.
+    rubric: Is every claim in the report backed by the notes?
+    check: {fail_every: "2"}
+"""
+
+
+def _saved_args(tmp_path: Path, runs: Path = SAVED_PAIR) -> list[str]:
+    taxonomy = tmp_path / "taxonomy.yaml"
+    taxonomy.write_text(SAVED_TAXONOMY, encoding="utf-8")
+    bands = str(tmp_path / "bands.json")
+    return ["judge", "--from-runs", str(runs), "--taxonomy", str(taxonomy), "--bands", bands]
+
+
+def test_cli_judge_from_runs_judges_the_saved_pair_without_a_graph(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_graph(target: str) -> object:
+        raise AssertionError(f"--from-runs loaded a graph: {target}")
+
+    monkeypatch.setattr("lgcov.cli._load_graph", no_graph)
+    assert main(_saved_args(tmp_path)) == 0  # no --graph, no cassette dir
+    out = capsys.readouterr().out
+    assert "Planned: 2 judge calls, 2 to model judges (--max-calls 200)" in out
+    assert "| report_claims_supported (advisory) | 1 | 100% | 0% |" in out
+
+
+def test_cli_judge_from_runs_refuses_live_and_a_folder_without_the_pair(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([*_saved_args(tmp_path), "--live"]) == 2
+    assert "--from-runs runs nothing" in capsys.readouterr().err
+    assert main(_saved_args(tmp_path, tmp_path / "empty")) == 2
+    assert "base.json" in capsys.readouterr().err
+
+
+def test_cli_judge_from_runs_refuses_sides_with_different_run_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for name, runs in (("base.json", 1), ("head.json", 0)):
+        saved = json.loads((SAVED_PAIR / name).read_text(encoding="utf-8"))
+        saved["runs"] = saved["runs"][:runs]
+        (tmp_path / name).write_text(json.dumps(saved), encoding="utf-8")
+    assert main(_saved_args(tmp_path, tmp_path)) == 2
+    assert "1 runs on base, 0 on head" in capsys.readouterr().err
+
+
 def test_cli_judge_needs_a_taxonomy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main([*_judge_args(tmp_path), "--config", str(tmp_path / "none.yaml")]) == 2
     assert "taxonomy" in capsys.readouterr().err
