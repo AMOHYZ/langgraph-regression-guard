@@ -14,11 +14,13 @@ from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from examples.synthetic_agents import AGENTS
 from lgcov.cassette import _codes, replay_run
-from lgcov.cli import _lgcov_root, _load_graph, main
+from lgcov.cli import _l2_judge, _lgcov_root, _load_graph, main
+from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, NodeState, Verdict
 from lgcov.slices import Group
 from lgcov.synthetic import Case, every_case
 from lgcov.synthetic_score import METHODS, rates, votes_for
+from lgcov.taxonomy import load_taxonomy
 
 
 def test_cli_prints_added_and_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -3082,3 +3084,19 @@ def test_docs_benchmark_md_holds_the_current_synthetic_section(tmp_path: Path) -
     doc = (Path(__file__).resolve().parents[1] / "docs" / "benchmark.md").read_text("utf-8")
     undated = re.compile(r"^Run \d{4}-\d\d-\d\d:", re.MULTILINE)
     assert undated.sub("Run:", fresh.read_text("utf-8")).strip() in undated.sub("Run:", doc)
+
+
+def test_a_jev_judge_takes_its_model_and_timeout_from_lgcov_yaml() -> None:
+    # T195: jev_timeout_s reaches the judge `lgcov judge` and `lgcov ci` build
+    spec = next(
+        s
+        for s in load_taxonomy(
+            str(Path(__file__).resolve().parents[1] / "docs" / "taxonomy.yaml")
+        ).kpi_specs
+        if s.judge == "jev"
+    )
+    judge = _l2_judge(spec, "gpt-6-luna", 120.0)
+    assert isinstance(judge, JevJudge)
+    assert (judge.model, judge.timeout_s) == ("gpt-6-luna", 120.0)
+    default = _l2_judge(spec)
+    assert isinstance(default, JevJudge) and default.timeout_s == 10.0

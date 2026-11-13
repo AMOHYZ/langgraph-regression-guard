@@ -590,6 +590,9 @@ elsewhere):
 - Blocking takes at least 16 human-failed and 16 human-passed cases with no disagreement:
   at 16/16 the Wilson lower bound is 0.806. In practice, start as Hamel Husain recommends,
   with about 100 diverse traces ([AI Evals FAQ](https://hamel.dev/blog/posts/evals-faq/)).
+- `jev_timeout_s:` in `lgcov.yaml` is how many seconds a Jev judge waits for each of its two
+  attempts (default 10). Raise it when a case is long, such as a whole report with its notes:
+  an attempt that times out is retried once, and the service may charge for both.
 - `jev_model:` in `lgcov.yaml` pins the model Jev judges call (default `jev-latest`), and
   bands.json records the one the labels came from. When they differ, the Jev judges' bands
   drop to flag, with a warning, until `lgcov calibrate` runs again.

@@ -239,6 +239,14 @@ def test_transport_error_is_retried_once(monkeypatch: pytest.MonkeyPatch) -> Non
     assert client.timeouts == [10.0, 10.0]
 
 
+def test_the_timeout_is_the_one_given_on_every_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    # T195: a long report takes a model more than the default 10 s to read
+    _set_env(monkeypatch)
+    client = _FakeClient([httpx.ReadTimeout("slow"), _ok(GOOD_BAD, "good", 0.9)])
+    JevJudge(GOOD_BAD, client=client, timeout_s=120.0).judge({}, {})
+    assert client.timeouts == [120.0, 120.0]
+
+
 def test_second_transport_failure_raises_infra_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
