@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import fmean
 from typing import Literal
@@ -223,6 +223,7 @@ NO_FINGERPRINT = "no fingerprint: a subgraph or the like (T193)"
 UNEXPLAINED = (
     "drifted with no changed node before it: a change outside node code, or an edited recording"
 )
+ROUTING = "routing change at {}"  # T175: why a node whose own output didn't drift is root
 
 
 def drift_exceeds_noise(node: str, a: object, b: object) -> bool:
@@ -245,6 +246,8 @@ class NodeLabels:
     root: tuple[str, ...]
     propagated: tuple[str, ...]
     inconclusive: dict[str, str]  # node: why
+    # T175: the roots that are a changed router's source node, with the runs each is root of.
+    routing: dict[str, int] = field(default_factory=dict)
 
 
 def classify(
@@ -276,17 +279,35 @@ def classify(
 
 
 def explain_runs(
-    labels: NodeLabels, first_drifts: Sequence[str | None], drifted: Sequence[Collection[str]]
+    labels: NodeLabels,
+    first_drifts: Sequence[str | None],
+    drifted: Sequence[Collection[str]],
+    routers: tuple[Mapping[str, str | None], Mapping[str, str | None]] = ({}, {}),
+    ran: Sequence[Sequence[str]] = (),
 ) -> NodeLabels:
     """T162: a run that drifted with no root or inconclusive node in it has a cause no node's
     fingerprint shows: an edge, a router, a Send, or an edited recording. Its first drifted node is
-    inconclusive, so `fail-on: root-drift` still fails on it, as first-drift attribution did."""
+    inconclusive, so `fail-on: root-drift` still fails on it, as first-drift attribution did.
+
+    T175: unless a router explains it. A node whose router fingerprint changed (`routers`: base's
+    and head's, by source node) is root of each run where a node drifted after it, by base's order
+    (`ran`), beside any root the run already has. A router with no fingerprint on either side, as
+    in a recording from before they were kept, explains nothing. Not checked: that the run took
+    another branch. A router edit that routes as before is root of drift a changed node caused."""
+    base, head = routers
+    edited = {n for n, code in base.items() if code and head.get(n) and head[n] != code}
     unsure = dict(labels.inconclusive)
-    for first, nodes in zip(first_drifts, drifted, strict=True):
-        if first and not ({*labels.root, *unsure} & set(nodes)):
+    routing: dict[str, int] = {}
+    for i, (first, nodes) in enumerate(zip(first_drifts, drifted, strict=True)):
+        order = list(ran[i]) if i < len(ran) else []
+        after = {r for r in edited & set(order) if set(nodes) - set(order[: order.index(r) + 1])}
+        for router in after:
+            routing[router] = routing.get(router, 0) + 1
+        if first and not after and not ({*labels.root, *unsure} & set(nodes)):
             unsure[first] = UNEXPLAINED
     propagated = tuple(n for n in labels.propagated if n not in unsure)
-    return NodeLabels(labels.root, propagated, unsure)
+    root = tuple(sorted({*labels.root, *routing}))
+    return NodeLabels(root, propagated, unsure, dict(sorted(routing.items())))
 
 
 @dataclass(frozen=True)

@@ -1027,6 +1027,42 @@ def test_cli_ci_serves_unchanged_nodes_unless_live(
     assert "| `lookup_order` | inconclusive (drifted with no changed node before it:" in report
 
 
+# T175: the PR changes one condition in the router: nothing in a node's code, so no node's
+# fingerprint moves, and every run takes the other branch.
+ROUTER_EDIT = ('if state["needs_tool"] else', 'if not state["needs_tool"] else')
+
+
+def test_cli_ci_names_the_routing_node_root_when_the_pr_edits_its_router(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    assert demo.count(ROUTER_EDIT[0]) == 1
+    _ci_project(tmp_path, monkeypatch, demo.replace(*ROUTER_EDIT))
+    code, report, outputs = _run_ci(tmp_path)
+    assert code == 1
+    assert "| `classify` | root (routing change at classify) | 2/2 |" in report
+    assert "| `lookup_order` | propagated | 2/2 |" in report
+    assert "| `respond` | propagated | 2/2 |" in report
+    assert "inconclusive" not in report.split("### Cassette replay")[1].split("###")[0]
+    assert "Unchanged: `classify`" not in report
+    assert outputs["inconclusive-count"] == "0"
+
+
+def test_cli_ci_on_a_baseline_from_before_routers_were_kept_stays_inconclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace(*ROUTER_EDIT))
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    old = json.loads(baseline.read_text(encoding="utf-8"))
+    assert [s.pop("router", None) for r in old["runs"] for s in r["steps"]].count(None) == 3
+    baseline.write_text(json.dumps(old), encoding="utf-8")  # as recorded before T175
+    code, report, _ = _run_ci(tmp_path)
+    assert code == 1
+    assert "| `lookup_order` | inconclusive (drifted with no changed node before it:" in report
+    assert "routing change" not in report
+
+
 # T083: `lgcov coverage` from the recorded runs (nothing re-runs), with trend vs main.
 def _coverage_args(tmp_path: Path, runs: list[int] | None = None) -> list[str]:
     data = json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))

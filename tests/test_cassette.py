@@ -2,7 +2,7 @@ import contextlib
 import random
 import socket
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from datetime import UTC, datetime
 from typing import TypedDict, cast
 from unittest.mock import Mock
@@ -559,3 +559,40 @@ def test_a_probe_that_matches_no_recorded_step_is_refused(forged: ProbeStep) -> 
     base = record(_one_node(lambda s: s), {"x": 1})
     with pytest.raises(ValueError, match="matches no recorded step"):
         judge_probes([base], [forged])
+
+
+# T175: a conditional edge's router is in no node's fingerprint, so its source node's steps keep
+# one for it.
+def _branching(threshold: int, ends: dict[Hashable, str] | None = None) -> CompiledStateGraph[S]:
+    def route(state: S) -> str:
+        return "b" if state["x"] > threshold else "c"
+
+    g = StateGraph(S)
+    for name in ("a", "b", "c"):
+        g.add_node(name, lambda s: {"x": s["x"]})
+    g.add_edge(START, "a")
+    g.add_conditional_edges("a", route, ends)
+    return g.compile()
+
+
+def test_a_step_keeps_its_node_s_router_fingerprint_and_other_steps_keep_none() -> None:
+    a, b = record(_branching(0), {"x": 1}).steps
+    assert (a.node, b.node, b.router) == ("a", "b", None)
+    assert a.router is not None and len(a.router) == 16
+    assert record(_branching(0), {"x": 1}).steps[0].router == a.router
+
+
+def test_a_router_edit_or_a_new_path_map_changes_the_router_fingerprint_only() -> None:
+    base = record(_branching(0), {"x": 1}).steps[0]
+    edited = record(_branching(5), {"x": 1}).steps[0]
+    remapped = record(_branching(0, {"b": "c", "c": "b"}), {"x": 1}).steps[0]
+    assert len({base.router, edited.router, remapped.router}) == 3
+    assert base.code == edited.code == remapped.code
+
+
+def test_a_cassette_with_no_router_saves_and_loads_as_it_did_before_routers_were_kept() -> None:
+    old = record(linear(), {"x": 1})
+    assert "router" not in old.to_json()
+    assert Cassette.from_json(old.to_json()) == old
+    routed = record(_branching(0), {"x": 1})
+    assert Cassette.from_json(routed.to_json()) == routed

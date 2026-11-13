@@ -1,5 +1,6 @@
 import asyncio
 import atexit
+import hashlib
 import inspect
 import json
 import socket
@@ -42,6 +43,10 @@ class Step:
     # node, "arg": payload} for a Send. None for any other return, and in cassettes recorded
     # before this was kept.
     goto: list[Any] | None = None
+    # T175: fingerprint of the routers on this node's conditional edges and their path maps,
+    # which `code` doesn't cover. None for a node with no such edge or a router with no
+    # fingerprint, and in cassettes recorded before this was kept.
+    router: str | None = None
 
 
 @dataclass
@@ -51,11 +56,12 @@ class Cassette:
 
     def body(self) -> dict[str, Any]:
         """What's saved. A step with no goto has no such key, so a cassette with no Command in
-        it saves byte for byte as it did before goto was kept."""
+        it saves byte for byte as it did before goto was kept. T175: the same for router."""
         body = asdict(self)
         for step in body["steps"]:
-            if step["goto"] is None:
-                del step["goto"]
+            for key in ("goto", "router"):
+                if step[key] is None:
+                    del step[key]
         return body
 
     def to_json(self) -> str:
@@ -224,6 +230,24 @@ def _codes(graph: Any) -> dict[str, str | None]:
         if name != START and fn is not None:
             codes[name] = fingerprint(fn)
     return codes
+
+
+def _router_prints(graph: Any) -> dict[str, str | None]:
+    """T175: by source node, one fingerprint for its conditional edges: each router's code and
+    path map. None when a router has no fingerprint. A subgraph's own routers aren't here (T193)."""
+    prints: dict[str, str | None] = {}
+    branches = getattr(getattr(graph, "builder", None), "branches", None) or {}
+    for source, per_source in branches.items():
+        parts: list[str] = []
+        for name, branch in sorted(per_source.items()):
+            path = getattr(branch, "path", None)
+            code = fingerprint(getattr(path, "func", None) or getattr(path, "afunc", None))
+            ends = sorted(map(repr, (getattr(branch, "ends", None) or {}).items()))
+            parts += [] if code is None else [f"{name}:{code}:{ends}"]
+        whole = len(parts) == len(per_source)
+        text = "\n".join(parts).encode()
+        prints[source] = hashlib.sha256(text).hexdigest()[:16] if whole else None
+    return prints
 
 
 def _only_async(runnable: Any) -> bool:
@@ -542,6 +566,7 @@ def _run(
         if isinstance(getattr(spec, "bound", None), Pregel):
             nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{name}.", failed)})
     routers = _routers(graph)
+    routed = _router_prints(graph)
     runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
 
@@ -554,10 +579,10 @@ def _run(
                 )
                 call = None if i is None else calls.pop(i)
             if call is None:
-                steps.append(Step(node, update))
+                steps.append(Step(node, update, router=routed.get(node)))
                 continue
             goto = _goto_saved(call[2].goto) if isinstance(call[2], Command) else None
-            steps.append(Step(node, update, call[1], call[3], goto))
+            steps.append(Step(node, update, call[1], call[3], goto, routed.get(node)))
 
     async def drain() -> None:
         try:

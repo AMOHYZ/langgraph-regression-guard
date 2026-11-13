@@ -23,6 +23,7 @@ from typing import Any
 import yaml
 
 from lgcov.attribution import (
+    ROUTING,
     Benchmark,
     NodeLabels,
     Probe,
@@ -389,15 +390,18 @@ def _replay_markdown(
     counts, roots = _drift_kinds(runs, drifts)
     roots = roots if labels is None else set(labels.root)
     unsure = {} if labels is None else labels.inconclusive
+    routing = {} if labels is None else labels.routing  # T175: root, though its output held
     lines = ["### Cassette replay", ""]
     if not counts:
         return [*lines, f"No cassette drift ({len(runs)} runs)."]
     lines += ["| node | drift | runs |", "|---|---|---|"]
-    for node in sorted(counts):
+    for node in sorted({*counts, *routing}):
         kind = "root" if node in roots else "propagated"
         kind = f"inconclusive ({unsure[node]})" if node in unsure else kind
-        lines.append(f"| `{node}` | {kind} | {counts[node]}/{len(runs)} |")
-    unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys() - set(not_checked))
+        kind = f"root ({ROUTING.format(node)})" if node in routing else kind
+        lines.append(f"| `{node}` | {kind} | {routing.get(node, counts.get(node))}/{len(runs)} |")
+    drifted = {*counts, *routing, *not_checked}
+    unchanged = sorted({s.node for r in runs for s in r.steps} - drifted)
     if unchanged:
         lines += ["", "Unchanged: " + ", ".join(f"`{n}`" for n in unchanged)]
     return lines
@@ -1104,7 +1108,14 @@ def _evaluate(
     heads = {s.node: s.code for f in run.fresh for s in f.steps}
     firsts = [_run_root(r, d) for r, d in zip(runs, drifts, strict=True)]
     nodes = [{x.node for x in d} for d in drifts]
-    labels = explain_runs(classify(counts.keys(), (bases, heads), probes), firsts, nodes)
+    # T175: a changed router makes its source node root. Old recordings have no router print.
+    routers = (
+        {s.node: s.router for r in runs for s in r.steps},
+        {s.node: s.router for f in run.fresh for s in f.steps},
+    )
+    ran = [[s.node for s in r.steps] for r in runs]
+    by_node = classify(counts.keys(), (bases, heads), probes)
+    labels = explain_runs(by_node, firsts, nodes, routers, ran)
     blocking = {*labels.root, *labels.inconclusive}
     root, downstream = sorted(blocking), list(labels.propagated)
     # T199: the comment's tally line: each run's root and inconclusive nodes, in run order.
