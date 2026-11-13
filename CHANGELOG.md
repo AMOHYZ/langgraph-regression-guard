@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A PR that edits a conditional edge's router now gets the routing node as root: `root (routing change at classify)` in the comment's replay table, beside any root from a changed node. Before, the first drifted node was inconclusive. **Re-record your baseline to get this:** a cassette recorded earlier holds no router fingerprint and keeps the old label. Existing cassettes load and replay unchanged. `lgcov bench` and the synthetic benchmark score router edits the same way.
+- **Limit:** lgcov doesn't check that the route changed, so a router edit that routes as before is named root of drift a node edit caused. A router inside a subgraph isn't fingerprinted.
 - The gate table's N* for a blocking KPI is now sized at α/K_gate, Holm's strictest step, so it no longer understates the cases a BLOCK needs when more than one KPI blocks. With one blocking KPI, and for advisory KPIs, it is unchanged. MDE stays at α.
 - `lgcov judge --from-runs DIR` judges the `base.json` and `head.json` that `lgcov bench --keep-runs` saved, with no replay, so the agent makes no call. Model judges still cost their own calls.
 - `lgcov bench --live` runs every node on head instead of serving the ones that didn't change. A row with the same commit on both sides then measures how much a live model varies on its own.

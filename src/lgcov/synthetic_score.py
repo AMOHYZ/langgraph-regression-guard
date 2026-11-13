@@ -206,6 +206,8 @@ def render_section(report: Report) -> str:
     groups = (("All", report.all_edits), ("Single-node", report.single_node))
     lgcov = _method(report.single_node, "lgcov root")
     diff = _method(report.single_node, "edited node from the diff")
+    ours = _method(report.all_edits, "lgcov root")
+    first = _method(report.all_edits, "first divergence")
     labels = ", ".join(f"{report.labels.get(k, 0)} {k}" for k in ("regressed", "benign", "inert"))
     lines = [
         "## Synthetic",
@@ -224,8 +226,8 @@ def render_section(report: Report) -> str:
         "share where a method names a node.",
         "",
         "Single-node leaves out the router and fan-out edits, which change a conditional edge. "
-        "All counts them as misses for any method that doesn't name the edited node. How to score "
-        "them is still open (T175).",
+        "All scores them against the edge's source node, the node that routes: its own output "
+        "doesn't change, so a method that names it has to see the router's code.",
         "",
         "### By case",
         "",
@@ -253,8 +255,10 @@ def render_section(report: Report) -> str:
         f"{_plain(lgcov.false_flag)} on single-node edits. This run scores drift only. The rate "
         "can't separate the methods: drift and the diff both name a node on every harmless change, "
         "and end-to-end's 0 only means it names no node.",
-        "- **First divergence ties lgcov on these scores,** because the first node to drift is "
-        "lgcov's root rule.",
+        "- **First divergence ties lgcov on single-node edits,** because the first node to drift "
+        "is lgcov's root rule there. On a router or fan-out edit lgcov names the routing node, "
+        "from the router's fingerprint, and first divergence names a node downstream: recall on "
+        f"all edits is {_plain(ours.recall)} against {_plain(first.recall)}.",
         f"- **End-to-end names no node.** As a detector, its final answer changed on "
         f"{_plain(report.end_to_end_caught)} regressed cases and on "
         f"{_plain(report.end_to_end_false)} harmless ones.",
@@ -275,6 +279,9 @@ def render_section(report: Report) -> str:
         "",
         "- Exact match on the edited node: parent-only naming counts as a miss, so lgcov's `sub` "
         "doesn't score for an edit to `sub.inner`. That is every single-node miss lgcov makes.",
+        "- A router edit counts as a hit whenever the router's code changed and a node drifted "
+        "after it. lgcov doesn't check that the run took another branch, and no case here has a "
+        "router edit beside a node edit.",
         "- Fake models and small graphs, so these numbers don't predict a real PR.",
         "- The regression label comes from each agent's own outcome check.",
         "- The two order questions gave every edit the same label, so the case-level numbers "

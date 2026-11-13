@@ -40,7 +40,7 @@ nothing checked what the new prompts did to the nodes downstream.
 
 **(a) Root vs propagated drift, per node.** When a PR changes an agent, the PR comment calls a
 node root when its own code changed and it drifts on its recorded input (T162), and the nodes that
-drift only because their input did propagated. A changed model node is inconclusive until T211. On [open_deep_research #163](benchmark.md#real-prs), `write_research_brief`
+drift only because their input did propagated. A node whose router changed is root too, when a node drifts after it (T175): the comment says `routing change at <node>`. That rule is measured on synthetic edits only. A changed model node is inconclusive until T211. On [open_deep_research #163](benchmark.md#real-prs), `write_research_brief`
 writes the rewritten supervisor prompt into the state. lgcov named it root and
 `final_report_generation` propagated, as [the human labels](benchmark/open_deep_research-163.yaml)
 do. It also called `research_supervisor` propagated, though that subgraph holds the other
@@ -65,7 +65,8 @@ ablates recorded trajectory steps one at a time to find the culprit step, not a 
 None of the tools below labels graph nodes root or propagated between base and PR.
 A plain baseline does as well: on single-node edits in the [synthetic
 benchmark](benchmark.md#synthetic), naming the node the diff edited matches or beats lgcov's
-root (recall 1.00 against 0.85, precision 0.35 against 0.39).
+root (recall 1.00 against 0.85, precision 0.35 against 0.39). With router and fan-out edits
+counted, lgcov's recall is 0.90 against the diff's 1.00.
 
 **(c) Judges that earn the right to block.** A KPI's judge may block a PR only once the
 lower bounds of the 95% intervals of its TPR and TNR against human labels both clear
@@ -178,6 +179,9 @@ column against lgcov: [bake-off.md](bake-off.md).
 - See a change that reaches a node only through a message's id, usage or other metadata, or a
   `Store` read, or replay a graph with a checkpointer or an `interrupt`:
   [known replay limits](../README.md#known-replay-limits).
+- Check that a router edit changed the route: a changed router is root of any drift after its
+  node, even drift a node edit caused. A router inside a subgraph isn't seen (T193), and a
+  cassette recorded before routers were fingerprinted needs a re-record first.
 - Tell root drift from model noise: a base-against-base run on a real model (T173) gave the
   same root as #163, so the root label has no noise threshold yet.
 - Judge a real PR: the judge gate is built, but no judge has run on one yet.

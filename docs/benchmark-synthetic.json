@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-07",
+  "date": "2026-11-13",
   "cases": 72,
   "edits": 24,
   "agents": 3,
@@ -14,19 +14,19 @@
       "method": "lgcov root",
       "cases": {
         "precision": {
-          "hits": 17,
+          "hits": 28,
           "of": 55,
-          "value": 0.3090909090909091
+          "value": 0.509090909090909
         },
         "recall": {
-          "hits": 17,
+          "hits": 28,
           "of": 31,
-          "value": 0.5483870967741935
+          "value": 0.9032258064516129
         },
         "coverage": {
-          "hits": 38,
+          "hits": 49,
           "of": 55,
-          "value": 0.6909090909090909
+          "value": 0.8909090909090909
         },
         "false_flag": {
           "hits": 24,
@@ -36,19 +36,19 @@
       },
       "by_edit": {
         "precision": {
-          "hits": 7,
+          "hits": 11,
           "of": 21,
-          "value": 0.3333333333333333
+          "value": 0.5238095238095238
         },
         "recall": {
-          "hits": 7,
+          "hits": 11,
           "of": 12,
-          "value": 0.5833333333333334
+          "value": 0.9166666666666666
         },
         "coverage": {
-          "hits": 15,
+          "hits": 19,
           "of": 21,
-          "value": 0.7142857142857143
+          "value": 0.9047619047619048
         },
         "false_flag": {
           "hits": 9,
