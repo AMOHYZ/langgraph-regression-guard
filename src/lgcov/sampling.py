@@ -12,6 +12,7 @@ Benjamini-Hochberg across the advisory ones. Flakiness is shown, never decided o
 from __future__ import annotations
 
 import time
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from statistics import fmean
@@ -45,6 +46,7 @@ class Sample:
     tokens_in: int | None = None  # None: the judge reported no usage
     tokens_out: int | None = None
     score: float | None = None  # T091: the judge's score, in [0, 1]; None on an infra error
+    error: str = ""  # T195: why an infra sample didn't run; "" for a sample that did
 
 
 def usage_tokens(raw: Mapping[str, object]) -> tuple[int, int] | None:
@@ -74,8 +76,12 @@ def judge_samples(
         start = clock()
         try:
             v = judge.judge(node_input, node_output)
-        except (JudgeInfraError, *TRANSPORT_ERRORS):  # T074: a judge's network trouble too
-            samples.append(Sample(None, 0.0, (clock() - start) * 1000))
+        except (JudgeInfraError, *TRANSPORT_ERRORS) as exc:  # T074: network trouble too
+            # T195: a judge words its own errors without secrets; anything else's text could
+            # carry a URL, so only its type is kept
+            own = isinstance(exc, JudgeInfraError)
+            why = " ".join(str(exc).split())[:200] if own else type(exc).__name__
+            samples.append(Sample(None, 0.0, (clock() - start) * 1000, error=why))
             continue
         ms = (clock() - start) * 1000
         t_in, t_out = usage_tokens(v.raw) or (None, None)
@@ -142,6 +148,7 @@ class KpiStats:
     score_range: float = 1.0  # T150: the KPI's highest score minus its lowest
     new_failures: tuple[str, ...] = ()  # code judges: cases that passed on base, fail here
     worse: tuple[str, ...] = ()  # T199, every judge: cases this PR scores lower than the base
+    infra_reasons: tuple[tuple[str, int], ...] = ()  # T195: why, and how often; most first
 
     @property
     def flakiness(self) -> float:
@@ -226,6 +233,7 @@ def kpi_stats(
         new_failures=tuple(new_failures),
         worse=tuple(worse),
         score_range=max(kpi.score_map.values()) - min(kpi.score_map.values()),
+        infra_reasons=tuple(Counter(s.error for s in samples if s.error).most_common()),
     )
     return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence, power=power)[0]
 
@@ -438,4 +446,8 @@ def render_kpi_table(stats: Sequence[KpiStats]) -> list[str]:
     infra = [f"{s.kpi} {s.infra}" for s in stats if s.infra]
     if infra:
         lines.append("Infra errors, not counted toward k: " + ", ".join(infra))
+    for s in stats:
+        if s.infra_reasons:  # T195: the reason, so a failed judge call can be fixed
+            why = "; ".join(f"{count} × {reason}" for reason, count in s.infra_reasons)
+            lines.append(f"- {s.kpi}: {why}")
     return lines
