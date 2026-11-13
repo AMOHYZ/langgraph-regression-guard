@@ -13,7 +13,8 @@
           "node": "classify",
           "output": {
             "needs_tool": true
-          }
+          },
+          "router": "1c70adc951ca5e16"
         },
         {
           "code": "fc1aebf0ee71fe9a",
@@ -53,7 +54,8 @@
           "node": "classify",
           "output": {
             "needs_tool": false
-          }
+          },
+          "router": "1c70adc951ca5e16"
         },
         {
           "code": "396faa94ac0873f3",

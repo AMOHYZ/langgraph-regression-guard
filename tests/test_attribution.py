@@ -11,6 +11,7 @@ from lgcov.attribution import (
     NEEDS_LIVE,
     NO_FINGERPRINT,
     NOT_PROBED,
+    ROUTING,
     UNEXPLAINED,
     NodeLabels,
     Probe,
@@ -258,3 +259,41 @@ def test_a_run_that_drifted_with_no_changed_node_still_has_an_inconclusive_node(
     labels = NodeLabels(root=("b",), propagated=("c", "w"), inconclusive={})
     out = explain_runs(labels, first_drifts=["b", "w", None], drifted=[["b", "c"], ["w"], []])
     assert (out.root, out.propagated, out.inconclusive) == (("b",), ("c",), {"w": UNEXPLAINED})
+
+
+# T175: a router is in no node's fingerprint, so it has one of its own, kept on its source node.
+RAN = [["classify", "lookup", "respond"]]
+UNEXPLAINED_RUN = NodeLabels(root=(), propagated=("lookup", "respond"), inconclusive={})
+
+
+def _routed(labels: NodeLabels, base: str | None, head: str | None) -> NodeLabels:
+    routers = ({"classify": base, "lookup": None}, {"classify": head, "lookup": None})
+    return explain_runs(labels, ["lookup"], [["lookup", "respond"]], routers, RAN)
+
+
+def test_a_changed_router_makes_its_source_node_root() -> None:
+    out = _routed(UNEXPLAINED_RUN, "r1", "r2")
+    assert (out.root, out.routing, out.inconclusive) == (("classify",), {"classify": 1}, {})
+    assert out.propagated == ("lookup", "respond")
+    assert ROUTING.format("classify") == "routing change at classify"
+
+
+@pytest.mark.parametrize(("base", "head"), [("r1", "r1"), (None, "r2"), ("r1", None)])
+def test_an_unchanged_or_unrecorded_router_leaves_the_run_unexplained(
+    base: str | None, head: str | None
+) -> None:
+    # None: a recording from before routers were fingerprinted, or a router with no fingerprint.
+    out = _routed(UNEXPLAINED_RUN, base, head)
+    assert (out.root, out.routing, out.inconclusive) == ((), {}, {"lookup": UNEXPLAINED})
+
+
+def test_a_router_root_joins_the_roots_changed_nodes_gave() -> None:
+    labels = NodeLabels(root=("respond",), propagated=("lookup",), inconclusive={})
+    out = _routed(labels, "r1", "r2")
+    assert (out.root, out.routing) == (("classify", "respond"), {"classify": 1})
+
+
+def test_a_changed_router_is_not_root_of_drift_that_came_before_it() -> None:
+    routers = ({"respond": "r1"}, {"respond": "r2"})
+    out = explain_runs(UNEXPLAINED_RUN, ["lookup"], [["lookup"]], routers, RAN)
+    assert (out.root, out.inconclusive) == ((), {"lookup": UNEXPLAINED})
