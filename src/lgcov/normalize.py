@@ -41,6 +41,17 @@ _PROVIDER_ID = re.compile(
     rf"\b(?:{'|'.join(map(re.escape, PROVIDER_ID_PREFIXES))})"
     r"(?=[a-z]*[0-9A-Z])[A-Za-z0-9]{20,}(?![A-Za-z0-9_])"
 )
+# T213b: keys whose value is a blob a provider makes anew on every call: OpenAI's encrypted
+# reasoning, Anthropic's thinking signature, Gemini's thought signature. Anything else, such as a
+# redacted_thinking block's `data`: `ignore_paths`.
+VOLATILE_TEXT_KEYS = ("encrypted_content", "signature", "thought_signature", "thoughtSignature")
+_BLOB_CHARS = r"[A-Za-z0-9+/=_-]{40,}"  # base64 or base64url, unbroken: no name or sentence
+_BLOB = re.compile(_BLOB_CHARS)
+# In text, as when a message list is turned into a string: the quoted key, a colon, and the blob
+# as the whole quoted value. The quotes may be escaped, as for JSON inside a string.
+_BLOB_IN_TEXT = re.compile(
+    rf"""((\\*["'])(?:{"|".join(VOLATILE_TEXT_KEYS)})\2\s*:\s*(\\*["'])){_BLOB_CHARS}(?=\3)"""
+)
 # Exact names only: business ids such as order_id can be a real regression.
 VOLATILE_ID_KEYS = frozenset(
     {"id", "message_id", "request_id", "run_id", "span_id", "tool_call_id", "trace_id"}
@@ -52,7 +63,7 @@ _TOOL_CALLS = frozenset({"tool_calls", "invalid_tool_calls"})
 @dataclass(frozen=True)
 class _Mask:
     ids: frozenset[str]  # keys whose values are hidden, at any depth
-    in_text: bool  # hide UUIDs, date-times and provider ids inside strings
+    in_text: bool  # hide UUIDs, date-times, provider ids and volatile blobs (T213b)
     read: Callable[[BaseMessage], dict[str, object]]  # what counts in a message
 
 
@@ -97,9 +108,15 @@ def _norm(
             volatile = (
                 not keep_ids and k in ids and isinstance(v, str | int) and not isinstance(v, bool)
             )
-            if volatile:
+            # T213b: in a block the sibling `type` is in sight, so a plain `signature` is hidden
+            # only in a thinking block: a webhook's or a commit's signature is real data.
+            named = k in VOLATILE_TEXT_KEYS and (
+                k != "signature" or value.get("type") == "thinking"
+            )
+            blob = named and mask.in_text and isinstance(v, str) and _BLOB.fullmatch(v)
+            if volatile or (blob and not keep_ids):
                 counts[0] += 1
-                out[k] = "<id>"
+                out[k] = "<id>" if volatile else "<blob>"
             else:
                 keep = keep_ids or (in_message and k in _TOOL_CALLS)
                 # An `id` in additional_kwargs is a provider's, like the message's own.
@@ -114,8 +131,9 @@ def _norm(
     if isinstance(value, str) and mask.in_text:
         no_uuid, n_uuid = _UUID.subn("<uuid>", value)
         no_ts, n_ts = _TIMESTAMP.subn("<timestamp>", no_uuid)
-        masked, n_id = _PROVIDER_ID.subn("<id>", no_ts)
-        counts[0] += n_uuid + n_ts + n_id
+        no_id, n_id = _PROVIDER_ID.subn("<id>", no_ts)
+        masked, n_blob = _BLOB_IN_TEXT.subn(r"\1<blob>", no_id)
+        counts[0] += n_uuid + n_ts + n_id + n_blob
         return masked
     return value
 
