@@ -2,21 +2,24 @@
 
 lgcov replays your agent, re-runs only the nodes a PR can reach, and shows which node's
 output changed first and which changed after it. Each KPI in your taxonomy gets a paired
-test, and a judge can block only once it has earned that against human labels. The one
-thing here no other tool found does is that node cause, root against propagated, from
-replay, and it is unvalidated: on real agents it is a [pilot](benchmark.md#real-prs) on one
+test, and a judge can block only once it has earned that against human labels. Both of those
+are table stakes: several small tools ship them. What was not found in the tools read is
+that node cause, root against propagated, from replay, and it is unvalidated: on real agents it is a [pilot](benchmark.md#real-prs) on one
 PR with 6 labelled roots, and a [base-against-base run](benchmark.md#aa-noise-floor) gave
 the same root, so it has no noise threshold yet. First report in 2 minutes (L1 only,
 measured 27 Oct 2026). Other tools as of 31 Oct 2026; Kitaru and LangSmith as of 5 Nov;
-the tools added on 11 Nov as of that day.
+the tools added on 11 Nov and on 13 Nov as of those days.
 
 ## What's still open
 
 Every piece of lgcov exists somewhere else on its own. The claim left is the bundle: (1) a
 sticky PR comment, (2) a three-way statistical verdict, (3) node cause that holds up under
 replay and (4) the judge's TPR and TNR inside the gate. [evalgate-ci](#related-tools) ships
-(1), a paired test against a baseline that can read inconclusive, and (4) in one Action;
-[statgate](#related-tools) ships (1) and (2). No tool found ships (3), so the claim rests
+(1), a paired test against a baseline with exit 0 or 1, and (4) in one Action;
+[statgate](#related-tools) ships (1) and (2). (2) and (4) are table stakes, not
+differentiators: agentgate, agentstats, evalproof, statgate and assay-evals each ship a verdict
+that can say it cannot decide, and evalgate-ci, evalproof, agentstats, assay-evals and holdline
+check the judge against human labels. No tool found ships (3), so the claim rests
 entirely on (3), which is unvalidated (see (a) below).
 
 What could close it: teams already assemble (1), (2) and (4) from public recipes, such as
@@ -74,11 +77,15 @@ lower bounds of the 95% intervals of its TPR and TNR against human labels both c
 prints how many labels it needs to pin κ within ±0.10.
 *Status: built (T063, [PR #32](https://github.com/AMOHYZ/langgraph-regression-guard/pull/32)):
 `lgcov calibrate` gives TPR and TNR with Wilson intervals, and a judge's band follows their
-lower bounds.* Partial, not a wedge of its own: graphtrace reports Cohen's kappa per
+lower bounds.* Table stakes, not a differentiator: graphtrace reports Cohen's kappa per
 criterion and judgegate gives kappa with confidence intervals, evalgate-ci reports TPR and
 TNR and blocks a run when the judge's kappa drops, and llm-evalgate corrects pass rates
 with the judge's sensitivity and specificity. Reenact sets a criterion blocking or advisory
-from its raw agreement with human labels. None found gates on interval bounds of TPR and TNR.
+from its raw agreement with human labels. Of the tools added on 13 Nov, evalproof reports a
+confusion matrix, TPR, FPR and kappa on a gold set and corrects the pass rate, agentstats
+exits 1 on a broken judge, assay-evals calibrates on a golden set, and holdline has
+`calibrate --strict` against human labels. In the tools read up to 11 Nov, none found gates on
+interval bounds of TPR and TNR; the 13 Nov sources don't say either way for the newer four.
 
 **(e) Calibration that lives in the repo.** A reviewer's override is a label versioned in
 git, and the next PR re-estimates the judge's κ, TPR and TNR from those labels and moves
@@ -86,10 +93,33 @@ the judge between advising and blocking. No hosted service.
 *Status: built (T102, [PR #33](https://github.com/AMOHYZ/langgraph-regression-guard/pull/33)):
 `lgcov review override` saves a label, the judge's band moves on the next PR, and saved
 cases re-judge the judge.* Partial: Kitaru also calibrates evaluators from human judgments,
-on a Kitaru server you run, and the tools under (c) calibrate from labels too.
+on a Kitaru server you run, and the tools under (c) calibrate from labels too. The loop as
+one piece (override a verdict, save the label and a regression case, move the band, all
+through git) was not found as a whole in the tools read on 13 Nov 2026. Pieces of it were:
+assay-evals keeps its golden labels in the repo (`golden.jsonl`), as graphtrace, holdline and
+evalgate-ci keep label or anchor files, but none of those overrides a PR's verdict.
+LangSmith, Braintrust, Confident AI and LangWatch were not checked.
 
-**Paired statistics, done properly.** This is standard technique, not a differentiator:
-statgate, evalgate-ci and AgentAssay cover a paired or three-valued gate.
+**(f) A PR can't grade itself.** On a pull request the gate's policy (`lgcov.yaml`, the
+taxonomy, the bands and saved cases) is read from the base commit, never from the PR. Each
+result is bound to the base and head SHAs and the policy's hashes, and `lgcov verify-result`
+checks that before a comment is posted. With the Action's two-job mode, the PR's code runs in
+a job with no secrets and the verdict is decided in another.
+*Status: built ([PR #83](https://github.com/AMOHYZ/langgraph-regression-guard/pull/83) to
+[PR #85](https://github.com/AMOHYZ/langgraph-regression-guard/pull/85)); what it does not
+cover is listed in [trust-boundary.md](trust-boundary.md#what-is-not-covered).* The default
+is still one job, where the PR's code runs beside the verdict, and a forged `candidate.json`
+or an edited workflow file can still mislead it. The combination was not found as a whole in
+the tools read on 13 Nov 2026. assay-evals is the closest: its checks come from the base
+branch by default, and it compares tests the PR removed or loosened against the base, in one
+job and with no result bound to the two SHAs. evalproof verifies a committed run file against
+its suite. LangSmith, Braintrust, Confident AI and LangWatch were not checked.
+
+**Paired statistics, done properly.** This is table stakes, not a differentiator:
+statgate, agentgate, agentstats, evalproof and assay-evals each ship a paired test with a
+verdict that can say it cannot decide, evalgate-ci and holdline ship a paired test with pass
+or fail only, and AgentAssay gives three-valued verdicts. evalproof applies Holm across its
+gated metrics too.
 Each case's base and PR scores are paired: an exact McNemar test for binary KPIs, a
 sign-flip test otherwise. Δ gets a BCa bootstrap CI, a non-inferiority margin δ decides
 SHIP, BLOCK or INCONCLUSIVE, and an INCONCLUSIVE KPI shows the cases it needs to detect Δ
@@ -140,9 +170,12 @@ column against lgcov: [bake-off.md](bake-off.md).
   sequential early stopping, as a GitHub Action with a sticky comment, for any eval
   results. lgcov's `stats.py` follows its design.
 - [Kitaru](https://github.com/zenml-io/kitaru) (ZenML, 0.27.6, Apache-2.0): records or
-  imports production runs as sessions and replays them against a change, with tool calls
-  answered from the recording. Human judgments calibrate evaluators, and experiments on
-  frozen cohorts gate in CI. Self-hosted server, with a paid
+  imports production runs as sessions and replays them against a change. A replay
+  [re-runs the agent from the top](https://github.com/zenml-io/kitaru/blob/1501489c92b4fe34dc644e0b653684f66aff13c5/docs/book/concepts/replay.md):
+  tool results alone are served from the recording, model calls run live, and its
+  [LangGraph adapter](https://github.com/zenml-io/kitaru/blob/1501489c92b4fe34dc644e0b653684f66aff13c5/docs/book/adapters/langgraph.md)
+  lists node-boundary replay as deferred (docs read 13 Nov 2026). Human judgments calibrate
+  evaluators, and experiments on frozen cohorts gate in CI by exit code. Self-hosted server, with a paid
   [hosted AI engineer](https://www.zenml.io/product/kitaru) on top.
 - [LangSmith](https://docs.langchain.com/langsmith/pytest) (LangChain): a pytest plugin
   whose `LANGSMITH_TEST_CACHE` replays recorded HTTP calls, a
@@ -165,6 +198,34 @@ column against lgcov: [bake-off.md](bake-off.md).
   posts a sticky PR comment, reads a Wilson lower bound on the pass rate, compares with a
   baseline by McNemar's test, and checks the judge's kappa, TPR and TNR against human
   anchors. Exit 0 or 1. One of several unrelated projects named EvalGate.
+
+Added on 13 Nov 2026, from a research memo's reads of that day (not re-read here, not run):
+
+- [agentgate](https://github.com/athish-shubhan/agentgate) (Go; last commit 8 Nov 2026): a
+  paired, task-clustered t-test with pass^k, O'Brien-Fleming sequential bounds and Cohen's
+  kappa. PASS / FAIL / INCONCLUSIVE, and its Action's PR comment names the tasks that got
+  worse. Not the PyPI package of the same name.
+- [evalproof](https://pypi.org/project/evalproof/0.5.1/) (0.5.1, 13 Nov 2026): a judge
+  confusion matrix, TPR, FPR and kappa on a gold set, a corrected pass rate, exact McNemar,
+  a paired bootstrap and Holm across gated metrics. Exit 1 is a regression and exit 4 is
+  "cannot gate".
+- [agentstats](https://pypi.org/project/agentstats/0.14.0/) (0.14.0, 6 Nov 2026): Wilson
+  intervals, exact McNemar, cluster-robust errors, pass@k and pass^k, and judge agreement
+  (Cohen, Fleiss, Krippendorff). Pass, fail, inconclusive or unhealthy; an under-powered run
+  is inconclusive, with an estimate of the runs that would settle it. `init-ci` writes PR,
+  nightly and release workflows.
+- [holdline](https://pypi.org/project/holdline/0.2.2/) (0.2.2, 3 Nov 2026): a GitHub Action
+  that fails the PR on trajectory checks, pass^k, exact McNemar and a paired bootstrap, with
+  `calibrate --strict` against human labels. It documents PASS or FAIL only.
+- [assay-evals](https://github.com/tap222/assay-evals) (last commit 30 Oct 2026): exact
+  McNemar against the base, golden-set judge calibration with `assay rejudge`, and an Action
+  that posts a PR comment. Exit 0, 1, or 6 for inconclusive. Its checks come from the base
+  branch by default; see (f) above.
+- [Plumloom Autoeval](https://github.com/AlchemyInCode/plumloom-autoeval-oss) (CLI 0.1.7,
+  6 Nov 2026): a hosted evaluation service with a CLI, where several judges score each answer
+  and one report comment is posted per suite. Its README names no paired test and publishes
+  no statistical method. Its INCONCLUSIVE means no threshold is configured, not an
+  under-powered test, and exits 1 like FAIL.
 
 ## What lgcov does not do (yet)
 
@@ -217,6 +278,11 @@ On 31 Oct 2026, from each tool's README and, where named, its source:
   competitor report of 6 Nov, checked against those pages. judgegate is from that report,
   not re-read. Culprit and maida-assert, named in the claim matrix, weren't found and are
   left out.
+- 13 Nov 2026: agentgate, evalproof, agentstats, holdline, assay-evals and Plumloom, and the
+  "not found as a whole" findings under (e) and (f), come from a research brief and a
+  follow-up memo of that day, which read each tool's README, docs or PyPI page. Only what those sources mark as read on the page is used. They did not check
+  LangSmith, Braintrust, Confident AI or LangWatch for (e) and (f). Kitaru's replay and
+  LangGraph adapter docs were re-read here at commit `1501489`.
 - lgcov's synthetic and #163 numbers: [benchmark.md](benchmark.md) at this commit.
 - Not compared live: Reenact records LangChain chat-model and tool calls through
   callbacks, and the demo agent's fake LLM is plain Python, so Reenact would record
