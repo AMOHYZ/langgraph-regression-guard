@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `lgcov.calibration.case_folds` and `cross_fit`: seeded folds split by case, so a case with several label rows is never on both sides of a fold. Nothing uses them for the bands yet; `tune_threshold` still splits by row.
 - A PR that edits a conditional edge's router now gets the routing node as root: `root (routing change at classify)` in the comment's replay table, beside any root from a changed node. Before, the first drifted node was inconclusive. **Re-record your baseline to get this:** a cassette recorded earlier holds no router fingerprint and keeps the old label. Existing cassettes load and replay unchanged. `lgcov bench` and the synthetic benchmark score router edits the same way.
 - **Limit:** lgcov doesn't check that the route changed, so a router edit that routes as before is named root of drift a node edit caused. A router inside a subgraph isn't fingerprinted.
 - The gate table's N* for a blocking KPI is now sized at α/K_gate, Holm's strictest step, so it no longer understates the cases a BLOCK needs when more than one KPI blocks. With one blocking KPI, and for advisory KPIs, it is unchanged. MDE stays at α.
