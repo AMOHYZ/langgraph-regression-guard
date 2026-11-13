@@ -42,6 +42,10 @@ class Step:
     # node, "arg": payload} for a Send. None for any other return, and in cassettes recorded
     # before this was kept.
     goto: list[Any] | None = None
+    # T175: fingerprint of the routers on this node's conditional edges and their path maps,
+    # which `code` doesn't cover. Nothing records one yet (step 1 of 2: read before write), so
+    # it is None unless a newer lgcov recorded the cassette.
+    router: str | None = None
 
 
 @dataclass
@@ -51,11 +55,12 @@ class Cassette:
 
     def body(self) -> dict[str, Any]:
         """What's saved. A step with no goto has no such key, so a cassette with no Command in
-        it saves byte for byte as it did before goto was kept."""
+        it saves byte for byte as it did before goto was kept. T175: the same for router."""
         body = asdict(self)
         for step in body["steps"]:
-            if step["goto"] is None:
-                del step["goto"]
+            for key in ("goto", "router"):
+                if step[key] is None:
+                    del step[key]
         return body
 
     def to_json(self) -> str:

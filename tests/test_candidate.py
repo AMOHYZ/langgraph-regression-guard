@@ -24,7 +24,7 @@ RUN = CandidateRun(
     lint_lines=("warning `a`: why. Fix: how.",),
     fresh=(
         FreshRun(
-            (Step("a", {"x": 1}, {"q": "hi"}, "code"), Step("b", None, goto=ROUTED)),
+            (Step("a", {"x": 1}, {"q": "hi"}, "code", router="r1"), Step("b", None, goto=ROUTED)),
             (Call("a", "served"), Call("b", "live", 0.5, rebind_skipped=True, raised=True)),
             Halt("b", "budget"),
         ),
@@ -132,6 +132,7 @@ REFUSED = {
     "a step with an extra field": _with_run(steps=[{"node": "a", "output": 1, "drifted": False}]),
     "a code that isn't text": _with_run(steps=[{"node": "a", "output": 1, "code": 1}]),
     "a goto that isn't a list": _with_run(steps=[{"node": "a", "output": 1, "goto": "b"}]),
+    "a router that isn't text": _with_run(steps=[{"node": "a", "output": 1, "router": 1}]),
     "calls that aren't a list": _with_run(calls={}),
     "a call of another kind": _with_run(calls=[{**GOOD_CALL, "how": "passed"}]),
     "a call with text for seconds": _with_run(calls=[{**GOOD_CALL, "seconds": "1"}]),

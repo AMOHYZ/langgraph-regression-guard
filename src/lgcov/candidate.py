@@ -110,8 +110,9 @@ def _step(raw: object) -> Step:
     if not isinstance(raw, dict) or not isinstance(raw.get("node"), str):
         raise ValueError("a step has no node")
     step = Step(**raw)
-    if not isinstance(step.code, str | None) or not isinstance(step.goto, list | None):
-        raise ValueError(f"step {step.node!r} has an invalid code or goto")
+    texts = isinstance(step.code, str | None) and isinstance(step.router, str | None)
+    if not texts or not isinstance(step.goto, list | None):
+        raise ValueError(f"step {step.node!r} has an invalid code, goto or router")
     return step
 
 
