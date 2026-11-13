@@ -1,6 +1,6 @@
 # Attribution benchmark
 
-**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. Re-scored offline with the multi-root rule (T162), the pilot's saved runs name no root: see [Multi-root re-score](#multi-root-re-score-t162). On 72 synthetic cases from 24 edits, lgcov's root misses 14 of 31 regressed cases (5 of 12 by edit) and flags all 24 harmless ones, as do both node-naming baselines.
+**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. Re-scored offline with the multi-root rule (T162), the pilot's saved runs name no root: see [Multi-root re-score](#multi-root-re-score-t162). On 72 synthetic cases from 24 edits, lgcov's root misses 3 of 31 regressed cases (1 of 12 by edit) and flags all 24 harmless ones, as do both node-naming baselines.
 
 ## What was measured
 
