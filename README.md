@@ -441,6 +441,9 @@ fresh replay, and gates each KPI with a paired test (below):
 lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
 ```
 
+- `--from-runs DIR` judges the `base.json` and `head.json` that `lgcov bench --keep-runs`
+  saved in DIR. Nothing is replayed and no graph is loaded, so the agent makes no call; a
+  model judge still makes its own.
 - pass@k: at least one of a case's k samples passes; pass^k: all of them do. A case is
   flaky when it's pass@k but not pass^k. Flakiness is shown as ⚠️ and never changes a
   verdict; an infra error doesn't count toward k and is never a fail.
@@ -506,6 +509,8 @@ How it's computed:
   α = 0.05 and power 0.8, detecting a true 0.05 drop takes 765 (`required_n`, which sizes
   N*); showing the PR is at most 0.05 worse, when it isn't worse at all, takes 704
   (`ni_required_n`). 765 is a detection number, not a non-inferiority or harm one.
+- A blocking KPI's N* is sized at α/K_gate, the strictest level Holm tests at, so with 3
+  blocking KPIs the 765 becomes 1021. An advisory KPI's N* and every MDE stay at α.
 - ρ, the correlation of base and PR outcomes per case, comes from their 2×2 table of
   pass/fail (`rho_from_2x2`), never from two baseline runs. It is undefined when a side
   never varies, and then it drops out of σ_d.

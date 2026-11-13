@@ -1762,7 +1762,19 @@ def _l2_gate(
                 case_roots=roots,
             )
         )
-    return gate_kpis(stats, advisory, gate.alpha, flagged=flagged)
+    return gate_kpis(stats, advisory, gate.alpha, flagged=flagged, power=gate.power)
+
+
+def _saved_pair(folder: Path) -> tuple[list[Cassette], list[tuple[list[Drift], list[Step]]]]:
+    """T195: the base runs `lgcov bench --keep-runs` saved in <folder>, and head's as their
+    replays, compared as `lgcov bench --from-runs` compares them."""
+    runs, fresh = (_load_runs(str(folder / name)) for name in _KEPT)
+    if len(runs) != len(fresh):
+        raise ValueError(f"{len(runs)} runs on base, {len(fresh)} on head")
+    return runs, [
+        (list(compared_run(r, f.steps, (), None).drifts), list(f.steps))
+        for r, f in zip(runs, fresh, strict=True)
+    ]
 
 
 def _judge_cmd(argv: list[str]) -> int:
@@ -1777,9 +1789,20 @@ def _judge_cmd(argv: list[str]) -> int:
     ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
     ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
     ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
+    ap.add_argument(
+        "--from-runs",
+        metavar="DIR",
+        help="judge the base.json and head.json `lgcov bench --keep-runs` saved in DIR; "
+        "nothing is replayed, so the agent makes no call",
+    )
     args = ap.parse_args(argv)
+    if args.from_runs and args.live:
+        print("lgcov judge: --from-runs runs nothing: no --live", file=sys.stderr)
+        return EXIT_ERROR
     start = _commits(None)  # T114: the candidate; its base is the cassette in that checkout
-    overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
+    # T195: saved runs need no graph, so a stand-in entrypoint validates the config
+    entrypoint = args.graph or ("from-runs.py:unused" if args.from_runs else None)
+    overrides = {"graph_entrypoint": entrypoint, "cassette_dir": args.cassette_dir}
     try:
         cfg = load_config(args.config, overrides)
     except (OSError, ValueError) as exc:
@@ -1811,23 +1834,29 @@ def _judge_cmd(argv: list[str]) -> int:
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid config or bands.json: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    try:
-        # Exception: importing user graph code can raise anything.
-        graph = _load_graph(cfg.graph_entrypoint)
-    except Exception as exc:
-        return _harness_error("lgcov judge", "cannot load graph", exc)
-    try:
-        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        return _harness_error("lgcov judge", "cannot read baseline", exc)
-    try:
-        done = [_replay_under(cfg, graph, r, serve=not args.live) for r in runs]
-        replays = [(list(r.drifts), list(r.steps)) for r in done]
-        _say_replay_notes(done)
-    except NodeError as exc:
-        return _node_failure("lgcov judge", exc)
-    except Exception as exc:  # replay itself: no node or router raised it
-        return _harness_error("lgcov judge", "replay failed outside node code", exc)
+    if args.from_runs:
+        try:
+            runs, replays = _saved_pair(Path(args.from_runs))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return _harness_error("lgcov judge", "cannot read saved runs", exc)
+    else:
+        try:
+            # Exception: importing user graph code can raise anything.
+            graph = _load_graph(cfg.graph_entrypoint)
+        except Exception as exc:
+            return _harness_error("lgcov judge", "cannot load graph", exc)
+        try:
+            runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return _harness_error("lgcov judge", "cannot read baseline", exc)
+        try:
+            done = [_replay_under(cfg, graph, r, serve=not args.live) for r in runs]
+            replays = [(list(r.drifts), list(r.steps)) for r in done]
+            _say_replay_notes(done)
+        except NodeError as exc:
+            return _node_failure("lgcov judge", exc)
+        except Exception as exc:  # replay itself: no node or router raised it
+            return _harness_error("lgcov judge", "replay failed outside node code", exc)
     plan = _l2_plan(specs, runs, replays)
     saved = _saved_cases(Path(args.bands).parent / "cases", specs)
     total, model = _l2_calls(plan, k)

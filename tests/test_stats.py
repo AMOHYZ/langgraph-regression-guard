@@ -148,6 +148,13 @@ def test_detection_n_is_the_cases_to_find_a_true_five_point_drop() -> None:
     assert [required_n(0.80, 0.75, rho) for rho in RHOS] == [1091, 765, 548, 330]
 
 
+def test_a_block_among_three_kpis_needs_more_cases_than_one_alone() -> None:
+    # T215: Holm's strictest step tests at alpha / K_gate, so N* is sized there
+    alone = required_n(0.80, 0.75, 0.3)
+    among_three = required_n(0.80, 0.75, 0.3, alpha=0.05 / 3)
+    assert (alone, among_three) == (765, 1021)
+
+
 def test_non_inferiority_n_is_the_cases_to_rule_out_a_drop_of_the_margin() -> None:
     assert [ni_required_n(0.80, 0.80, rho, 0.05) for rho in RHOS] == [1005, 704, 503, 302]
     assert ni_required_n(0.80, 0.75, 0.3, 0.05) is None  # the expected drop is the margin

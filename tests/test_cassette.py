@@ -19,6 +19,7 @@ from lgcov.attribution import NEEDS_LIVE, Probe
 from lgcov.cassette import (
     Cassette,
     ProbeStep,
+    Step,
     judge_probes,
     probe_nodes,
     probe_steps,
@@ -596,3 +597,17 @@ def test_a_cassette_with_no_router_saves_and_loads_as_it_did_before_routers_were
     assert Cassette.from_json(old.to_json()) == old
     routed = record(_branching(0), {"x": 1})
     assert Cassette.from_json(routed.to_json()) == routed
+
+
+# T175: read before write (step 1 of 2), so the base's lgcov can read what a PR's lgcov records.
+def test_a_step_s_router_fingerprint_survives_the_round_trip() -> None:
+    routed = Cassette({"x": 1}, [Step("a", {"x": 1}, router="r1"), Step("b", {"x": 1})])
+    assert routed.body()["steps"] == [
+        {"node": "a", "output": {"x": 1}, "input": None, "code": None, "router": "r1"},
+        {"node": "b", "output": {"x": 1}, "input": None, "code": None},
+    ]
+    assert Cassette.from_json(routed.to_json()) == routed
+
+
+def test_a_cassette_with_no_router_saves_as_it_did_before_routers_were_kept() -> None:
+    assert "router" not in record(linear(), {"x": 1}).to_json()

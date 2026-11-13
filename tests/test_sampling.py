@@ -16,6 +16,7 @@ from lgcov.sampling import (
     render_gate_table,
     usage_tokens,
 )
+from lgcov.stats import required_n
 
 KPI_ = KPI.binary("grounded", "every claim is supported", "Is every claim supported?")
 POLITE = KPI.binary("polite", "the answer is polite", "Is the answer polite?")
@@ -287,6 +288,24 @@ def test_k_gate_one_blocks_where_k_gate_three_cannot() -> None:
     assert (k_gate(three), three[0].decision) == (3, "INCONCLUSIVE")
     assert three[0].p_adjusted == pytest.approx(0.09375)
     assert "Holm across the K_gate = 3 blocking KPIs" in "\n".join(render_gate_table(three))
+
+
+def test_n_star_for_a_blocking_kpi_is_sized_at_alpha_over_k_gate() -> None:
+    base, new = _drop(10, 1)  # T215: the 10-case drop above, N* = 71 on its own
+    same = _cases(*[["pass"]] * 10)
+    kpis = [kpi_stats(KPI_, 1, base, new), *(kpi_stats(k, 1, same, same) for k in (POLITE, TONE))]
+    one, three = gate_kpis(kpis, advisory={"polite", "tone"}), gate_kpis(kpis)
+    assert one[0].paired is not None and three[0].paired is not None
+    assert one[0].paired.required_n == 71  # K_gate = 1: alpha as it is
+    assert three[0].paired.required_n == required_n(1.0, 0.9, 0.0, alpha=0.05 / 3)
+    assert (three[0].paired.required_n or 0) > 71
+    assert three[0].paired.mde == one[0].paired.mde  # the MDE column stays at alpha
+    table = "\n".join(render_gate_table(three))
+    assert f"(N*={three[0].paired.required_n})" in table
+    assert "α/K_gate for a blocking KPI" in table and "MDE stays at α" in table
+    # gating again with the other KPIs advisory sizes it at alpha again
+    again = gate_kpis(three, advisory={"polite", "tone"})[0].paired
+    assert again is not None and again.required_n == 71
 
 
 def test_a_blocking_kpi_with_no_paired_case_still_counts_in_k_gate() -> None:

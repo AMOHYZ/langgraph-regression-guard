@@ -14,6 +14,10 @@ or slice group never goes further than its KPIs' own verdicts.
     no paired case still counts, as p = 1.
   - Flag-band KPIs count: they must SHIP, and their BLOCK goes to a human.
   - The PR comment prints K_gate under the gate table, with this paragraph.
+- **N\* for a blocking KPI is sized at α/K_gate.** That is Holm's strictest step, the level
+  the smallest p-value is tested at, so N* never understates the cases a BLOCK needs and can
+  overstate them when other KPIs also reject. An advisory KPI's N* is sized at α. MDE stays
+  at α for every KPI.
 - **INCONCLUSIVE makes no claim.** It exits 0 and a human decides, unless
   `gate.inconclusive_blocks: true` (or `--fail-on-inconclusive`) makes it exit 1. The PR
   comment shows it as "No decision: needs_human"; [verdict-actions.md](verdict-actions.md)

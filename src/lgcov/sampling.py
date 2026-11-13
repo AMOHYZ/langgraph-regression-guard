@@ -25,6 +25,7 @@ from lgcov.stats import (
     PairedResult,
     benjamini_hochberg,
     benjamini_hochberg_adjusted,
+    cases_needed,
     decide,
     holm,
     holm_adjusted,
@@ -226,7 +227,7 @@ def kpi_stats(
         worse=tuple(worse),
         score_range=max(kpi.score_map.values()) - min(kpi.score_map.values()),
     )
-    return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence)[0]
+    return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence, power=power)[0]
 
 
 def k_gate(stats: Sequence[KpiStats]) -> int:
@@ -241,11 +242,14 @@ def gate_kpis(
     alpha: float = 0.05,
     min_confidence: float = 0.7,
     flagged: Collection[str] = (),
+    power: float = 0.8,
 ) -> list[KpiStats]:
     """T091: Holm across the blocking KPIs (T114: all K_gate of them, paired or not),
     Benjamini-Hochberg across the advisory ones, then each KPI's decision against its margin.
     An advisory KPI never fails the gate, and (T063) a flagged one, a judge whose band is
-    flag, stops it at most as INCONCLUSIVE."""
+    flag, stops it at most as INCONCLUSIVE. T215: a blocking KPI's N* is sized at
+    alpha / K_gate, Holm's strictest step, so it never understates the cases a BLOCK needs;
+    an advisory one's stays at alpha."""
 
     def band(kpi: str) -> str:
         return "advisory" if kpi in advisory else "flag" if kpi in flagged else "blocking"
@@ -262,7 +266,9 @@ def gate_kpis(
         for (i, r), p_adj, significant in zip(  # not strict: it stops before the padding
             family, adjust(pvalues), reject(pvalues, alpha), strict=False
         ):
-            s = gated[i]
+            sized = alpha / max(k_gate(gated), 1) if blocking else alpha
+            r = replace(r, required_n=cases_needed(r.sd, r.delta, sized, power))
+            s = replace(gated[i], paired=r)
             decision = decide(
                 r.delta,
                 r.ci,
@@ -379,6 +385,9 @@ def render_gate_table(
         "smallest drop this n detects. N*: "
         f"cases needed to detect Δ (α {alpha:g}, power {power:g}); with no discordant pair, "
         "the identical cases that rule out a drop of δ.",
+        "N* is sized at α/K_gate for a blocking KPI, Holm's strictest step, so it can ask for "
+        "more cases than a BLOCK ends up needing; an advisory KPI's is sized at α. MDE stays "
+        "at α.",
         "",
         _guarantee(k_gate(stats), alpha),
     ]
