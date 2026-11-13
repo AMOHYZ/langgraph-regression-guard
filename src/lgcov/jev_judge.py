@@ -96,8 +96,11 @@ class JevJudge:
                     "(check JEV_API_URL / JEV_API_KEY)"
                 )
             return self._to_verdict(response.json())
+        # T195: reports print this, so a transport error gives its type, never its text,
+        # which can carry JEV_API_URL
+        why = str(last) if isinstance(last, JudgeInfraError) else type(last).__name__
         raise JudgeInfraError(
-            f"jev: kpi '{self.kpi.name}' unreachable after {ATTEMPTS} attempts: {last}"
+            f"jev: kpi '{self.kpi.name}' unreachable after {ATTEMPTS} attempts: {why}"
         )
 
     def _to_verdict(self, body: dict[str, Any]) -> Verdict:

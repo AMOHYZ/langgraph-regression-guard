@@ -196,6 +196,16 @@ def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JEV_API_KEY", "test-key")
 
 
+def test_an_unreachable_endpoint_is_named_without_its_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    # T195: the reason is printed in reports now, and JEV_API_URL is kept as a secret
+    _set_env(monkeypatch)
+    boom = httpx.ConnectError("no route to https://jev.example/v1/score")
+    with pytest.raises(JudgeInfraError) as raised:
+        JevJudge(GOOD_BAD, client=_FakeClient([boom, boom])).judge({}, {})
+    assert "jev.example" not in str(raised.value)
+    assert "unreachable after 2 attempts" in str(raised.value)
+
+
 def test_missing_env_vars_raise_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("JEV_API_URL", raising=False)
     monkeypatch.delenv("JEV_API_KEY", raising=False)

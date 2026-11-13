@@ -162,6 +162,24 @@ def test_judge_timeouts_and_connection_errors_are_infra_samples() -> None:
     assert stats.outcome == "infra_error"
 
 
+def test_an_infra_sample_keeps_why_the_judge_did_not_run() -> None:
+    # T195: a judge's own message is kept; another error's text isn't, only its type
+    samples = judge_samples(Scripted(["infra", "timeout", "pass"]), {}, {}, 3)
+    assert [s.error for s in samples] == ["jev: 503", "TimeoutError", ""]
+
+
+def test_the_kpi_table_says_why_judgments_did_not_run_most_common_first() -> None:
+    from lgcov.sampling import render_kpi_table
+
+    base, new = _cases(["infra", "infra", "pass"]), _cases(["infra", "timeout", "pass"])
+    stats = kpi_stats(KPI_, 3, base=base, new=new)
+    assert stats.infra_reasons == (("jev: 503", 3), ("TimeoutError", 1))
+    lines = render_kpi_table([stats])
+    at = lines.index("Infra errors, not counted toward k: grounded 4")
+    assert lines[at + 1 :] == ["- grounded: 3 × jev: 503; 1 × TimeoutError"]
+    assert kpi_stats(KPI_, 1, _cases(["pass"]), _cases(["pass"])).infra_reasons == ()
+
+
 def test_a_kpi_with_mostly_infra_samples_shows_judge_unreliable() -> None:
     from lgcov.sampling import render_kpi_table
 

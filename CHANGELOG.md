@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- When a judge call doesn't run, `lgcov judge` and `lgcov ci` now say why under "Infra errors", such as `jev: HTTP 401`, with a count per reason. A transport error is named by its type only, so `JEV_API_URL` never appears.
 - `jev_timeout_s` in `lgcov.yaml` sets how long a Jev judge waits for each attempt (default 10 seconds, as before), so a long case such as a whole report doesn't time out.
 - `lgcov.calibration.case_folds` and `cross_fit`: seeded folds split by case, so a case with several label rows is never on both sides of a fold. Nothing uses them for the bands yet; `tune_threshold` still splits by row.
 - A PR that edits a conditional edge's router now gets the routing node as root: `root (routing change at classify)` in the comment's replay table, beside any root from a changed node. Before, the first drifted node was inconclusive. **Re-record your baseline to get this:** a cassette recorded earlier holds no router fingerprint and keeps the old label. Existing cassettes load and replay unchanged. `lgcov bench` and the synthetic benchmark score router edits the same way.
