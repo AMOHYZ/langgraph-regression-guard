@@ -3017,15 +3017,44 @@ def test_bench_without_synthetic_keeps_its_default_results_file(
     assert (tmp_path / "docs" / "benchmark-results.json").exists()
 
 
+def test_bench_names_a_changed_router_s_source_node_root(tmp_path: Path) -> None:
+    # T175: scored from saved runs, as `lgcov bench --from-runs` does. No node's code changed.
+    from lgcov.attribution import parse_benchmark
+    from lgcov.cassette import Cassette, Step, runs_to_json
+    from lgcov.cli import _bench_saved
+
+    raw = {"graph": "g.py:graph", "base_patch": "b.py", "head_patch": "h.py", "cases": [{}]}
+    expected = {"root": ["classify"], "propagated": ["respond"]}
+    bench = parse_benchmark("routed", {**raw, "expected": expected}, tmp_path)
+    (tmp_path / "routed").mkdir()
+    for name, router, answer in (("base.json", "r1", "a"), ("head.json", "r2", "b")):
+        steps = [Step("classify", 1, {}, "c1", router=router), Step("respond", answer, {}, "c2")]
+        (tmp_path / "routed" / name).write_text(runs_to_json([Cassette({}, steps)]), "utf-8")
+    row = _bench_saved(bench, tmp_path)
+    assert (row.error, row.inconclusive) == ("", ())
+    assert (row.found_root, row.found_propagated) == (("classify",), ("respond",))
+
+
 def _real_suite() -> list[Case]:
     return [case for agent in AGENTS for case in every_case(agent)]
 
 
-def test_on_the_real_suite_the_first_divergence_ties_lgcovs_root_on_every_score() -> None:
-    cases = _real_suite()
+def test_on_single_node_edits_the_first_divergence_ties_lgcovs_root_on_every_score() -> None:
+    cases = [c for c in _real_suite() if c.truth.edit_kind == "node_body"]
     assert rates([votes_for(_lgcov_root, c) for c in cases]) == rates(
         [votes_for(METHODS["first divergence"], c) for c in cases]
     )
+
+
+def test_on_a_conditional_edge_edit_lgcovs_root_is_the_edge_s_source_node() -> None:
+    # T175: `classify` for a router edit, `plan` for a dropped Send. Its output didn't change, so
+    # the first divergence is a node downstream and never the edited one.
+    edge = [c for c in _real_suite() if c.truth.edit_kind == "conditional_edge"]
+    changed = [c for c in edge if c.truth.activated]
+    assert {c.operator for c in changed} == {"router_flip", "send_fan_out_drop"}
+    assert all(_lgcov_root(c) == {c.truth.edited_node} for c in changed)
+    assert not any(c.truth.edited_node in METHODS["first divergence"](c) for c in changed)
+    assert all(_lgcov_root(c) == set() for c in edge if not c.truth.activated)
 
 
 def test_on_the_real_suite_the_diff_matches_or_beats_lgcov_on_recall_and_coverage() -> None:

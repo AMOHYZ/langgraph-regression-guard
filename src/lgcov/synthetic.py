@@ -29,7 +29,7 @@ class Mutation:
 @dataclass(frozen=True)
 class GroundTruth:
     edited_node: str
-    edit_kind: EditKind  # a conditional edge isn't in its node's output; T175 rules on scoring it
+    edit_kind: EditKind  # a conditional edge isn't in its node's output: scored on its source node
     activated: bool  # the PR run went differently; this assumes a deterministic agent
     regressed: bool  # the PR run fails the outcome check, which base passes
 

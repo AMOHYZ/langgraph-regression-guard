@@ -2319,7 +2319,12 @@ def _labelled(
     base, head = ({s.node: s.code for r in side for s in r.steps} for side in sides)
     firsts = [_run_root(r, d) for r, d in zip(sides[0], drifts, strict=True)]
     nodes = [{x.node for x in d} for d in drifts]
-    labels = explain_runs(classify(counts.keys(), (base, head), probes), firsts, nodes)
+    # T175: a changed router makes its source node root, as in `lgcov ci`.
+    base_routers = {s.node: s.router for r in sides[0] for s in r.steps}
+    routers = (base_routers, {s.node: s.router for r in sides[1] for s in r.steps})
+    ran = [[s.node for s in r.steps] for r in sides[0]]
+    by_node = classify(counts.keys(), (base, head), probes)
+    labels = explain_runs(by_node, firsts, nodes, routers, ran)
     return Result(
         b.name,
         labels.root,
@@ -2344,10 +2349,17 @@ def _synthetic_agents() -> Sequence[Agent]:
 
 
 def _lgcov_root(case: Case) -> set[str]:
-    """What `lgcov ci` would call root: replay the edited agent, serving what it left alone."""
+    """What `lgcov ci` would call root: replay the edited agent, serving what it left alone. The
+    first node to drift, or T175: the source node of a router the edit changed."""
     done = replay_run(case.graph, case.base, (), serve=True)
     root = _run_root(case.base, list(done.drifts))
-    return {root} if root else set()
+    routers = (
+        {s.node: s.router for s in case.base.steps},
+        {s.node: s.router for s in done.steps},
+    )
+    ran, drifted = [s.node for s in case.base.steps], {d.node for d in done.drifts}
+    routing = explain_runs(NodeLabels((), (), {}), [root], [drifted], routers, [ran]).routing
+    return set(routing) or ({root} if root else set())
 
 
 def _bench_synthetic(out: Path, results: Path) -> int:

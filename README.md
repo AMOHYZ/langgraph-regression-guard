@@ -264,6 +264,10 @@ jobs:
   input the cassette recorded for it. `root-drift` also fails on the nodes lgcov can't clear: a
   changed node that reaches for the network (a model call can't be told from noise yet) and drift
   no changed node explains. So `root-drift` and `any-drift` still fail nearly the same PRs.
+- A node whose conditional edge's router changed is root as well, when a node drifts after it:
+  its row reads `root (routing change at classify)`. A baseline recorded before this holds no
+  router fingerprint, so re-record it to get this label. Until then the first drifted node is
+  inconclusive, as before. lgcov doesn't check that the route itself changed.
 - The report includes coverage of the replayed runs, e.g. `Coverage: Nodes 75% (−25% vs
   main) · Edges 60% (±0)`, and lists nodes main reached that this PR doesn't. Pushes to
   `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
