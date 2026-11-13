@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import random
 import socket
 import time
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from fixtures.graphs import S, _noop, fan_out_send, linear
+from fixtures.graphs import S, _noop, conditional, fan_out_send, linear
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
@@ -20,6 +21,9 @@ from lgcov.cassette import (
     Cassette,
     ProbeStep,
     Step,
+    _plain,
+    _router_prints,
+    changed_nodes,
     judge_probes,
     judge_repeats,
     probe_nodes,
@@ -27,7 +31,10 @@ from lgcov.cassette import (
     record,
     repeat_steps,
     replay,
+    replay_run,
+    unservable,
 )
+from lgcov.fingerprint import fingerprint
 
 
 def _b_changed(state: S) -> S:
@@ -664,3 +671,63 @@ def test_judge_repeats_leaves_out_a_node_whose_repeat_raised() -> None:
     ran = repeat_steps(_one_node(breaks), [base], ["n"], 1)
     assert ran == (ProbeStep(0, 0, "n", raised="raised RuntimeError on base's input"),)
     assert judge_repeats([base], ran, ran) == {}
+
+
+# T212: a recording made before fingerprints ignored comments holds the old scheme's values. A
+# node whose old-scheme fingerprint still matches is byte-identical, so it is unchanged.
+def _recorded_before_t212(graph: CompiledStateGraph[S], run: Cassette) -> Cassette:
+    routers = _router_prints(graph, raw=True)
+    steps = [
+        dataclasses.replace(
+            s,
+            code=fingerprint(_plain(graph.nodes[s.node].bound), raw=True),
+            router=routers.get(s.node),
+        )
+        for s in run.steps
+    ]
+    return Cassette(run.inputs, steps)
+
+
+def test_a_new_recording_holds_the_new_scheme_s_fingerprints() -> None:
+    run = record(linear(), {"x": 1})
+    assert {s.code for s in run.steps} == {fingerprint(_noop)} != {fingerprint(_noop, raw=True)}
+
+
+def test_a_recording_from_before_t212_still_serves_its_unchanged_nodes() -> None:
+    graph = conditional()
+    old = _recorded_before_t212(graph, record(graph, {"x": 1, "route": "tools"}))
+    assert old != record(graph, {"x": 1, "route": "tools"})  # the two schemes do differ
+    assert unservable(graph, [old]) == 0 and changed_nodes(graph, [old]) == set()
+    done = replay_run(graph, old, (), serve=True)
+    assert {c.how for c in done.calls} == {"served"} and not done.drifts
+    # What ran is written in the recording's scheme, so later comparisons are plain equality.
+    assert [(s.code, s.router) for s in done.steps] == [(s.code, s.router) for s in old.steps]
+
+
+def test_a_recording_from_before_t212_still_sees_an_edit() -> None:
+    old = _recorded_before_t212(linear(), record(linear(), {"x": 1}))
+    assert changed_nodes(_linear_changed(), [old]) == {"b"}
+    done = replay_run(_linear_changed(), old, (), serve=True)
+    assert [c.how for c in done.calls] == ["served", "live"]
+    assert done.steps[1].code == fingerprint(_b_changed)  # a changed node: the new scheme
+
+
+def test_a_recording_made_to_compare_with_an_older_one_uses_its_fingerprints() -> None:
+    # As the synthetic suite does: the PR side is recorded afresh and compared with a baseline.
+    old = _recorded_before_t212(linear(), record(linear(), {"x": 1}))
+    assert record(linear(), {"x": 1}, like=[old]) == old
+    edited = record(_linear_changed(), {"x": 1}, like=[old])
+    assert [s.code for s in edited.steps] == [old.steps[0].code, fingerprint(_b_changed)]
+
+
+def test_a_node_only_another_run_recorded_gets_that_recording_s_scheme() -> None:
+    # The PR's run reaches a node this run's recording never did: it must not read as changed.
+    graph = conditional()
+    tools, answer = (
+        _recorded_before_t212(graph, record(graph, {"x": 1, "route": r})) for r in ("tools", "")
+    )
+    codes = {s.node: s.code for s in (*tools.steps, *answer.steps)}
+    rerouted = Cassette({"x": 1, "route": "tools"}, answer.steps)  # as if the route had flipped
+    for serve in (True, False):
+        done = replay_run(graph, rerouted, (), serve=serve, baseline=[tools, answer])
+        assert {s.node: s.code for s in done.steps}.items() <= codes.items()

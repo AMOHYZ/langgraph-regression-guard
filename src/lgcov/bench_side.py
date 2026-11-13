@@ -74,7 +74,7 @@ def side_main(argv: list[str]) -> int:
             recorded = runs_from_json(Path(paths[0]).read_text(encoding="utf-8"))
             try:
                 for run in recorded:
-                    done.append(replay_run(graph, run, (), serve=not live))
+                    done.append(replay_run(graph, run, (), serve=not live, baseline=recorded))
                     fresh.append(Cassette(run.inputs, list(done[-1].steps)))
                     _save(Path(paths[2]), fresh)
             finally:

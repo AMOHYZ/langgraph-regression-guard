@@ -7,7 +7,9 @@ virtualenv, the user site-packages or any folder named site-packages) counts by 
 name; any other object by its class, its repr with memory addresses removed, and the project
 functions it holds. Source is read from the file, never from a cache a same-size edit can
 leave stale, and nothing depends on paths, line numbers or the process, so a cassette replays
-from another checkout. A class counts as its first use would leave it. A pydantic class
+from another checkout. T212: a function's source counts as its syntax tree (`_tree_text`), so
+comments, whitespace, line wrapping, quote style and redundant brackets don't. A class counts as
+its first use would leave it. A pydantic class
 counts by its members and core schema, without the schema's class ids.
 
 Not seen: what a node reads at run time (files, environment, network), library upgrades,
@@ -17,6 +19,7 @@ readable source, gets no fingerprint (None) and always runs live. Code installed
 node run live: an upgrade counts as an edit, and a cassette recorded elsewhere doesn't match.
 """
 
+import ast
 import contextlib
 import functools
 import hashlib
@@ -63,12 +66,25 @@ _CLASS_NOISE = frozenset(
 _SCHEMA_ID = re.compile(r":\d+")
 
 
-def fingerprint(fn: object) -> str | None:
-    """Short hash of a node function's code and what it uses; None when it can't vouch."""
+# T212: a function that reads its own or another's source text can act on a comment.
+_READS_SOURCE = frozenset({"getsource", "getsourcelines"})
+
+
+class _Raw(dict[int, object]):
+    """The `seen` of a walk in the scheme from before T212: each function as its raw lines.
+    Recordings made before T212 hold these values, so they are still computed, to match them.
+    It goes once a cassette says which scheme its fingerprints use: a field for the schema change
+    that brings subgraphs and router routes (T193, T221; docs/router-route-design.md)."""
+
+
+def fingerprint(fn: object, raw: bool = False) -> str | None:
+    """Short hash of a node function's code and what it uses; None when it can't vouch.
+    `raw`: in the scheme from before T212, where comments and formatting count."""
     if not isinstance(fn, FunctionType):
         return None
     try:
-        return hashlib.sha256(_function(fn, {id(fn): fn}).encode()).hexdigest()[:16]
+        seen: dict[int, object] = _Raw({id(fn): fn}) if raw else {id(fn): fn}
+        return hashlib.sha256(_function(fn, seen).encode()).hexdigest()[:16]
     except Exception:  # unreadable source, a repr that raises, ...: never serve on a guess
         return None
 
@@ -124,11 +140,66 @@ def _finish_building(cls: type) -> None:
         inspect.get_annotations(cls)
 
 
+@functools.lru_cache(maxsize=32)
+def _parsed(text: str) -> ast.Module:
+    # Keyed by the text itself, read fresh each time: an edit is never served a stale tree.
+    return ast.parse(text)
+
+
+def _tree_text(node: object, in_fstring: bool = False) -> str:
+    """T212: a syntax tree as text that is the same on every Python lgcov supports, which
+    `ast.dump` and `ast.unparse` aren't. Positions aren't in it, so neither are comments or layout.
+
+    A constant is its type and value, always: 0, 0.0, False, None and "" all differ. Only a
+    structural field is left out when it is None, empty or the integer 0, which is how a field
+    that a newer Python adds (3.15: an import's `is_lazy`) reads on code that doesn't use it. No
+    field holds two of those with different meanings. `return` and `return None` still differ:
+    the second has a Constant where the first has nothing."""
+    if isinstance(node, ast.Constant):  # `kind` is the u of u"text": spelling, not meaning
+        return f"(Constant {type(node.value).__name__}:{node.value!r})"
+    if isinstance(node, ast.AST):
+        parts = [type(node).__name__]
+        for name in node._fields:
+            value = getattr(node, name, None)
+            if value is None or value == [] or (type(value) is int and value == 0):
+                continue
+            parts.append(f"{name}={_tree_text(value, isinstance(node, ast.JoinedStr))}")
+        return "(" + " ".join(parts) + ")"
+    if isinstance(node, list):
+        # 3.12 leaves an empty piece of text in a nested format spec; later Pythons don't. In an
+        # f-string an empty piece adds nothing.
+        empty = [isinstance(v, ast.Constant) and v.value == "" for v in node]
+        kept = [v for v, drop in zip(node, empty, strict=True) if not (in_fstring and drop)]
+        return "[" + ",".join(_tree_text(v) for v in kept) + "]"
+    return f"{type(node).__name__}:{node!r}"
+
+
+def _source(code: CodeType, text: str, names: frozenset[str], raw: bool) -> str:
+    """What a function's own source counts as: its syntax tree, or its raw lines in the old
+    scheme, for a function that reads source, and for one the tree doesn't single out (two
+    lambdas on a line)."""
+    lines = text.splitlines()
+    end = max((p[1] for c in _codes(code) for p in c.co_positions() if p[1]), default=0)
+    old = "\n".join(lines[code.co_firstlineno - 1 : end])
+    if raw or names & _READS_SOURCE:
+        return old
+    kinds = (ast.Lambda,) if code.co_name == "<lambda>" else (ast.FunctionDef, ast.AsyncFunctionDef)
+    found = [
+        n
+        for n in ast.walk(_parsed(text))
+        if isinstance(n, kinds)
+        and min([n.lineno, *(d.lineno for d in getattr(n, "decorator_list", []))])
+        == code.co_firstlineno
+        and getattr(n, "name", "<lambda>") == code.co_name
+    ]
+    return _tree_text(found[0]) if len(found) == 1 else old
+
+
 def _function(fn: FunctionType, seen: dict[int, object]) -> str:
     code = fn.__code__
-    lines = Path(code.co_filename).read_text(encoding="utf-8").splitlines()
-    end = max((p[1] for c in _codes(code) for p in c.co_positions() if p[1]), default=0)
     names = frozenset(n for c in _codes(code) for n in c.co_names)
+    text = Path(code.co_filename).read_text(encoding="utf-8")
+    source = _source(code, text, names, isinstance(seen, _Raw))
     # Python 3.14: a class's annotation function closes over the class's own __dict__ as
     # __classdict__. That's the class again, without _describe's filtering of its members.
     cells = tuple(
@@ -142,7 +213,7 @@ def _function(fn: FunctionType, seen: dict[int, object]) -> str:
         for n in sorted(names)
         if n in fn.__globals__  # attribute names and builtins are not module globals
     ]
-    return "\n".join([*lines[code.co_firstlineno - 1 : end], values, *used])
+    return "\n".join([source, values, *used])
 
 
 def _describe(value: object, names: frozenset[str], seen: dict[int, object]) -> str:

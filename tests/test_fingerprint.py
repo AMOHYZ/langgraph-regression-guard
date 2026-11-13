@@ -623,3 +623,118 @@ def test_code_it_cannot_vouch_for_has_no_fingerprint(tmp_path: Path) -> None:
     graph = _module(tmp_path / "g.py", src + "def node(state):\n    return INNER.invoke(state)\n")
     assert fingerprint(graph.node) is None  # a compiled graph it invokes is not followed
     assert fingerprint(len) is None  # not a Python function
+
+
+# T212: a function is hashed from its syntax tree, so comments and formatting don't count.
+PINNED = """\
+import inspect
+
+LIMIT = 3
+
+
+def helper(x):
+    return x + LIMIT
+
+
+def node(state):
+    total = helper(state["x"])
+    return {"x": [total, "a"], "ok": total > 0}
+
+
+async def anode(state, *, flag=False):
+    return {"x": [i async for i in state["x"] if i] if flag else None}
+
+
+def looks(state):
+    return {"x": f"{state['x']!r:>{LIMIT}}", "n": len(inspect.signature(looks).parameters)}
+"""
+REFORMATTED = """\
+import inspect
+
+LIMIT = 3  # how many
+
+
+def helper(x):
+    # a comment
+    return (x + LIMIT)
+
+
+def node(state):  # the node
+
+    total = helper(
+        state['x'],
+    )
+    return {
+        'x': [total, 'a'],  # quotes, wrapping and a trailing comma
+        "ok": (total > 0),
+    }
+"""
+
+
+def test_comments_and_formatting_keep_a_fingerprint(tmp_path: Path) -> None:
+    one = _module(tmp_path / "one.py", PINNED)
+    two = _module(tmp_path / "two.py", REFORMATTED)
+    assert fingerprint(one.node) == fingerprint(two.node) is not None
+    edited = _module(tmp_path / "three.py", REFORMATTED.replace("x + LIMIT", "x - LIMIT"))
+    assert fingerprint(edited.node) != fingerprint(one.node)  # a helper's body still counts
+
+
+def test_fingerprints_are_the_same_on_every_python(tmp_path: Path) -> None:
+    # Literal values: CI runs the newest Python, and a cassette recorded on one must serve on
+    # another. A new Python that changes one fails here before it reaches a baseline.
+    pinned = _module(tmp_path / "pinned.py", PINNED)
+    found = {n: fingerprint(getattr(pinned, n)) for n in ("node", "anode", "looks")}
+    assert found == {
+        "node": "1f1ec544dc4c45c4",
+        "anode": "091cc1cf1e0158aa",
+        "looks": "d5efa1d120d3940e",
+    }
+    # The old scheme, from the function's raw lines: what recordings made before T212 hold.
+    old = {n: fingerprint(getattr(pinned, n), raw=True) for n in ("node", "anode", "looks")}
+    assert old == {
+        "node": "4516f98c0333a7a2",
+        "anode": "a027a7447681e77d",
+        "looks": "22ac0d31f3ed7b22",
+    }
+
+
+# Two functions that differ must never share a fingerprint: that would serve a stale output.
+_DISTINCT = [
+    ["return 0", "return None", "return False", "return ''", "return 0.0", "return", "pass"],
+    ["x = 0", "x = None", "x = False", "x = []", "x = ()", "x = {}", "x = ''"],
+    ["return 1", "return 1.0", "return True", "return '1'", "return 1j", "return -1"],
+    ["return b'a'", "return 'a'", "return ...", "return a"],
+    ["yield", "yield None", "yield 0", "yield from ()"],
+    ["return []", "return ()", "return [[]]", "return [()]", "return {}", "return {**a}"],
+    ["return f()", "return f(*[])", "return f(**{})", "return f(None)", "return f(0)"],
+    [
+        "try:\n        f()\n    except:\n        pass",
+        "try:\n        f()\n    except Exception:\n        pass",
+        "try:\n        f()\n    except Exception as e:\n        pass",
+        "try:\n        f()\n    finally:\n        pass",
+    ],
+    ["import a", "from . import a", "from .. import a", "from a import a", "import a as a"],
+    ["x: int = 0", "x: int", "(x): int = 0", "x = 0", "x += 0"],
+    ["return f'{a}'", "return f'{a!r}'", "return f'{a!s}'", "return f'{a:0}'", "return a"],
+    ["return [i for i in a]", "return [i async for i in a]", "return (i for i in a)"],
+    ["return a[0]", "return a[:0]", "return a[0:]", "return a[::0]", "return a[:]", "return a"],
+    ["return lambda: 0", "return lambda: None", "return lambda a=0: a", "return lambda a: a"],
+]
+
+
+@pytest.mark.parametrize("bodies", _DISTINCT)
+def test_bodies_that_differ_get_different_fingerprints(tmp_path: Path, bodies: list[str]) -> None:
+    found = []
+    for i, body in enumerate(bodies):
+        kind = "async def" if "async for" in body else "def"
+        source = f"{kind} node(state, a=1, f=len):\n    {body}\n"
+        found.append(fingerprint(_module(tmp_path / f"m{i}.py", source).node))
+    assert None not in found and len(set(found)) == len(bodies)
+
+
+def test_a_function_that_reads_source_is_hashed_from_its_raw_lines(tmp_path: Path) -> None:
+    source = "import inspect\n\n\ndef node(state):\n    return inspect.getsource(node)\n"
+    one = _module(tmp_path / "one.py", source)
+    two = _module(tmp_path / "two.py", source.replace("return", "# a comment\n    return"))
+    assert fingerprint(one.node) != fingerprint(two.node)
+    assert fingerprint(one.node) == fingerprint(one.node, raw=True)

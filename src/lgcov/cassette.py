@@ -7,7 +7,7 @@ import socket
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Container, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Container, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import copy_context
 from copy import copy, deepcopy
@@ -101,15 +101,19 @@ class Drift:
     actual: list[str] | None
 
 
-def record(graph: Any, inputs: dict[str, Any]) -> Cassette:
+def record(graph: Any, inputs: dict[str, Any], like: Sequence[Cassette] = ()) -> Cassette:
     """Run the graph once and save every node's output, in order, with the input and
     code fingerprint `replay` needs to serve it later.
 
     graph is typed Any on purpose: LangGraph's generic types change between
     versions and would break mypy --strict on upgrades. A Protocol can replace
     it later.
+
+    T212: `like` is an older baseline this recording will be compared with. A node whose code is
+    what `like` recorded gets `like`'s fingerprint for it, whichever scheme that used (`_codes`).
     """
-    return Cassette(inputs=inputs, steps=_run(graph, inputs, (), ())[0])
+    steps = _run(graph, inputs, (), (), like=[s for r in like for s in r.steps])[0]
+    return Cassette(inputs=inputs, steps=steps)
 
 
 def _key(value: Any, ignore_paths: Sequence[str], mask_volatile: bool) -> str | None:
@@ -229,26 +233,43 @@ def _plain(bound: Any) -> FunctionType | None:
     return fn if isinstance(fn, FunctionType) and not inspect.isasyncgenfunction(fn) else None
 
 
-def _codes(graph: Any) -> dict[str, str | None]:
-    # The plain-function nodes replay wraps, by name; subgraphs and the like run untouched.
+def _codes(graph: Any, recorded: Collection[Step] = ()) -> dict[str, str | None]:
+    """The plain-function nodes replay wraps, by name; subgraphs and the like run untouched.
+
+    T212: `recorded` may hold fingerprints in the scheme from before T212, where a function was
+    its raw lines. A node whose old-scheme fingerprint is the recorded one is byte-identical to
+    what was recorded, so it is unchanged, and its fingerprint here is that value: everything
+    downstream compares fingerprints as plain text."""
+    held = {(s.node, s.code) for s in recorded}
     codes: dict[str, str | None] = {}
     for name, spec in getattr(graph, "nodes", {}).items():
         fn = _plain(spec.bound)
         if name != START and fn is not None:
             codes[name] = fingerprint(fn)
+            if (name, codes[name]) not in held and (name, old := fingerprint(fn, raw=True)) in held:
+                codes[name] = old
     return codes
 
 
-def _router_prints(graph: Any) -> dict[str, str | None]:
+def _router_prints(
+    graph: Any, raw: bool = False, recorded: Collection[Step] = ()
+) -> dict[str, str | None]:
     """T175: by source node, one fingerprint for its conditional edges: each router's code and
-    path map. None when a router has no fingerprint. A subgraph's own routers aren't here (T193)."""
+    path map. None when a router has no fingerprint. A subgraph's own routers aren't here (T193).
+    T212: `raw` and `recorded` as for a node's fingerprint (`_codes`)."""
+    if recorded:
+        new, old = _router_prints(graph), _router_prints(graph, raw=True)
+        held = {(s.node, s.router) for s in recorded}
+        return {
+            n: old[n] if (n, p) not in held and (n, old[n]) in held else p for n, p in new.items()
+        }
     prints: dict[str, str | None] = {}
     branches = getattr(getattr(graph, "builder", None), "branches", None) or {}
     for source, per_source in branches.items():
         parts: list[str] = []
         for name, branch in sorted(per_source.items()):
             path = getattr(branch, "path", None)
-            code = fingerprint(getattr(path, "func", None) or getattr(path, "afunc", None))
+            code = fingerprint(getattr(path, "func", None) or getattr(path, "afunc", None), raw)
             ends = sorted(map(repr, (getattr(branch, "ends", None) or {}).items()))
             parts += [] if code is None else [f"{name}:{code}:{ends}"]
         whole = len(parts) == len(per_source)
@@ -435,7 +456,7 @@ def _returned(step: Step) -> Any:
 def unservable(graph: Any, cassettes: Sequence[Cassette]) -> int:
     """T089: recorded steps replay can't serve, since their node's code changed or they
     have no input or fingerprint: the live calls a budget projects from."""
-    codes = _codes(graph)
+    codes = _codes(graph, [s for c in cassettes for s in c.steps])
     return sum(
         1
         for c in cassettes
@@ -452,6 +473,7 @@ def _run(
     on_divergence: OnDivergence = "flag",
     budget: Budget | None = None,
     mask_volatile: bool = False,
+    like: Sequence[Step] = (),
 ) -> tuple[list[Step], list[Call], Halt | None]:
     """Stream the graph once; return its steps with each node's input and fingerprint, how
     each call ran, and where the run stopped, if it stopped early.
@@ -470,6 +492,9 @@ def _run(
 
     T152: a node's retry policy and error handler work as they do outside lgcov. Every attempt
     that raised is in the `Call`s, and a retry can't get a call past a halt.
+
+    T212: `like` is the recording this run will be compared with, all of its runs: it decides
+    which scheme each node's fingerprint is written in (`_codes`), served or not.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     unused = [(s, _key(s.input, ignore_paths, mask_volatile)) for s in served if s.code is not None]
@@ -565,7 +590,7 @@ def _run(
 
     original = getattr(graph, "nodes", {})  # an object with only .stream() runs as it is
     nodes = dict(original)
-    for name, code in _codes(graph).items():
+    for name, code in _codes(graph, [*served, *like]).items():
         nodes[name] = _around(
             original[name], partial(wrap, name, code=code), partial(awrap, name, code=code)
         )
@@ -573,7 +598,7 @@ def _run(
         if isinstance(getattr(spec, "bound", None), Pregel):
             nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{name}.", failed)})
     routers = _routers(graph)
-    routed = _router_prints(graph)
+    routed = _router_prints(graph, recorded=[*served, *like])
     runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
 
@@ -695,11 +720,15 @@ def replay_run(
     on_divergence: OnDivergence = "flag",
     budget: Budget | None = None,
     mask_volatile: bool = False,
+    baseline: Sequence[Cassette] = (),
 ) -> Replay:
-    """`replay_steps` under a divergence policy and a budget, with how each call ran."""
+    """`replay_steps` under a divergence policy and a budget, with how each call ran. T212:
+    `baseline` is every run recorded with `cassette`: a node this run didn't record, but another
+    did, gets its fingerprint in that recording's scheme."""
     served = cassette.steps if serve else ()
+    like = [s for r in (cassette, *baseline) for s in r.steps]
     fresh, calls, halt = _run(
-        graph, cassette.inputs, served, ignore_paths, on_divergence, budget, mask_volatile
+        graph, cassette.inputs, served, ignore_paths, on_divergence, budget, mask_volatile, like
     )
     return compared_run(cassette, fresh, calls, halt, ignore_paths)
 
@@ -804,7 +833,7 @@ def _probe_step(
 
 def changed_nodes(graph: Any, runs: Sequence[Cassette]) -> set[str]:
     """T162: the recorded nodes whose fingerprint differs in this graph."""
-    codes = _codes(graph)
+    codes = _codes(graph, [s for r in runs for s in r.steps])
     return {
         s.node
         for r in runs
