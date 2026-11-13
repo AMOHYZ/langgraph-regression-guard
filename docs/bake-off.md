@@ -109,8 +109,8 @@ Against these seven, as documented. Each has a limit next to it.
   newer tools: [evalgate-ci][eg-ci] reports TPR and TNR and blocks on the judge's kappa, and
   [llm-evalgate][le-pypi] uses sensitivity and specificity, though neither gates on their
   interval bounds. This is built, but it hasn't
-  judged a real PR: `lgcov judge` replays the graph, so judging costs live calls, and the Jev
-  judge is untested at this payload size.
+  judged a real PR: `lgcov judge --from-runs` can judge saved runs without replaying the graph,
+  but no real PR's runs have been judged yet, and the Jev judge is untested at this payload size.
 - **A paired test per KPI in the PR result.** None of the seven documents a test or interval
   between base and PR. Braintrust and Kitaru show deltas, and promptfoo's Wilson interval is
   within one version. This isn't unique to lgcov: [statgate and AgentAssay](why-us.md#related-tools)

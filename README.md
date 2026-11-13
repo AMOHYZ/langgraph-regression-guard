@@ -441,6 +441,9 @@ fresh replay, and gates each KPI with a paired test (below):
 lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
 ```
 
+- `--from-runs DIR` judges the `base.json` and `head.json` that `lgcov bench --keep-runs`
+  saved in DIR. Nothing is replayed and no graph is loaded, so the agent makes no call; a
+  model judge still makes its own.
 - pass@k: at least one of a case's k samples passes; pass^k: all of them do. A case is
   flaky when it's pass@k but not pass^k. Flakiness is shown as ⚠️ and never changes a
   verdict; an infra error doesn't count toward k and is never a fail.
