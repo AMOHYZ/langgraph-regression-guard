@@ -1,6 +1,6 @@
 """T085: mask volatile fields in node I/O before L1 compares it.
 
-UUIDs and ISO date-times inside strings, values of well-known id keys, and any
+UUIDs, ISO date-times and provider ids (T213) inside strings, values of well-known id keys, and any
 `ignore_paths` (JSON pointers into a node's input/output; `*` matches one key or
 index) are replaced with placeholders. T165: a LangChain message is compared by what it
 says (`lgcov.messages.fields`). T177: `key_view` is what a recorded step's input is matched on;
@@ -22,6 +22,25 @@ _UUID = re.compile(r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b")
 _TIMESTAMP = re.compile(
     r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"
 )
+# T213: how providers start a response, item, call or request id. Such an id can be written into
+# text, as when a message list is turned into a string. Anything else: `ignore_paths`.
+PROVIDER_ID_PREFIXES = (
+    "rs_",
+    "fc_",
+    "resp_",
+    "call_",
+    "chatcmpl-",
+    "msg_",
+    "toolu_",
+    "tooluse_",
+    "req_",
+)
+# A prefix at a word's start, then 20 or more letters and digits with a digit or a capital among
+# them, and no underscore in it or after it: so a snake_case name or a long word is kept.
+_PROVIDER_ID = re.compile(
+    rf"\b(?:{'|'.join(map(re.escape, PROVIDER_ID_PREFIXES))})"
+    r"(?=[a-z]*[0-9A-Z])[A-Za-z0-9]{20,}(?![A-Za-z0-9_])"
+)
 # Exact names only: business ids such as order_id can be a real regression.
 VOLATILE_ID_KEYS = frozenset(
     {"id", "message_id", "request_id", "run_id", "span_id", "tool_call_id", "trace_id"}
@@ -33,7 +52,7 @@ _TOOL_CALLS = frozenset({"tool_calls", "invalid_tool_calls"})
 @dataclass(frozen=True)
 class _Mask:
     ids: frozenset[str]  # keys whose values are hidden, at any depth
-    in_text: bool  # hide UUIDs and date-times inside strings
+    in_text: bool  # hide UUIDs, date-times and provider ids inside strings
     read: Callable[[BaseMessage], dict[str, object]]  # what counts in a message
 
 
@@ -94,8 +113,9 @@ def _norm(
         ]
     if isinstance(value, str) and mask.in_text:
         no_uuid, n_uuid = _UUID.subn("<uuid>", value)
-        masked, n_ts = _TIMESTAMP.subn("<timestamp>", no_uuid)
-        counts[0] += n_uuid + n_ts
+        no_ts, n_ts = _TIMESTAMP.subn("<timestamp>", no_uuid)
+        masked, n_id = _PROVIDER_ID.subn("<id>", no_ts)
+        counts[0] += n_uuid + n_ts + n_id
         return masked
     return value
 
