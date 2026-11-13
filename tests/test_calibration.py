@@ -1,6 +1,7 @@
 """T063: judge calibration against human labels (pure)."""
 
 import json
+from collections.abc import Sequence
 
 import pytest
 
@@ -9,7 +10,9 @@ from lgcov.calibration import (
     band,
     band_changes,
     bands_document,
+    case_folds,
     cohen_kappa,
+    cross_fit,
     fit_temperature,
     judge_bands,
     judge_stats,
@@ -238,3 +241,63 @@ def test_one_label_per_case_and_reviewer_the_latest_kept() -> None:
     ]
     rows, skipped = rows_from_overrides(lines, {})
     assert [r.human_label for r in rows] == ["fail", "fail"] and skipped == 0
+
+
+# T125: cross-fitting. Folds are split by case, so a case with several rows (one per judge,
+# question form or sample) never has a row on both sides of a fold.
+def _repeated(cases: int, rows_per_case: int) -> list[str]:
+    return [f"case-{c:02d}" for c in range(cases) for _ in range(rows_per_case)]
+
+
+def test_no_case_is_on_both_sides_of_a_fold_and_every_row_is_validated_once() -> None:
+    ids = _repeated(cases=23, rows_per_case=3)
+    folds = case_folds(ids, folds=5, seed=7)
+    assert len(folds) == 5
+    for fold in folds:
+        fit, validate = {ids[i] for i in fold.fit}, {ids[i] for i in fold.validate}
+        assert fit and validate and not fit & validate
+        assert sorted((*fold.fit, *fold.validate)) == list(range(len(ids)))
+    assert sorted(i for fold in folds for i in fold.validate) == list(range(len(ids)))
+
+
+def test_folds_are_seeded_and_follow_the_case_not_the_row_order() -> None:
+    ids = _repeated(cases=12, rows_per_case=2)
+    assert case_folds(ids, seed=1) == case_folds(ids, seed=1)
+    assert case_folds(ids, seed=1) != case_folds(ids, seed=2)
+
+    def held_out(order: list[str]) -> set[frozenset[str]]:
+        return {frozenset(order[i] for i in fold.validate) for fold in case_folds(order, seed=1)}
+
+    assert held_out(ids) == held_out(ids[::-1])  # the same cases are held out together
+
+
+def test_folds_need_at_least_two_and_a_case_for_each() -> None:
+    with pytest.raises(ValueError, match="4 cases"):
+        case_folds(_repeated(cases=4, rows_per_case=5), folds=5)
+    with pytest.raises(ValueError, match="at least 2 folds"):
+        case_folds(_repeated(cases=4, rows_per_case=1), folds=1)
+
+
+def test_a_label_never_reaches_both_the_fit_and_the_estimate_of_its_fold() -> None:
+    ids = _repeated(cases=30, rows_per_case=2)
+    scored = [(0.6 + 0.3 * (i % 3 == 0), i % 4 != 0) for i in range(len(ids))]
+    seen: list[tuple[list[int], list[int]]] = []
+
+    def fit(rows: Sequence[tuple[int, tuple[float, bool]]]) -> float:
+        seen.append(([i for i, _ in rows], []))
+        return fit_temperature([s for _, s in rows])
+
+    def estimate(t: float, rows: Sequence[tuple[int, tuple[float, bool]]]) -> float:
+        seen[-1][1].extend(i for i, _ in rows)
+        return t
+
+    numbered = list(enumerate(scored))
+    before = cross_fit(ids, numbered, fit, estimate, seed=3)
+    for fitted, validated in seen:  # no row, and no case, on both sides
+        assert not {ids[i] for i in fitted} & {ids[i] for i in validated}
+    # change one label: only the folds that fit on it may move, never the one validating it
+    row = case_folds(ids, seed=3)[0].validate[0]
+    numbered[row] = (row, (scored[row][0], not scored[row][1]))
+    after = cross_fit(ids, numbered, fit, estimate, seed=3)
+    assert after[0] == before[0]
+    assert all(a != b for a, b in zip(after[1:], before[1:], strict=True))
