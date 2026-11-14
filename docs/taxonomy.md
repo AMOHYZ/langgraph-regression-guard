@@ -36,7 +36,8 @@ kpis:
   the offending KPI.
 - `judge` must be `jev`, `code`, `fake` or `llm`. A `code` judge (T072) decides with
   the rule in `check`: `node_visited`, `node_not_visited`, `tool_called`, `tool_not_called`
-  or `max_steps` (the run takes at most `n` steps). A `jev` judge
+  , `max_steps` (the run takes at most `n` steps), or `node_sequence` and `tool_sequence`
+  (the `nodes` or `tools` listed appear in that order; others may come between). A `jev` judge
   calls the Jev service (`JEV_API_URL`, `JEV_API_KEY`); `fake` is the offline stand-in;
   `llm`, a general LLM judge, runs in the nightly tier only (T089).
 - Bands (T063): code judges always block: a check that passed on the base and fails on the PR

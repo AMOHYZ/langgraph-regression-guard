@@ -145,7 +145,12 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
         labels=labels,
         score_map=score_map,
         label_hints={k: str(v) for k, v in hints.items()},
-        check={k: str(v) for k, v in check.items()} if check is not None else None,
+        check=(
+            # T197: a YAML list is a sequence check's names
+            {k: ",".join(map(str, v)) if isinstance(v, list) else str(v) for k, v in check.items()}
+            if check is not None
+            else None
+        ),
         margin=margin,
     )
     spec.to_kpi()  # KPI's own label/score checks, at load time rather than build time

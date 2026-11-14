@@ -1767,6 +1767,68 @@ def test_cli_ci_lookup_order_calling_its_tool_passes_tool_called(
     ) in report
 
 
+# T197: sequence checks. A name neither side has is no data; one the base had is judged.
+def _sequence_taxonomy(base: str, check: str) -> str:
+    start = base.index("    check: ")
+    return base[:start] + f"    check: {check}\n" + base[start:].split("\n", 1)[1].split("  - ")[0]
+
+
+def test_cli_ci_a_sequence_naming_a_node_nobody_has_is_not_checked_and_never_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _order_lookup_project(tmp_path, monkeypatch, ["Where is my order 1?"])
+    typo = "{type: node_sequence, nodes: [classify, lookup_ordr, respond]}"
+    (tmp_path / "taxonomy.yaml").write_text(
+        _sequence_taxonomy(ORDER_LOOKUP_TAXONOMY, typo), encoding="utf-8"
+    )
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    assert (code, outputs["verdict"]) == (0, "pass")
+    assert (
+        "⚠️ `order_lookup_runs`: `lookup_ordr` is in neither the base's runs nor this PR's "
+        "graph (a typo, or inside a subgraph, which lgcov doesn't record yet): not checked."
+    ) in report
+    assert "code check failed" not in report and "Harness error" not in report
+
+
+def test_cli_ci_a_pr_that_removes_a_node_a_blocking_sequence_names_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _order_lookup_project(tmp_path, monkeypatch, ["Where is my order 1?", "Hello?"])
+    named = "{type: node_sequence, nodes: [classify, lookup_order, respond]}"
+    (tmp_path / "taxonomy.yaml").write_text(
+        _sequence_taxonomy(ORDER_LOOKUP_TAXONOMY, named), encoding="utf-8"
+    )
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    renamed = demo.replace('"lookup_order"', '"fetch_order"')
+    assert renamed.count('"fetch_order"') >= 4
+    (tmp_path / "graph.py").write_text(renamed, encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert "`order_lookup_runs` passed on the base and fails here on 1 of 2 cases" in report
+    assert "not checked." not in report
+
+
+def test_cli_ci_a_pr_that_stops_calling_a_tool_a_blocking_tool_sequence_names_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tool_project(tmp_path, monkeypatch)
+    taxonomy = _sequence_taxonomy(TOOL_TAXONOMY, "{type: tool_sequence, tools: lookup_order}")
+    (tmp_path / "taxonomy.yaml").write_text(taxonomy, encoding="utf-8")
+    never = ("--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert _run_ci(tmp_path, *never)[0] == 0
+    (tmp_path / "graph.py").write_text(_calling_tools(for_999=()), encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, *never)
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert "`looks_up_the_order` passed on the base and fails here on 1 of 2 cases" in report
+    assert WHOLE_RUN in report
+    typo = _sequence_taxonomy(TOOL_TAXONOMY, "{type: tool_sequence, tools: lookup_ordr}")
+    (tmp_path / "taxonomy.yaml").write_text(typo, encoding="utf-8")
+    (tmp_path / "graph.py").write_text(_calling_tools(), encoding="utf-8")  # the base's again
+    code, report, outputs = _run_ci(tmp_path, *never)
+    assert (code, outputs["verdict"]) == (0, "pass")
+    assert "⚠️ `looks_up_the_order`: `lookup_ordr` is in neither the base's runs nor" in report
+
+
 def test_cli_judge_exits_1_on_a_forbidden_tool_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -6,10 +6,13 @@ from fixtures.graphs import linear
 from lgcov.code_judges import (
     MaxSteps,
     NodeNotVisited,
+    NodeSequence,
     NodeVisited,
     ToolCalled,
     ToolNotCalled,
+    ToolSequence,
     code_judge,
+    unknown_names,
 )
 from lgcov.judges import KPI, JudgeInfraError, NodeState
 from lgcov.trace import record_trace
@@ -82,6 +85,54 @@ def test_code_judge_unknown_check_lists_valid_checks() -> None:
 def test_code_judge_bad_params_raise_value_error(check: dict[str, str]) -> None:
     with pytest.raises(ValueError):
         code_judge(KPI_, check)
+
+
+# T197: the names appear in this order; other steps may come between.
+def test_node_sequence_passes_in_order_with_gaps_and_fails_out_of_order() -> None:
+    judge = code_judge(KPI_, {"type": "node_sequence", "nodes": "classify, respond"})
+    assert judge == NodeSequence(KPI_, ("classify", "respond"))
+    ok = judge.judge({}, _out(["classify", "lookup_order", "respond"]))
+    assert (ok.label, ok.confidence) == ("pass", 1.0)
+    assert ok.raw["reason"] == "nodes classify, respond visited in order"
+    late = judge.judge({}, _out(["respond", "classify"]))
+    assert late.label == "fail"
+    assert late.raw["reason"] == "node respond not visited after classify (step 2)"
+    never = judge.judge({}, _out(["lookup_order", "respond"]))
+    assert (never.label, never.raw["reason"]) == ("fail", "node classify never visited")
+
+
+def test_a_name_listed_twice_must_be_seen_twice() -> None:
+    judge = NodeSequence(KPI_, ("retry", "retry"))
+    assert judge.judge({}, _out(["retry", "plan", "retry"])).label == "pass"
+    once = judge.judge({}, _out(["retry", "plan"]))
+    assert once.raw["reason"] == "node retry not visited after retry (step 1)"
+
+
+def test_tool_sequence_reads_the_runs_tools() -> None:
+    judge = code_judge(KPI_, {"type": "tool_sequence", "tools": "search,fetch"})
+    assert judge == ToolSequence(KPI_, ("search", "fetch"))
+    assert judge.judge({}, _out(["a"], ["search", "calc", "fetch"])).label == "pass"
+    out = judge.judge({}, _out(["a"], ["fetch", "search"]))
+    assert (out.label, out.raw["reason"]) == ("fail", "tool fetch not called after search (step 2)")
+    with pytest.raises(JudgeInfraError):
+        judge.judge({}, {})
+
+
+@pytest.mark.parametrize("names", ["", " , ", "a,,b"])
+def test_a_sequence_needs_names(names: str) -> None:
+    with pytest.raises(ValueError):
+        code_judge(KPI_, {"type": "node_sequence", "nodes": names})
+
+
+def test_unknown_names_are_those_neither_side_has() -> None:
+    check = {"type": "node_sequence", "nodes": "classify, lookup_ordr, inner"}
+    assert unknown_names(check, {"classify", "lookup_order"}, {"classify"}) == (
+        "lookup_ordr",
+        "inner",
+    )
+    # on the base and gone from the PR is known: that is a failure to judge, not a typo
+    assert unknown_names({"type": "tool_sequence", "tools": "search"}, {"search"}, set()) == ()
+    assert unknown_names({"type": "node_visited", "node": "nope"}, set(), set()) == ()
 
 
 def test_code_judge_needs_binary_kpi() -> None:
