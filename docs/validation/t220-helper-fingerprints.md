@@ -43,7 +43,7 @@ value of every module global its code names, followed the same way through proje
 | Helper in another module | the helper's source text, when the node or a helper it calls names it | yes | #178: all 6 fingerprinted nodes that reach `get_today_str` changed |
 | Helper behind a tool object | a `@tool`'s function, held by the tool object in a list a helper builds | yes | #178: `researcher_tools` reaches `get_today_str` only through `get_all_tools`, `tavily_search` and `summarize_webpage` |
 | Module-level constant | its value: a dict's keys and values | yes | #143: `final_report_generation` changed, the other 6 fingerprinted nodes didn't |
-| Tool class handed over in a list | the class's members and pydantic schema, docstring included | yes | #107: all 4 function nodes changed |
+| Tool class handed over in a list | the class's members and pydantic schema, docstring included (still so after T212, which drops only a node function's own docstring) | yes | #107: all 4 function nodes changed |
 | Line numbers, file paths | not hashed | n/a | control B: a new function above every other shifted them and changed nothing |
 
 Not hashed, from the module's docstring and not tested here: what a node reads at run time

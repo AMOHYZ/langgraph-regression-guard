@@ -142,10 +142,18 @@ its recorded output without running it, when two things match the recording:
   same dict has `type: thinking`. In text turned into a string there is no sibling to check, so
   the 40-character rule is the only guard there. A `redacted_thinking` block's `data`, and a
   blob under any other key, go through `ignore_paths`.
-- **Its code fingerprint**: the node function's source, defaults and closure
+- **Its code fingerprint**: the node function's code, defaults and closure
   values, plus the values of the module-level names it uses, following the
   functions, classes and modules of your project the same way. Library code
   counts by name, and other objects (a chat model client, say) by their repr.
+  Code counts as its syntax tree, so a comment, whitespace, line wrapping or quote
+  style doesn't change it.
+- **A node function's own docstring doesn't count,** unless something could read it: the
+  function has a decorator, a `ToolNode` in the graph exposes it as a tool, its code or project
+  code it reaches names `__doc__` or `getdoc`, or the docstring shares a line with code. The
+  docstrings of helpers, nested functions, classes and routers always count. **Limit:** lgcov
+  doesn't see a node function that is also passed to `bind_tools`, where the docstring is the
+  tool's description. After editing one, pass `--live`.
 
 Everything else runs live: changed nodes, nodes that are not plain functions
 (subgraphs, `ToolNode`) and every node of an older cassette with no recorded

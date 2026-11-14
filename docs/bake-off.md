@@ -143,8 +143,8 @@ Against these seven, as documented. Each has a limit next to it.
   [from the top][ki-concept13], and on LangGraph it answers tool calls from recordings only for
   [factory-built agents][ki-lg]. It serves tool results only: model calls run live, and its
   adapter lists [node-boundary replay as deferred][ki-lg13], so this could change. Limits: a node holding a compiled subgraph always runs live,
-  so a live model's new answer can read as drift. A comment or docstring edit currently changes
-  a node's fingerprint, so that node runs live. `Document`s and custom pydantic objects inside
+  so a live model's new answer can read as drift. A node function that is also passed to
+  `bind_tools` stays served after an edit to its docstring, which is the tool's description. `Document`s and custom pydantic objects inside
   state fields can't be saved yet. Speed is [measured only on the demo][lg-speed].
 - **Labels in the repo, no server.** A reviewer's override is a label in git, read back on the
   next PR. LangSmith, Opik, Langfuse, Braintrust and Confident AI keep review data on a platform,

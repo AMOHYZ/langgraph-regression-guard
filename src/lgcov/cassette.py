@@ -233,6 +233,21 @@ def _plain(bound: Any) -> FunctionType | None:
     return fn if isinstance(fn, FunctionType) and not inspect.isasyncgenfunction(fn) else None
 
 
+def _tool_codes(graph: Any) -> set[CodeType]:
+    """T212: the functions a ToolNode in this graph, or in a subgraph, exposes as tools. A tool's
+    description comes from its docstring, so a model can see it. Not seen: a function a node
+    passes to `bind_tools` itself."""
+    found: set[CodeType] = set()
+    for spec in getattr(graph, "nodes", {}).values():
+        bound = getattr(spec, "bound", None)
+        by_name = getattr(bound, "tools_by_name", None)
+        for tool in by_name.values() if isinstance(by_name, Mapping) else ():
+            for fn in (getattr(tool, "func", None), getattr(tool, "coroutine", None)):
+                found |= {fn.__code__} if isinstance(fn, FunctionType) else set()
+        found |= _tool_codes(bound) if isinstance(bound, Pregel) else set()
+    return found
+
+
 def _codes(graph: Any, recorded: Collection[Step] = ()) -> dict[str, str | None]:
     """The plain-function nodes replay wraps, by name; subgraphs and the like run untouched.
 
@@ -241,11 +256,12 @@ def _codes(graph: Any, recorded: Collection[Step] = ()) -> dict[str, str | None]
     what was recorded, so it is unchanged, and its fingerprint here is that value: everything
     downstream compares fingerprints as plain text."""
     held = {(s.node, s.code) for s in recorded}
+    tools = _tool_codes(graph)
     codes: dict[str, str | None] = {}
     for name, spec in getattr(graph, "nodes", {}).items():
         fn = _plain(spec.bound)
         if name != START and fn is not None:
-            codes[name] = fingerprint(fn)
+            codes[name] = fingerprint(fn, node=fn.__code__ not in tools)
             if (name, codes[name]) not in held and (name, old := fingerprint(fn, raw=True)) in held:
                 codes[name] = old
     return codes

@@ -738,3 +738,118 @@ def test_a_function_that_reads_source_is_hashed_from_its_raw_lines(tmp_path: Pat
     two = _module(tmp_path / "two.py", source.replace("return", "# a comment\n    return"))
     assert fingerprint(one.node) != fingerprint(two.node)
     assert fingerprint(one.node) == fingerprint(one.node, raw=True)
+
+
+# T212: a node function's own docstring doesn't count, where nothing can read it.
+DOCS = '''\
+import inspect
+
+
+def helper(x):
+    """Add one."""
+    return x + 1
+
+
+def node(state):
+    """Summarise the order."""
+    return {"x": helper(state["x"])}
+
+
+async def anode(state):
+    """Summarise the order."""
+    return {"x": state["x"]}
+
+
+
+def keep(fn):
+    return fn
+
+
+@keep
+def decorated(state):
+    """Summarise the order."""
+    return {"x": state["x"]}
+
+
+def reads(state):
+    """Summarise the order."""
+    return {"x": reads.__doc__}
+
+
+def asks(state):
+    """Summarise the order."""
+    return {"x": inspect.getdoc(asks)}
+
+
+def described(fn):
+    return fn.__doc__
+
+
+def passes(state):
+    """Summarise the order."""
+    return {"x": described(passes)}
+
+
+def one_line(state): """Summarise the order."""; return {"x": 1}
+
+
+def nested(state):
+    def inner():
+        """Summarise the order."""
+        return 1
+
+    class Box:
+        """Summarise the order."""
+
+    return {"x": inner(), "b": Box.__name__}
+'''
+_REWORDED = DOCS.replace("Summarise the order.", "Sum the order up.\n\n    In two lines.")
+
+
+def test_a_node_s_own_docstring_does_not_count(tmp_path: Path) -> None:
+    one, two = _module(tmp_path / "one.py", DOCS), _module(tmp_path / "two.py", _REWORDED)
+    for name in ("node", "anode"):
+        assert fingerprint(getattr(one, name), node=True) is not None
+        assert fingerprint(getattr(one, name), node=True) == fingerprint(
+            getattr(two, name), node=True
+        )
+    # Writing one, or deleting it, is the same kind of edit.
+    gone = _module(tmp_path / "gone.py", DOCS.replace('    """Summarise the order."""\n', "", 1))
+    assert fingerprint(gone.node, node=True) == fingerprint(one.node, node=True)
+    body = _module(tmp_path / "three.py", _REWORDED.replace('helper(state["x"])', "0"))
+    assert fingerprint(body.node, node=True) != fingerprint(one.node, node=True)
+
+
+def test_a_docstring_counts_for_any_function_that_is_not_a_node(tmp_path: Path) -> None:
+    # A router, or any caller that doesn't say `node`: as before.
+    one, two = _module(tmp_path / "one.py", DOCS), _module(tmp_path / "two.py", _REWORDED)
+    assert fingerprint(one.node) != fingerprint(two.node)
+
+
+@pytest.mark.parametrize(
+    ("name", "old"),
+    [
+        ("node", "Add one."),  # a helper's docstring: the helper may be a tool somewhere
+        ("decorated", "Summarise the order."),  # a decorator can read fn.__doc__
+        ("reads", "Summarise the order."),
+        ("asks", "Summarise the order."),
+        ("passes", "Summarise the order."),  # a helper reads it
+        ("one_line", "Summarise the order."),  # shares its line with code
+        ("nested", "Summarise the order."),  # a nested function's and a class's
+    ],
+)
+def test_a_docstring_something_could_read_still_counts(tmp_path: Path, name: str, old: str) -> None:
+    assert old in DOCS
+    one = _module(tmp_path / "one.py", DOCS)
+    two = _module(tmp_path / "two.py", DOCS.replace(old, "Something else."))
+    assert fingerprint(getattr(one, name), node=True) != fingerprint(getattr(two, name), node=True)
+
+
+def test_node_fingerprints_are_the_same_on_every_python(tmp_path: Path) -> None:
+    docs = _module(tmp_path / "docs.py", DOCS)
+    found = {n: fingerprint(getattr(docs, n), node=True) for n in ("node", "anode", "reads")}
+    assert found == {
+        "node": "964711741fd433b7",
+        "anode": "6aa9cccf9c92df3e",
+        "reads": "47aff0937771fd56",
+    }

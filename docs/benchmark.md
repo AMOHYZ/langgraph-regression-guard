@@ -186,7 +186,16 @@ Scored from the pilot's saved runs with `lgcov bench docs/benchmark --only open_
 - **Five of the six roots can't be reached by any rule yet.** They're inside the `research_supervisor` subgraph, whose inner nodes aren't recorded (T193).
 - **`write_research_brief` is a model node.** After masking, it gets the same input on both sides and drifts, but that drift is one live sample. A probe would need a live call, so from saved runs it stays inconclusive; `--noise-repeats` hasn't been run on this agent.
 - **`final_report_generation` is now inconclusive, not propagated.** Its code changed and its input changed, and without a probe on base's input lgcov can't say which one made it drift.
-- **Docstring edits are a known false-root source.** The fingerprint still includes docstrings (T212), so a node whose only change is a docstring is probed, and a probe that drifts would be called root.
+- **A node function's docstring, comments and formatting no longer count as a change (T212).** A docstring something could read still does: see [which nodes replay re-runs](../README.md#which-nodes-replay-re-runs) for the cases. Checked offline, imports only, on this PR and three labelled PRs that aren't rows here yet:
+
+  | PR | Function nodes | Changed, raw lines | Changed, syntax tree | Changed, with the docstring rule |
+  |---|---|---|---|---|
+  | open_deep_research#163 | 3 | 3 | 3 | 3 |
+  | gemini-fullstack-langgraph-quickstart#90 | 4 | 1 | 1 | 1 |
+  | gemini-fullstack-langgraph-quickstart#35 | 4 | 2 | 2 | 1 |
+  | local-deep-researcher#81 | 5 | 3 | 3 | 3 |
+
+  One node flips: `generate_query` in #35, whose only edit is its docstring. No label on #163 changes. Ignoring comments and formatting alone changed nothing on these four.
 
 ### Agent KPIs
 

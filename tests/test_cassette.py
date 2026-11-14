@@ -5,6 +5,7 @@ import socket
 import time
 from collections.abc import Callable, Hashable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TypedDict, cast
 from unittest.mock import Mock
 from uuid import uuid4
@@ -34,6 +35,7 @@ from lgcov.cassette import (
     replay_run,
     unservable,
 )
+from lgcov.cli import _import_file
 from lgcov.fingerprint import fingerprint
 
 
@@ -731,3 +733,63 @@ def test_a_node_only_another_run_recorded_gets_that_recording_s_scheme() -> None
     for serve in (True, False):
         done = replay_run(graph, rerouted, (), serve=serve, baseline=[tools, answer])
         assert {s.node: s.code for s in done.steps}.items() <= codes.items()
+
+
+# T212: a node function's own docstring doesn't count, unless a ToolNode exposes it as a tool.
+_DOC_GRAPH = '''\
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
+
+
+class S(TypedDict, total=False):
+    x: int
+
+
+def plain(state: S) -> S:
+    """Add one to x."""
+    return {"x": state["x"] + 1}
+
+
+def shared(state: S) -> S:
+    """Add two to x."""
+    return {"x": state["x"] + 2}
+
+
+g = StateGraph(S)
+g.add_node("plain", plain)
+g.add_node("shared", shared)
+g.add_node("tools", ToolNode([shared]))
+g.add_edge(START, "plain")
+g.add_edge("plain", "shared")
+g.add_edge("shared", END)
+g.add_edge("tools", END)  # never reached: the test is who holds `shared`
+graph = g.compile()
+'''
+
+
+def _doc_graph(path: Path, source: str) -> CompiledStateGraph[S]:
+    path.write_text(source, encoding="utf-8")
+    graph: CompiledStateGraph[S] = _import_file(str(path)).graph
+    return graph
+
+
+def test_a_reformat_and_a_node_docstring_edit_leave_every_step_served(tmp_path: Path) -> None:
+    base = record(_doc_graph(tmp_path / "base.py", _DOC_GRAPH), {"x": 1})
+    edited = _DOC_GRAPH.replace("Add one to x.", "Increment x.\n\n    Twice as long.")
+    edited = edited.replace(
+        '{"x": state["x"] + 1}', "{\n        'x': (state['x'] + 1),  # one\n    }"
+    )
+    assert edited.count("Add") == 1 and "# one" in edited
+    head = _doc_graph(tmp_path / "head.py", edited)
+    assert changed_nodes(head, [base]) == set() and unservable(head, [base]) == 0
+    done = replay_run(head, base, (), serve=True)
+    assert [c.how for c in done.calls] == ["served", "served"] and not done.drifts
+
+
+def test_a_docstring_edit_counts_for_a_node_function_a_toolnode_exposes(tmp_path: Path) -> None:
+    # ToolNode builds the tool's description from the docstring: a model can see it.
+    base = record(_doc_graph(tmp_path / "base.py", _DOC_GRAPH), {"x": 1})
+    head = _doc_graph(tmp_path / "head.py", _DOC_GRAPH.replace("Add two to x.", "Double x."))
+    assert changed_nodes(head, [base]) == {"shared"}
