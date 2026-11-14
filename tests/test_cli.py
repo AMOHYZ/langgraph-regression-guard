@@ -13,8 +13,9 @@ import pytest
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from examples.synthetic_agents import AGENTS
-from lgcov.cassette import _codes, _router_prints, replay_run
-from lgcov.cli import _import_file, _l2_judge, _lgcov_root, _load_graph, main
+from lgcov.attribution import UNEXPLAINED, Benchmark, NoiseCheck
+from lgcov.cassette import Cassette, Step, _codes, _router_prints, compared_run, replay_run
+from lgcov.cli import _import_file, _l2_judge, _labelled, _lgcov_root, _load_graph, main
 from lgcov.fingerprint import fingerprint
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, NodeState, Verdict
@@ -3093,7 +3094,9 @@ def test_bench_names_a_changed_router_s_source_node_root(tmp_path: Path) -> None
     bench = parse_benchmark("routed", {**raw, "expected": expected}, tmp_path)
     (tmp_path / "routed").mkdir()
     for name, router, answer in (("base.json", "r1", "a"), ("head.json", "r2", "b")):
-        steps = [Step("classify", 1, {}, "c1", router=router), Step("respond", answer, {}, "c2")]
+        # T230: the route reaches respond in its input, so its drift is propagated.
+        seen = {"route": answer}
+        steps = [Step("classify", 1, {}, "c1", router=router), Step("respond", answer, seen, "c2")]
         (tmp_path / "routed" / name).write_text(runs_to_json([Cassette({}, steps)]), "utf-8")
     row = _bench_saved(bench, tmp_path)
     assert (row.error, row.inconclusive) == ("", ())
@@ -3163,3 +3166,27 @@ def test_a_jev_judge_takes_its_model_and_timeout_from_lgcov_yaml() -> None:
     assert (judge.model, judge.timeout_s) == ("gpt-6-luna", 120.0)
     default = _l2_judge(spec)
     assert isinstance(default, JevJudge) and default.timeout_s == 10.0
+
+
+# T230 with T211's evidence: a first node under its noise needs no other cause, and stays so.
+def test_a_first_node_under_its_noise_is_not_relabelled_inconclusive(tmp_path: Path) -> None:
+    def run(brief: str) -> Cassette:
+        return Cassette(
+            {"q": "x"},
+            [
+                Step("brief", {"brief": brief}, input={"q": "x"}, code="1"),
+                Step("report", {"report": brief.upper()}, input={"brief": brief}, code="2"),
+            ],
+        )
+
+    base, head = [run("one two three")], [run("one two four")]
+    drifts = [list(compared_run(base[0], head[0].steps, (), None).drifts)]
+    bench = Benchmark("aa", "g.py:g", ({},), frozenset(), frozenset(), tmp_path)
+    plain = _labelled(bench, (base, head), drifts, {}, 0.0)
+    assert dict(plain.inconclusive) == {"brief": UNEXPLAINED}  # one sample: no noise evidence
+    assert plain.found_propagated == ("report",)
+    quiet = NoiseCheck(k=3, spread=0.5, min_head_to_base=0.25)
+    assert quiet.verdict == "no drift detected above noise (K=3)"
+    found = _labelled(bench, (base, head), drifts, {}, 0.0, {"brief": quiet})
+    assert (found.found_root, dict(found.inconclusive)) == ((), {})
+    assert found.found_propagated == ("report",)

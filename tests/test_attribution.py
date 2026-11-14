@@ -356,3 +356,43 @@ def test_a_noise_check_s_evidence_is_in_the_results_json_and_the_report() -> Non
     md = render_markdown([row], "lgcov bench", "2026-11-13")
     assert f"- `aa`: `a`: {verdict}: spread 0.300, nearest head sample 0.000" in md
     assert "Noise checks" not in render_markdown([_result("x", set(), set())], "lgcov bench", "")
+
+
+# T230: "propagated" means the node's input differed. An unchanged node that drifts on the same
+# input is unexplained, whatever else is in the run.
+@pytest.mark.parametrize(
+    "labels",
+    [
+        NodeLabels(root=(), propagated=("a", "c"), inconclusive={"b": NO_FINGERPRINT}),
+        NodeLabels(root=("b",), propagated=("a", "c"), inconclusive={}),
+    ],
+)
+def test_the_first_node_to_drift_is_not_propagated_from_a_node_after_it(
+    labels: NodeLabels,
+) -> None:
+    out = explain_runs(labels, ["a"], [["a", "b", "c"]], ran=[["a", "b", "c"]])
+    assert out.propagated == ("c",) and out.inconclusive["a"] == UNEXPLAINED
+    assert out.root == labels.root
+
+
+def test_a_changed_router_after_the_first_drifted_node_does_not_explain_it() -> None:
+    labels = NodeLabels(root=(), propagated=("lookup", "respond"), inconclusive={})
+    routers = ({"lookup": "r1"}, {"lookup": "r2"})
+    ran = [["classify", "lookup", "respond"]]
+    late = explain_runs(labels, ["classify"], [["classify", "respond"]], routers, ran)
+    assert late.inconclusive == {"classify": UNEXPLAINED} and late.root == ("lookup",)
+
+
+def test_an_unchanged_node_that_drifts_on_the_same_input_is_unexplained_in_any_branch() -> None:
+    # Parallel branches: b is root, and c drifts after it on an input identical to base's.
+    labels = NodeLabels(root=("b",), propagated=("c", "d"), inconclusive={})
+    out = explain_runs(
+        labels, ["b"], [["b", "c", "d"]], ran=[["a", "b", "c", "d"]], same_input=[{"a", "b", "c"}]
+    )
+    assert (out.root, out.propagated, out.inconclusive) == (("b",), ("d",), {"c": UNEXPLAINED})
+
+
+def test_a_node_whose_input_differed_stays_propagated() -> None:
+    labels = NodeLabels(root=("b",), propagated=("c",), inconclusive={})
+    out = explain_runs(labels, ["b"], [["b", "c"]], ran=[["b", "c"]], same_input=[{"b"}])
+    assert (out.propagated, out.inconclusive) == (("c",), {})

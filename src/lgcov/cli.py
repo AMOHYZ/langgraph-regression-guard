@@ -89,6 +89,7 @@ from lgcov.cassette import (
     replay_run,
     runs_from_json,
     runs_to_json,
+    same_input,
     unservable,
 )
 from lgcov.ci_report import CiResult, Tally, Timing, render_ci_report
@@ -1135,7 +1136,8 @@ def _evaluate(
     )
     ran = [[s.node for s in r.steps] for r in runs]
     by_node = classify(counts.keys(), (bases, heads), probes)
-    labels = explain_runs(by_node, firsts, nodes, routers, ran)
+    same = [same_input(r, f.steps, cfg.ignore_paths) for r, f in zip(runs, run.fresh, strict=True)]
+    labels = explain_runs(by_node, firsts, nodes, routers, ran, same)
     blocking = {*labels.root, *labels.inconclusive}
     root, downstream = sorted(blocking), list(labels.propagated)
     # T199: the comment's tally line: each run's root and inconclusive nodes, in run order.
@@ -2552,7 +2554,8 @@ def _labelled(
     firsts = [None if f in quiet else f for f in firsts]
     nodes = [n - quiet for n in nodes]
     by_node = classify(counts.keys() - quiet, (base, head), {**probes, **judged})
-    labels = explain_runs(by_node, firsts, nodes, routers, ran)
+    same = [same_input(r, f.steps) for r, f in zip(*sides, strict=True)]
+    labels = explain_runs(by_node, firsts, nodes, routers, ran, same)
     return Result(
         b.name,
         labels.root,
