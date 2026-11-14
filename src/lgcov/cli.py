@@ -94,7 +94,7 @@ from lgcov.cassette import (
     unservable,
 )
 from lgcov.ci_report import CiResult, Tally, Timing, render_ci_report
-from lgcov.code_judges import code_judge
+from lgcov.code_judges import code_judge, unknown_names
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import (
     TIERS,
@@ -1197,6 +1197,10 @@ def _evaluate(
     )
     base_runs, base_notes = _base_runs(args, cfg) if edited else (list[Cassette](), list[str]())
     paired, removed = _pair_with_base(runs, base_runs, cfg.ignore_paths)
+    no_data: list[str] = []
+    if l2 is not None:  # T197: before anything below reads the KPIs
+        recorded = [r.steps for r in (*runs, *base_runs)]
+        l2, no_data = _known_sequences(l2, recorded, [steps for _, steps in pairs], run.head)
     result = replace(
         partial,
         inconclusive_blocks=args.fail_on_inconclusive or cfg.gate.inconclusive_blocks,
@@ -1219,6 +1223,7 @@ def _evaluate(
             *_removed_note(removed, cfg.cassette_dir),
             *policy.llm_notes,
             *_whole_run_note(l2[0] if l2 else []),
+            *no_data,
             *([note] if note else []),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
             *_langsmith_notes(cfg.langsmith, args.commit),
@@ -1384,6 +1389,35 @@ def _whole_run_note(specs: list[KPISpec]) -> list[str]:
     """T181: a tool check reads every tool the run called, not only its KPI's node's (T210)."""
     tools = [s.name for s in specs if (s.check or {}).get("type") in _TOOL_CHECKS]
     return [f"⚠️ {_WHOLE_RUN}: {_quoted(tools)}."] if tools else []
+
+
+def _known_sequences(
+    l2: tuple[list[KPISpec], list[Judge]],
+    recorded: list[list[Step]],
+    fresh: list[list[Step]],
+    head: GraphSnapshot,
+) -> tuple[tuple[list[KPISpec], list[Judge]], list[str]]:
+    """T197: the KPIs without the sequence checks naming something neither side has, and a
+    note for each of those. The base's side is what its runs recorded: a name found there
+    stays judged, so a PR can't drop a check by removing what it names."""
+
+    def names(runs: list[list[Step]]) -> set[str]:
+        tools = (t for steps in runs for t in run_tools([s.output for s in steps]))
+        return {s.node for steps in runs for s in steps} | {*tools}
+
+    base, here = names(recorded), names(fresh) | head.nodes
+    kept, notes = [], []
+    for spec, judge in zip(*l2, strict=True):
+        unknown = unknown_names(spec.check or {}, base, here) if spec.judge == "code" else ()
+        if not unknown:
+            kept.append((spec, judge))
+            continue
+        notes.append(
+            f"⚠️ `{spec.name}`: {_quoted(list(unknown))} is in neither the base's runs nor this "
+            "PR's graph (a typo, or inside a subgraph, which lgcov doesn't record yet): "
+            "not checked."
+        )
+    return ([s for s, _ in kept], [j for _, j in kept]), notes
 
 
 def _ci_gate(
@@ -1593,7 +1627,7 @@ def _verify_result_cmd(argv: list[str]) -> int:
 
 
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
-_TOOL_CHECKS = ("tool_called", "tool_not_called")
+_TOOL_CHECKS = ("tool_called", "tool_not_called", "tool_sequence")
 _WHOLE_RUN = "node scope not applied to tool checks yet (whole-run)"
 # T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
 # never runs one, and a nightly run reports the KPIs it couldn't judge.

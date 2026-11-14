@@ -482,6 +482,24 @@ lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
 - `--from-runs DIR` judges the `base.json` and `head.json` that `lgcov bench --keep-runs`
   saved in DIR. Nothing is replayed and no graph is loaded, so the agent makes no call; a
   model judge still makes its own.
+- A `code` judge can assert the order of a run's steps. The names must appear in this order;
+  other nodes or tools may come between:
+
+  ```yaml
+  - name: looks_up_before_answering
+    failure_mode: skips_the_lookup
+    node: respond
+    judge: code
+    description: An order question is classified, looked up, then answered.
+    rubric: Did the run visit classify, lookup_order and respond in that order?
+    check: {type: node_sequence, nodes: [classify, lookup_order, respond]}
+    # or: check: {type: tool_sequence, tools: [search, fetch]}
+  ```
+
+  Both checks read the whole run today, whatever `node:` says. A name that neither the
+  base's recorded runs nor the PR's graph has (a typo, or a node inside a subgraph, which
+  isn't recorded yet) is reported as not checked and never fails a PR; a name the base had
+  and the PR removed fails the check.
 - pass@k: at least one of a case's k samples passes; pass^k: all of them do. A case is
   flaky when it's pass@k but not pass^k. Flakiness is shown as ⚠️ and never changes a
   verdict; an infra error doesn't count toward k and is never a fail.
