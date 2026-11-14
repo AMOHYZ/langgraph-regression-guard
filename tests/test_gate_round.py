@@ -12,6 +12,7 @@ from lgcov.gate_round import (
     Draft,
     GateNow,
     JudgeLock,
+    Reference,
     Round,
     case_ids,
     case_set_hash,
@@ -19,6 +20,7 @@ from lgcov.gate_round import (
     parse_draft,
     parse_round,
     prompt_hash,
+    round_digest,
     round_problems,
     round_to_yaml,
 )
@@ -274,6 +276,93 @@ def test_a_ledger_below_the_floor_is_a_problem() -> None:
 def test_a_hand_edit_to_any_field_breaks_the_digest(changes: dict[str, object]) -> None:
     edited = parse_round({**_doc(), **changes})
     assert "its digest doesn't match" in round_problems(edited, NOW, A, 0)[0]
+
+
+# --- The reference round (T158): what a later round's cumulative loss will be counted from.
+
+ROUND_1_DIGEST = "60485ea9991390bab309586bc83c4044f97864448b08c32227889a452a16deb2"
+
+
+def _next(doc: dict[str, object]) -> dict[str, object]:
+    """The file after one more `lgcov round new`."""
+    again: dict[str, object] = yaml.safe_load(round_to_yaml(lock_round(parse_draft(doc), NOW, 0)))
+    return again
+
+
+def test_the_first_round_is_the_reference_and_has_no_pointer() -> None:
+    """Its file and digest are what they were before T158, byte for byte."""
+    assert _locked().reference is None
+    assert "reference" not in _doc()
+    assert _locked().digest == ROUND_1_DIGEST
+
+
+def test_the_second_round_points_at_the_first_by_number_and_digest() -> None:
+    second = _next(_doc())
+    assert second["reference"] == {"round": 1, "digest": ROUND_1_DIGEST}
+    assert list(second)[-2:] == ["reference", "digest"]
+    locked = parse_round(second)
+    assert locked.reference == Reference(1, ROUND_1_DIGEST)
+    assert round_problems(locked, NOW, A, 0) == []
+
+
+def test_later_rounds_carry_the_reference_unchanged() -> None:
+    third = _next(_next(_doc()))
+    assert third["round"] == 3
+    assert third["reference"] == {"round": 1, "digest": ROUND_1_DIGEST}
+
+
+def test_the_reference_is_in_the_digest() -> None:
+    second = _next(_doc())
+    for moved in ({"round": 1, "digest": "e" * 64}, None):
+        fields = {k: v for k, v in second.items() if k != "reference"}
+        edited = parse_round(fields if moved is None else {**fields, "reference": moved})
+        assert "its digest doesn't match" in round_problems(edited, NOW, A, 0)[0]
+
+
+def test_a_reference_hashes_only_the_keys_it_has() -> None:
+    """A key added to `reference` later (a `path` guard re-hashes) can then be left out of the
+    hash when absent, so a round locked before it keeps its digest. This pins today's bytes."""
+    second = parse_round(_next(_doc()))
+    assert second.digest == "2f97efa7ee4b5ec93aff040a3aa7318feaaddb01926967a1d3df25a40bb9a9e2"
+
+
+def test_a_round_after_the_first_needs_a_reference() -> None:
+    bare = replace(parse_round(_next(_doc())), reference=None)
+    bare = replace(bare, digest=round_digest(bare))  # as someone who recomputed it would
+    assert round_problems(bare, NOW, A, 0) == [
+        "round 2 has no reference: only a first round can be one; run `lgcov round new` again"
+    ]
+
+
+@pytest.mark.parametrize("pointed", [2, 3])
+def test_a_reference_must_be_an_earlier_round(pointed: int) -> None:
+    second = parse_round(_next(_doc()))
+    moved = replace(second, reference=Reference(pointed, ROUND_1_DIGEST))
+    moved = replace(moved, digest=round_digest(moved))
+    assert round_problems(moved, NOW, A, 0) == [f"reference: round {pointed} is not before round 2"]
+
+
+def test_a_person_cant_write_the_reference_in_a_draft() -> None:
+    draft = parse_draft({**DRAFT_DOC, "reference": {"round": 1, "digest": ROUND_1_DIGEST}})
+    with pytest.raises(ValueError, match="'reference' is written by `lgcov round new`"):
+        lock_round(draft, NOW, 0)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "e" * 64,
+        {"round": 1},
+        {"digest": "e" * 64},
+        {"round": 0, "digest": "e" * 64},
+        {"round": 1, "digest": "short"},
+        {"round": 1, "digest": "e" * 64, "path": "rounds/1.yaml"},
+    ],
+    ids=["bare digest", "no digest", "no round", "round 0", "short digest", "unknown key"],
+)
+def test_a_bad_reference_is_refused(reference: object) -> None:
+    with pytest.raises(ValueError, match="reference"):
+        parse_round({**_next(_doc()), "reference": reference})
 
 
 # --- Parsing.

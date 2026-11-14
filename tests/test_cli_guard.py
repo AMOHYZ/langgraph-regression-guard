@@ -708,6 +708,24 @@ def test_a_round_needs_a_taxonomy(
     assert lgcov_main(["guard", "--taxonomy", TAXONOMY]) == 0
 
 
+def test_guard_exits_2_when_the_reference_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T158: round 2 points at round 1's digest, round 3 keeps it, and a hand edit exits 2."""
+    _locked(tmp_path, monkeypatch)
+    first = _round()
+    assert "reference" not in first
+    for number in (2, 3):
+        assert lgcov_main(["round", "new"]) == 0
+        assert _round()["round"] == number
+        assert _round()["reference"] == {"round": 1, "digest": first["digest"]}
+    assert lgcov_main(["guard"]) == 0
+    _edit_round(reference={"round": 2, "digest": first["digest"]})
+    capsys.readouterr()
+    assert lgcov_main(["guard"]) == 2
+    assert "its digest doesn't match" in capsys.readouterr().err
+
+
 def test_lgcov_round_alone_says_what_it_takes(capsys: pytest.CaptureFixture[str]) -> None:
     assert lgcov_main(["round"]) == 2
     assert "lgcov round new" in capsys.readouterr().err

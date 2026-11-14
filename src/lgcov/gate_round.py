@@ -41,6 +41,7 @@ _KEYS = (
     "candidates",
     "stop_rules",
     "exposure_floor",
+    "reference",
     "digest",
 )
 
@@ -78,6 +79,14 @@ class GateNow:
 
 
 @dataclass(frozen=True)
+class Reference:
+    """T158: the round a later round's cumulative loss will be counted from."""
+
+    round: int
+    digest: str  # that round's own digest, as its file had it
+
+
+@dataclass(frozen=True)
 class Draft:
     """What a person writes in the round file; `lgcov round new` computes the rest."""
 
@@ -89,6 +98,8 @@ class Draft:
     stop_rules: dict[str, StopValue]
     previous_round: int = 0
     previous_floor: int = 0
+    previous_digest: str | None = None
+    previous_reference: Reference | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +117,7 @@ class Round:
     candidates: tuple[str, ...]
     stop_rules: dict[str, StopValue]
     exposure_floor: int  # the ledger's entries when this round started
+    reference: Reference | None = None  # None: this round is the reference
     digest: str = ""  # as written in the file; round_digest says what it should be
 
 
@@ -245,6 +257,16 @@ def _tag_list(value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _reference(value: object) -> Reference:
+    ref = _mapping(value, "'reference'")
+    _check_keys(ref, ("round", "digest"), "'reference'")
+    if set(ref) != {"round", "digest"}:
+        raise ValueError("'reference' needs 'round' and 'digest'; `lgcov round new` writes both")
+    return Reference(
+        _count(ref["round"], "reference.round", 1), _hash(ref["digest"], "reference.digest")
+    )
+
+
 def parse_draft(raw: object) -> Draft:
     """What a person writes, from a draft or a locked round. The computed fields aren't read here,
     other than the round number and the exposure floor the next round carries on from."""
@@ -264,6 +286,8 @@ def parse_draft(raw: object) -> Draft:
         stop_rules=_stop_rules(_required(doc, "stop_rules")),
         previous_round=_count(doc["round"], "round", 1) if "round" in doc else 0,
         previous_floor=_count(doc.get("exposure_floor", 0), "exposure_floor", 0),
+        previous_digest=_hash(doc["digest"], "digest") if "digest" in doc else None,
+        previous_reference=_reference(doc["reference"]) if "reference" in doc else None,
     )
 
 
@@ -304,11 +328,17 @@ def parse_round(raw: object) -> Round:
         candidates=draft.candidates,
         stop_rules=draft.stop_rules,
         exposure_floor=_count(_required(doc, "exposure_floor"), "exposure_floor", 0),
+        reference=draft.previous_reference,
         digest=_hash(_required(doc, "digest"), "digest"),
     )
 
 
 def _body(r: Round) -> dict[str, object]:
+    """Only the keys the round has: no `reference` in a reference round, so its bytes and digest
+    are what they were before T158, and a key added later can be left out the same way."""
+    reference: dict[str, object] = (
+        {} if r.reference is None else {"round": r.reference.round, "digest": r.reference.digest}
+    )
     return {
         "version": VERSION,
         "round": r.round,
@@ -327,6 +357,7 @@ def _body(r: Round) -> dict[str, object]:
         "candidates": list(r.candidates),
         "stop_rules": r.stop_rules,
         "exposure_floor": r.exposure_floor,
+        **({"reference": reference} if reference else {}),
     }
 
 
@@ -345,6 +376,22 @@ def _lost(exposure_entries: int, floor: int, whose: str) -> str:
         f"exposure history lost: the ledger has {exposure_entries} entries and {whose} started "
         f"with {floor}; restore it from git"
     )
+
+
+def _next_reference(draft: Draft) -> Reference | None:
+    """A first round is the reference. The round after it points at it, and every later round
+    carries that pointer on, so a new round can't start the count again."""
+    if draft.previous_round == 0:
+        if draft.previous_reference is not None:
+            raise ValueError("'reference' is written by `lgcov round new`; remove it from a draft")
+        return None
+    if draft.previous_reference is not None:
+        return draft.previous_reference
+    if draft.previous_digest is None:
+        raise ValueError(
+            f"round {draft.previous_round} has no 'digest' for the next round to point at"
+        )
+    return Reference(draft.previous_round, draft.previous_digest)
 
 
 def lock_round(draft: Draft, now: GateNow, exposure_entries: int) -> Round:
@@ -378,6 +425,7 @@ def lock_round(draft: Draft, now: GateNow, exposure_entries: int) -> Round:
         candidates=draft.candidates,
         stop_rules=draft.stop_rules,
         exposure_floor=exposure_entries,
+        reference=_next_reference(draft),
     )
     return replace(locked, digest=round_digest(locked))
 
@@ -439,4 +487,13 @@ def round_problems(
         )
     if exposure_entries < locked.exposure_floor:
         problems.append(_lost(exposure_entries, locked.exposure_floor, "this round"))
+    if locked.reference is None and locked.round > 1:
+        problems.append(
+            f"round {locked.round} has no reference: only a first round can be one; "
+            "run `lgcov round new` again"
+        )
+    elif locked.reference is not None and locked.reference.round >= locked.round:
+        problems.append(
+            f"reference: round {locked.reference.round} is not before round {locked.round}"
+        )
     return problems

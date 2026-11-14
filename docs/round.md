@@ -46,6 +46,7 @@ stop_rules:       # any names; each a number, a string or true/false
 | `alpha`, `power` | `gate.alpha` and `gate.power`. |
 | `k_gate` | The blocking KPIs, as [docs/gate.md](gate.md) counts them. This is not the number of candidates. |
 | `exposure_floor` | How many entries `exposure.json` had when this round started. |
+| `reference` | The reference round's number and digest. A first round is the reference and has no such key. |
 | `digest` | A hash of every field above, so a hand edit exits 2. |
 
 Adding, removing or editing a case's inputs changes `gate_cases.sha256`. Reordering the runs doesn't,
@@ -65,7 +66,8 @@ compares the round with:
 - `alpha`, `power`, each KPI's margin and K_gate;
 - the candidate: `--candidate` if given, else the PR's head on a `pull_request` event, else `HEAD`.
   On a PR, `HEAD` is GitHub's merge commit, which no round can lock;
-- `exposure_floor`, so a deleted or reset ledger is caught.
+- `exposure_floor`, so a deleted or reset ledger is caught;
+- `reference`: a round numbered 2 or more must have one, and it must name an earlier round.
 
 With `--policy-dir`, it reads the round, the ledger, `lgcov.yaml`, the taxonomy and the bands from
 the base checkout, with no fallback to the PR's files, as `lgcov ci` does for its policy.
@@ -90,6 +92,26 @@ Which judge versions and candidates saw each case, and in which rounds:
 A case is named by a hash of its inputs, not `run-3`, because a run's number changes when the case
 set does. Only `lgcov guard --record` adds to the file, after a clean check. `lgcov round new` never
 rewrites it, and a case a later round drops keeps its history.
+
+## The reference round
+
+A later round's cumulative loss will be counted from one fixed round, the reference. Nothing does
+that arithmetic yet. What exists is the pointer:
+
+```yaml
+reference:
+  round: 1
+  digest: 60485ea9991390bab309586bc83c4044f97864448b08c32227889a452a16deb2
+```
+
+The first round is the reference and has no `reference` key. The second round points at the first
+round's number and digest, and every later round carries that pointer unchanged. You don't write
+it: `lgcov round new` refuses a draft that has one. It is inside the digest, so editing or removing
+it makes `lgcov guard` exit 2.
+
+**Planned, not built:** a `path` key under `reference`, naming a kept copy of the reference round
+that `lgcov guard` re-hashes. A key a round doesn't have is left out of its digest, so a round
+locked before `path` exists keeps its bytes and its digest when that key arrives.
 
 ## A round, start to finish
 
@@ -134,6 +156,10 @@ A commit can't contain its own SHA, so the round goes on the base and names a ca
 - **`exposure_floor` covers the ledger as it stood when the round started.** Only git protects what
   was recorded since. It is a count, so it catches accidents, not someone replacing entries.
 - **Uncommitted changes aren't covered.** `lgcov guard` warns about them, as `lgcov ci` does.
+- **Nothing re-checks the reference round itself.** `lgcov-round.yaml` is rewritten each round, so the
+  reference round's content is only in git history. Someone who edits `reference` and then runs
+  `lgcov round new` gets a valid file. On a PR, `--policy-dir` reads the base's file, so changing
+  the reference takes a commit to the base branch.
 - **`--candidate` is taken as given,** and the digest is not a signature: everything in the file is
   public. A PR's code that shares the job can still forge the result, as
   [the trust boundary](trust-boundary.md) says, so protect both files with CODEOWNERS.
