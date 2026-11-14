@@ -144,7 +144,14 @@ from lgcov.langsmith import (
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
 from lgcov.messages import decode, plain, run_tools
-from lgcov.metrics import format_summary, parse_records, summarize
+from lgcov.metrics import (
+    format_summary,
+    parse_records,
+    pr_metrics,
+    pr_name,
+    record_to_json,
+    summarize,
+)
 from lgcov.normalize import normalize
 from lgcov.review import ReviewDecision, apply_decision
 from lgcov.sampling import (
@@ -1277,6 +1284,7 @@ def _evaluate(
     return replace(
         result,
         tally=replace(tally, worse=len(runs_worse), worse_by_kpi=by_kpi) if stats else tally,
+        samples=policy.rules.k if stats else 0,
         gate=replace(
             findings, infra=findings.infra or bool(policy.llm_code), hidden_failures=hidden
         ),
@@ -1488,6 +1496,14 @@ def _locked(result: CiResult, start: Commits, base_dir: str | None) -> CiResult:
     return replace(result, locked=locked_line(start))
 
 
+_METRICS = ".lgcov/metrics.jsonl"  # T233: in the working directory; a hosted runner drops it
+
+
+def _env_pr() -> str:
+    env = os.environ
+    return pr_name(env.get("GITHUB_REPOSITORY", ""), env.get("GITHUB_REF", "")) or ""
+
+
 def _ci(argv: list[str]) -> int:
     """T078: one run for the GitHub Action: report file, step outputs, exit code."""
     ap = argparse.ArgumentParser(prog="lgcov ci")
@@ -1522,6 +1538,8 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--tier", choices=TIERS, help="pr (default) or nightly; overrides tier")
     ap.add_argument("--nightly-url", help="main's latest nightly run, linked in the report")
     ap.add_argument("--timing-out", help="write this run's timing here as JSON (T105 benchmark)")
+    ap.add_argument("--metrics-out", default=_METRICS, help="append this run's PR record here")
+    ap.add_argument("--pr", default=_env_pr(), help="owner/repo#12; default: the Action's PR")
     ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
     ap.add_argument("--policy-dir", help="checkout of the PR's base: lgcov.yaml, taxonomy, bands")
     ap.add_argument("--result-out", help="write the result here, bound to commits and policy")
@@ -1567,6 +1585,19 @@ def _ci(argv: list[str]) -> int:
         )
         Path(args.result_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.result_out).write_text(result_to_json(bound), encoding="utf-8")
+    if args.pr.strip():  # T233: one line per run of a PR; a local run or a nightly has none
+        took, runs = result.timing, result.tally.runs if result.tally else 0
+        record = pr_metrics(
+            args.pr.strip(),
+            action.verdict,
+            wall_seconds=took.total if took else 0.0,
+            cases=runs,
+            repeats=result.samples,
+            judge_calls=took.judge_calls if took else 0,
+        )
+        Path(args.metrics_out).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.metrics_out, "a", encoding="utf-8") as f:
+            f.write(record_to_json(record) + "\n")
     if args.timing_out and result.timing:
         timing = Path(args.timing_out)
         timing.parent.mkdir(parents=True, exist_ok=True)
