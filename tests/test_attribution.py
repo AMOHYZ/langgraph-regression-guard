@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from lgcov.attribution import (
+    GRAPH_NOT_GIVEN,
     NEEDS_LIVE,
     NO_DRIFT_ABOVE_NOISE,
     NO_FINGERPRINT,
@@ -295,8 +296,18 @@ def test_classify_a_changed_node_with_no_offline_probe_is_inconclusive_not_root(
 
 
 def test_classify_a_node_only_one_side_ran_is_root() -> None:
-    labels = classify(drifted=["new"], codes=({}, {"new": "1"}), probes={})
+    # T238: base's graph, given, has no such node: the PR added it.
+    labels = classify(
+        drifted=["new"], codes=({}, {"new": "1"}), probes={}, graphs=({"a"}, {"a", "new"})
+    )
     assert labels.root == ("new",)
+
+
+def test_classify_a_node_only_the_pr_ran_is_inconclusive_with_no_graphs() -> None:
+    labels = classify(drifted=["new"], codes=({}, {"new": "1"}), probes={})
+    assert (labels.root, labels.propagated) == ((), ())
+    assert labels.inconclusive == {"new": GRAPH_NOT_GIVEN["base"]}
+    assert "base's graph wasn't given" in GRAPH_NOT_GIVEN["base"]
 
 
 def test_a_run_that_drifted_with_no_changed_node_still_has_an_inconclusive_node() -> None:
@@ -396,3 +407,41 @@ def test_a_node_whose_input_differed_stays_propagated() -> None:
     labels = NodeLabels(root=("b",), propagated=("c",), inconclusive={})
     out = explain_runs(labels, ["b"], [["b", "c"]], ran=[["b", "c"]], same_input=[{"b"}])
     assert (out.propagated, out.inconclusive) == (("c",), {})
+
+
+# T238: "added or removed" is read from the graphs, not from which nodes a run reached.
+BOTH = ({"classify", "lookup", "respond"}, {"classify", "lookup", "respond"})
+
+
+def test_a_node_in_both_graphs_that_one_side_did_not_reach_is_not_root() -> None:
+    skipped = classify(["lookup"], ({"lookup": "1"}, {}), {}, graphs=BOTH)
+    reached = classify(["lookup"], ({}, {"lookup": "1"}), {}, graphs=BOTH)
+    assert skipped == reached == NodeLabels((), ("lookup",), {})
+
+
+@pytest.mark.parametrize(
+    ("codes", "graphs"),
+    [
+        (({"old": "1"}, {}), ({"old", "a"}, {"a"})),  # head's graph has no such node: removed
+        (({}, {"new": "1"}), ({"a"}, {"new", "a"})),  # base's graph has none: added
+    ],
+)
+def test_a_node_missing_from_one_graph_is_root(
+    codes: tuple[dict[str, str | None], dict[str, str | None]],
+    graphs: tuple[set[str], set[str]],
+) -> None:
+    labels = classify([*codes[0], *codes[1]], codes, {}, graphs=graphs)
+    assert labels.root == (next(iter({**codes[0], **codes[1]})),) and not labels.inconclusive
+
+
+def test_a_node_only_the_pr_ran_is_inconclusive_when_base_s_graph_is_not_given() -> None:
+    labels = classify(["new"], ({}, {"new": "1"}), {}, graphs=(None, {"new"}))
+    assert (labels.root, labels.propagated) == ((), ())
+    assert labels.inconclusive == {"new": GRAPH_NOT_GIVEN["base"]}
+    assert "base's graph wasn't given" in labels.inconclusive["new"]
+
+
+def test_a_node_a_baseline_run_reached_is_known_to_be_in_base_s_graph() -> None:
+    # Base ran it and the PR didn't: head's graph settles it, and base's isn't needed.
+    labels = classify(["lookup"], ({"lookup": "1"}, {}), {}, graphs=(None, {"lookup"}))
+    assert labels == NodeLabels((), ("lookup",), {})

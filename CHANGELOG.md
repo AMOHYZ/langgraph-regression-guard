@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Gate behaviour change.** A node only one side ran is no longer root just for that. It is root only when the other side's graph doesn't have it: the PR added or removed it. A node that is in both graphs, which a run merely stopped or started reaching, is propagated when a root or a changed router before it explains the run, and it gets the same label whether the baseline holds one run or several. **Limit:** `lgcov ci` doesn't know base's graph yet, in one job or two. So a node only the PR reached, which no baseline run ever reached, reads `inconclusive (only the PR ran it, and base's graph wasn't given…)` whether the PR added it or newly reached it. It blocks under `fail-on: root-drift` either way, as it did when it read root. The label becomes precise once the baseline recording holds the graph's node names. `lgcov bench` on real rows and `--from-runs` have neither graph, so there a node only one side ran is always inconclusive. The synthetic bench has both graphs.
+
 ## 0.3.0 (2026-11-14)
 
 Everything merged from 9 to 14 November 2026 (#95 to #143), one line per change, with its PR. Docs-only, test-only and refactoring PRs have no line.

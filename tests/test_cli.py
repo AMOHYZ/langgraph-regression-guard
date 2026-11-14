@@ -15,7 +15,15 @@ from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 from examples.synthetic_agents import AGENTS
 from lgcov.attribution import UNEXPLAINED, Benchmark, NodeLabels, NoiseCheck
 from lgcov.cassette import Cassette, Step, _codes, _router_prints, compared_run, replay_run
-from lgcov.cli import _import_file, _l2_judge, _labelled, _lgcov_root, _load_graph, main
+from lgcov.cli import (
+    _import_file,
+    _l2_judge,
+    _labelled,
+    _lgcov_root,
+    _load_graph,
+    _node_labels,
+    main,
+)
 from lgcov.fingerprint import fingerprint
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, NodeState, Verdict
@@ -3370,3 +3378,73 @@ def test_bench_synthetic_writes_the_per_node_scores(tmp_path: Path) -> None:
         "first drift + router rule",
     ]
     assert raw["per_node"][0]["recall"]["of"] == 31
+
+
+# T238: a node the route stopped or started reaching isn't "added or removed", whatever the
+# number of runs in the baseline.
+def _route(router: str, via_lookup: bool) -> list[Step]:
+    lookup = [Step("lookup", "found", {"q": 1}, "c2")] if via_lookup else []
+    seen = {"found": via_lookup}
+    answer = "with the order" if via_lookup else "without it"
+    return [
+        Step("classify", 1, {"q": 1}, "c1", router=router),
+        *lookup,
+        Step("respond", answer, seen, "c3"),
+    ]
+
+
+@pytest.mark.parametrize("keep", [[0], [1], [0, 1]])
+def test_a_rerouted_node_gets_the_same_label_with_one_run_or_two(keep: list[int]) -> None:
+    # Run 0 reaches lookup on base only, run 1 on the PR only.
+    base = [Cassette({}, _route("r1", via)) for via in (True, False)]
+    head = [_route("r2", via) for via in (False, True)]
+    runs, fresh = [base[i] for i in keep], [head[i] for i in keep]
+    drifts = [list(compared_run(r, f, (), None).drifts) for r, f in zip(runs, fresh, strict=True)]
+    nodes = {"classify", "lookup", "respond"}
+    labels = _node_labels(runs, fresh, drifts, {}, graphs=(nodes, nodes))
+    assert (labels.root, labels.propagated) == (("classify",), ("lookup", "respond"))
+    assert labels.inconclusive == {}
+
+
+def _rerouted_ci(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep: list[int]) -> str:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace(*ROUTER_EDIT))
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    raw = json.loads(baseline.read_text(encoding="utf-8"))
+    raw["runs"] = [raw["runs"][i] for i in keep]
+    baseline.write_text(json.dumps(raw), encoding="utf-8")
+    (tmp_path / "base").mkdir()
+    (tmp_path / "base" / "graph.py").write_text(demo, encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--base-dir", "base")
+    assert code == 1
+    return report
+
+
+@pytest.mark.parametrize("keep", [[0], [0, 1]])
+def test_cli_ci_calls_a_node_some_baseline_run_reached_propagated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep: list[int]
+) -> None:
+    report = _rerouted_ci(tmp_path, monkeypatch, keep)
+    n = len(keep)
+    assert f"| `classify` | root (routing change at classify) | {n}/{n} |" in report
+    assert f"| `lookup_order` | propagated | {n}/{n} |" in report
+
+
+def test_cli_ci_calls_a_node_only_the_pr_reached_inconclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The limit: ci doesn't know base's graph, even with a base checkout, until the baseline
+    # recording holds it. Added or newly reached, the node blocks either way.
+    report = _rerouted_ci(tmp_path, monkeypatch, [1])
+    assert "| `lookup_order` | inconclusive (only the PR ran it, and base's graph wasn't given" in (
+        report
+    )
+    assert "| `lookup_order` | root" not in report and "| `lookup_order` | propagated" not in report
+
+
+def test_bench_synthetic_names_no_root_just_because_one_side_ran_it(tmp_path: Path) -> None:
+    results = tmp_path / "results.json"
+    main(["bench", "--synthetic", "--out", str(tmp_path / "b.md"), "--json", str(results)])
+    every = json.loads(results.read_text(encoding="utf-8"))["per_node"][0]
+    assert every["one_sided"]["hits"] == 0
+    assert every["exact"] == every["recall"]  # each case names its one root, or none

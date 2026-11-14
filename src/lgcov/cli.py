@@ -414,12 +414,14 @@ def _node_labels(
     probes: Mapping[str, Probe],
     ignore_paths: Sequence[str] = (),
     quiet: Collection[str] = (),
+    graphs: tuple[Collection[str] | None, Collection[str] | None] = (None, None),
 ) -> NodeLabels:
     """T222: each drifted node's label, from the recorded runs, the PR's steps for each and their
     drifts: what `lgcov ci` ships and what `lgcov bench` scores, so the two can't disagree.
     Root by fingerprint and probe (`classify`, T162), then what a run's order, routers and inputs
     add (`explain_runs`: T175, T230). `quiet` (T211): nodes under their noise, which get no label
-    and aren't a run's first drifted node."""
+    and aren't a run's first drifted node. `graphs` (T238): base's and head's node names, None for
+    one that isn't known."""
     codes = (
         {s.node: s.code for r in runs for s in r.steps},
         {s.node: s.code for steps in fresh for s in steps},
@@ -432,7 +434,7 @@ def _node_labels(
     firsts = [_run_root(r, d) for r, d in zip(runs, drifts, strict=True)]
     nodes = [{x.node for x in d} - set(quiet) for d in drifts]
     ran = [[s.node for s in r.steps] for r in runs]
-    by_node = classify(set().union(*nodes), codes, probes)
+    by_node = classify(set().union(*nodes), codes, probes, graphs)
     same = [same_input(r, f, ignore_paths) for r, f in zip(runs, fresh, strict=True)]
     return explain_runs(
         by_node, [None if f in quiet else f for f in firsts], nodes, routers, ran, same
@@ -1172,7 +1174,12 @@ def _evaluate(
     # with the roots, since a live model node can't be probed until T211.
     firsts = [_run_root(r, d) for r, d in zip(runs, drifts, strict=True)]
     nodes = [{x.node for x in d} for d in drifts]
-    labels = _node_labels(runs, [f.steps for f in run.fresh], drifts, probes, cfg.ignore_paths)
+    # T238: base's graph counts as not given, in one job or two, until the baseline recording
+    # holds its node names: the candidate file can't, since the PR's code writes it.
+    graphs = (None, run.head.nodes)
+    labels = _node_labels(
+        runs, [f.steps for f in run.fresh], drifts, probes, cfg.ignore_paths, graphs=graphs
+    )
     blocking = {*labels.root, *labels.inconclusive}
     root, downstream = sorted(blocking), list(labels.propagated)
     # T199: the comment's tally line: each run's root and inconclusive nodes, in run order.
@@ -2665,13 +2672,15 @@ def _synthetic_agents() -> Sequence[Agent]:
     return agents
 
 
-def _shipped(case: Case) -> Found:
+def _shipped(case: Case, base_nodes: Collection[str] | None = None) -> Found:
     """T222: what `lgcov ci` says about a case: replay the edited agent, serving what it left
-    alone, probe its changed nodes offline, and label as ci does (`_node_labels`)."""
+    alone, probe its changed nodes offline, and label as ci does (`_node_labels`). T238:
+    `base_nodes`: the unedited agent's node names, as `lgcov ci` has them from the base checkout."""
     runs = [case.base]
     done = replay_run(case.graph, case.base, (), serve=True)
     probes = judge_probes(runs, probe_steps(case.graph, runs, changed_nodes(case.graph, runs)))
-    labels = _node_labels(runs, [done.steps], [list(done.drifts)], probes)
+    graphs = (base_nodes, set(getattr(case.graph, "nodes", {})))
+    labels = _node_labels(runs, [done.steps], [list(done.drifts)], probes, graphs=graphs)
     sides = ({s.node for s in case.base.steps}, {s.node for s in done.steps})
     return Found(
         frozenset(labels.root),
@@ -2705,7 +2714,9 @@ def _bench_synthetic(out: Path, results: Path) -> int:
     cases = [case for agent in agents for case in every_case(agent)]
     aa = [(agent.name, arm) for agent in agents for arm in aa_arms(agent)]
     noise = [(agent.name, rate) for agent in agents for rate in noise_rule_rates(agent)]
-    found = {id(case): _shipped(case) for case in cases}  # the cases stay alive in `cases`
+    nodes = {agent.name: set(getattr(agent.graph, "nodes", {})) for agent in agents}
+    # The cases stay alive in `cases`, so an id names one case.
+    found = {id(case): _shipped(case, nodes[case.agent]) for case in cases}
     report = build_report(
         cases,
         lambda case: set(found[id(case)].root),

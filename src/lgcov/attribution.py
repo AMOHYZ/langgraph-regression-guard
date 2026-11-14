@@ -224,6 +224,12 @@ UNEXPLAINED = (
     "drifted with no changed node before it: a change outside node code, an edited recording, "
     "or a live call's variation"
 )
+# T238: a node only one side ran, when the other side's graph isn't known. By the missing graph.
+_CANT_TELL = ": an added or removed node can't be told from one a run didn't reach"
+GRAPH_NOT_GIVEN = {
+    "base": "only the PR ran it, and base's graph wasn't given" + _CANT_TELL,
+    "head": "only base ran it, and the PR's graph wasn't given" + _CANT_TELL,
+}
 ROUTING = "routing change at {}"  # T175: why a node whose own output didn't drift is root
 
 
@@ -304,11 +310,18 @@ def classify(
     drifted: Collection[str],
     codes: tuple[Mapping[str, str | None], Mapping[str, str | None]],
     probes: Mapping[str, Probe],
+    graphs: tuple[Collection[str] | None, Collection[str] | None] = (None, None),
 ) -> NodeLabels:
     """T162: each drifted node is root when its fingerprint changed (base's code against head's)
     and it drifts on base's recorded input (`probes`), propagated when it only drifts because its
-    input did. A node only one side ran is root: the PR added or removed it. T212: a comment, a
-    reformat or the node function's own docstring doesn't change a fingerprint."""
+    input did. T212: a comment, a reformat or the node function's own docstring doesn't change a
+    fingerprint.
+
+    T238: a node only one side ran is root when the other side's graph (`graphs`: base's and
+    head's node names, None when not known) doesn't have it: the PR added or removed it. In both
+    graphs, a run just didn't reach it, which is its input's doing: propagated, unless
+    `explain_runs` finds nothing before it. A side that ran a node has it, so only the other
+    graph is needed; when that one isn't known, the node is inconclusive, never root."""
     base, head = codes
     root: list[str] = []
     propagated: list[str] = []
@@ -316,7 +329,14 @@ def classify(
     for node in sorted(set(drifted)):
         probe = probes.get(node, Probe(None, NOT_PROBED))
         if node not in base or node not in head:
-            root.append(node)
+            missing = "head" if node in base else "base"
+            other = graphs[1] if node in base else graphs[0]
+            if other is None:
+                inconclusive[node] = GRAPH_NOT_GIVEN[missing]
+            elif node in other:
+                propagated.append(node)
+            else:
+                root.append(node)
         elif base[node] is None or head[node] is None:
             inconclusive[node] = NO_FINGERPRINT
         elif base[node] == head[node] or probe.drifted is False:
