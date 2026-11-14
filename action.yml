@@ -497,6 +497,22 @@ runs:
         if-no-files-found: warn
         overwrite: true
 
+    # T233: `lgcov ci` appends this run's record where it ran: the workspace, or the PR's checkout
+    # in the job that decides. No flag is passed for it, since a project's older lgcov would exit
+    # 2 on one; that lgcov writes no record, and then there is nothing to upload.
+    - name: Upload the PR's metrics record
+      if: inputs.phase != 'candidate' && github.event_name == 'pull_request'
+      uses: actions/upload-artifact@v4
+      continue-on-error: true
+      with:
+        name: lgcov-metrics
+        path: |
+          .lgcov/metrics.jsonl
+          ${{ runner.temp }}/lgcov-pr/.lgcov/metrics.jsonl
+        include-hidden-files: true
+        if-no-files-found: ignore
+        overwrite: true
+
     # T179: only what the job that decides needs. It holds live outputs, so it doesn't stay long.
     - name: Upload what this job did
       if: inputs.phase == 'candidate'

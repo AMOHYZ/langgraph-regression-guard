@@ -699,8 +699,10 @@ lgcov metrics summary .lgcov/metrics.jsonl
 - A PR that ran several times counts once, as its last run.
 - A run that never got as far as timing records 0 seconds, and the wall-time percentiles
   leave those out ("known on 3 of 4 checked PRs").
-- A hosted runner discards the file when the job ends: the Action does not upload or commit
-  it. Keep it with your own `actions/upload-artifact` step, or a cache, if you want the history.
+- A hosted runner discards the file when the job ends, so on a PR the Action uploads it as
+  the `lgcov-metrics` artifact: one line, that run's. It isn't a history: download the
+  artifacts of the runs you want and concatenate them before `lgcov metrics summary`. A
+  project whose own lgcov is older than the record writes none, and nothing is uploaded.
 
 ## Development
 
