@@ -13,7 +13,7 @@ import pytest
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from examples.synthetic_agents import AGENTS
-from lgcov.attribution import UNEXPLAINED, Benchmark, NoiseCheck
+from lgcov.attribution import UNEXPLAINED, Benchmark, NodeLabels, NoiseCheck
 from lgcov.cassette import Cassette, Step, _codes, _router_prints, compared_run, replay_run
 from lgcov.cli import _import_file, _l2_judge, _labelled, _lgcov_root, _load_graph, main
 from lgcov.fingerprint import fingerprint
@@ -3190,3 +3190,32 @@ def test_a_first_node_under_its_noise_is_not_relabelled_inconclusive(tmp_path: P
     found = _labelled(bench, (base, head), drifts, {}, 0.0, {"brief": quiet})
     assert (found.found_root, dict(found.inconclusive)) == ((), {})
     assert found.found_propagated == ("report",)
+
+
+# T222: the bench scores the labels `lgcov ci` ships, so both take them from one function.
+@pytest.mark.slow
+def test_bench_and_ci_name_the_same_roots_on_a_multi_root_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lgcov import cli
+    from lgcov.cassette import record, runs_to_json
+
+    real, seen = cli._node_labels, []
+
+    def spy(*args: object, **kwargs: object) -> NodeLabels:
+        seen.append(real(*args, **kwargs))  # type: ignore[arg-type]  # passed through as given
+        return seen[-1]
+
+    monkeypatch.setattr(cli, "_node_labels", spy)
+    assert _bench(tmp_path, str(BENCH), "--only", "multi_root")[0] == 0
+    base = _import_file(str(BENCH / "multi_root" / "base.py")).graph
+    head = (BENCH / "multi_root" / "head.py").read_text(encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "graph.py").write_text(head, encoding="utf-8")
+    (tmp_path / "cassettes").mkdir()
+    runs = [record(base, {"question": "Where is my order?"})]
+    (tmp_path / "cassettes" / "baseline.json").write_text(runs_to_json(runs), encoding="utf-8")
+    assert _run_ci(tmp_path)[0] == 1
+    bench, ci = seen
+    assert (bench.root, bench.propagated) == (ci.root, ci.propagated) == (("b", "c"), ("d", "e"))
+    assert bench.inconclusive == ci.inconclusive == {}

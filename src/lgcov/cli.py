@@ -393,6 +393,38 @@ def _drift_kinds(
     return counts, roots
 
 
+def _node_labels(
+    runs: Sequence[Cassette],
+    fresh: Sequence[Sequence[Step]],
+    drifts: Sequence[list[Drift]],
+    probes: Mapping[str, Probe],
+    ignore_paths: Sequence[str] = (),
+    quiet: Collection[str] = (),
+) -> NodeLabels:
+    """T222: each drifted node's label, from the recorded runs, the PR's steps for each and their
+    drifts: what `lgcov ci` ships and what `lgcov bench` scores, so the two can't disagree.
+    Root by fingerprint and probe (`classify`, T162), then what a run's order, routers and inputs
+    add (`explain_runs`: T175, T230). `quiet` (T211): nodes under their noise, which get no label
+    and aren't a run's first drifted node."""
+    codes = (
+        {s.node: s.code for r in runs for s in r.steps},
+        {s.node: s.code for steps in fresh for s in steps},
+    )
+    # T175: a changed router makes its source node root. Old recordings have no router print.
+    routers = (
+        {s.node: s.router for r in runs for s in r.steps},
+        {s.node: s.router for steps in fresh for s in steps},
+    )
+    firsts = [_run_root(r, d) for r, d in zip(runs, drifts, strict=True)]
+    nodes = [{x.node for x in d} - set(quiet) for d in drifts]
+    ran = [[s.node for s in r.steps] for r in runs]
+    by_node = classify(set().union(*nodes), codes, probes)
+    same = [same_input(r, f, ignore_paths) for r, f in zip(runs, fresh, strict=True)]
+    return explain_runs(
+        by_node, [None if f in quiet else f for f in firsts], nodes, routers, ran, same
+    )
+
+
 def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
     drifted = {d.node for d in run_drifts}
     # nodes the change added are not in the baseline steps; they sort last
@@ -1124,20 +1156,9 @@ def _evaluate(
         return replace(partial, harness_error=_harness_message("cannot use the probes", exc))
     # T162: root by fingerprint and probe. Under fail-on: root-drift an inconclusive node blocks
     # with the roots, since a live model node can't be probed until T211.
-    counts, _ = _drift_kinds(runs, drifts)
-    bases = {s.node: s.code for r in runs for s in r.steps}
-    heads = {s.node: s.code for f in run.fresh for s in f.steps}
     firsts = [_run_root(r, d) for r, d in zip(runs, drifts, strict=True)]
     nodes = [{x.node for x in d} for d in drifts]
-    # T175: a changed router makes its source node root. Old recordings have no router print.
-    routers = (
-        {s.node: s.router for r in runs for s in r.steps},
-        {s.node: s.router for f in run.fresh for s in f.steps},
-    )
-    ran = [[s.node for s in r.steps] for r in runs]
-    by_node = classify(counts.keys(), (bases, heads), probes)
-    same = [same_input(r, f.steps, cfg.ignore_paths) for r, f in zip(runs, run.fresh, strict=True)]
-    labels = explain_runs(by_node, firsts, nodes, routers, ran, same)
+    labels = _node_labels(runs, [f.steps for f in run.fresh], drifts, probes, cfg.ignore_paths)
     blocking = {*labels.root, *labels.inconclusive}
     root, downstream = sorted(blocking), list(labels.propagated)
     # T199: the comment's tally line: each run's root and inconclusive nodes, in run order.
@@ -2539,23 +2560,14 @@ def _labelled(
     inconclusive: its code changed, and the check misses a shift smaller than the spread. An
     unchanged node under its noise explains its own drift, so it gets no label, and a run it was
     first to drift in needs no other cause."""
-    counts, first = _drift_kinds(sides[0], drifts)
+    _, first = _drift_kinds(sides[0], drifts)
     base, head = ({s.node: s.code for r in side for s in r.steps} for side in sides)
-    firsts = [_run_root(r, d) for r, d in zip(sides[0], drifts, strict=True)]
-    nodes = [{x.node for x in d} for d in drifts]
-    # T175: a changed router makes its source node root, as in `lgcov ci`.
-    base_routers = {s.node: s.router for r in sides[0] for s in r.steps}
-    routers = (base_routers, {s.node: s.router for r in sides[1] for s in r.steps})
-    ran = [[s.node for s in r.steps] for r in sides[0]]
     checks = dict(noise or {})
     changed = {n for n in checks if base.get(n) != head.get(n)}
     judged = {n: Probe(checks[n].drifted or None, checks[n].verdict) for n in changed}
     quiet = {n for n, c in checks.items() if not c.drifted} - changed
-    firsts = [None if f in quiet else f for f in firsts]
-    nodes = [n - quiet for n in nodes]
-    by_node = classify(counts.keys() - quiet, (base, head), {**probes, **judged})
-    same = [same_input(r, f.steps) for r, f in zip(*sides, strict=True)]
-    labels = explain_runs(by_node, firsts, nodes, routers, ran, same)
+    fresh = [r.steps for r in sides[1]]
+    labels = _node_labels(sides[0], fresh, drifts, {**probes, **judged}, quiet=quiet)
     return Result(
         b.name,
         labels.root,
