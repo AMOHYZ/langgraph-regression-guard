@@ -2374,6 +2374,25 @@ def test_cli_calibrate_writes_bands_json_with_the_pinned_jev_model(
     )
 
 
+def test_cli_ci_comment_says_what_a_non_blocking_judge_still_needs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T187: one line per judge that can't block, under the KPI gate heading."""
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    entry = {"band": "flag", "n": 40, "labels_for_kappa_010": 107}
+    counts = {"agreed_failures": 11, "agreed_passes": 16}
+    doc = {"jev_model": None, "judges": {"answer_states_order_status": entry | counts}}
+    bands = tmp_path / "calibration" / "bands.json"
+    bands.parent.mkdir()
+    bands.write_text(json.dumps(doc), encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    assert (
+        "- `answer_states_order_status` (flag): needs 5 more agreed failures (11 of 16); "
+        "κ ±0.10: 67 more labels (40 of 107)."
+    ) in report.split("### KPI gate (L2)")[1]
+
+
 def test_cli_judge_respects_the_bands(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     taxonomy = tmp_path / "taxonomy.yaml"
     taxonomy.write_text(UNDECIDED_TAXONOMY, encoding="utf-8")

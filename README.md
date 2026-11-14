@@ -629,6 +629,12 @@ elsewhere):
 - A model judge with no labels is advisory (`gate.uncalibrated: flag` makes it a flag), and
   the report says so at the top: "⚠️ 1 of 2 judges uncalibrated: no model judge can block
   this PR. Run `lgcov calibrate`."
+- Each model judge that can't block gets one line under it saying what it still needs, the
+  band rule first: "`tone` (advisory): needs 5 more agreed failures (11 of 16); κ ±0.10: 61
+  more labels (46 of 107)." The counts are bands.json's `agreed_failures` and
+  `agreed_passes`; a file written before they existed says to run `lgcov calibrate`. A
+  judge that has both counts is held by its TPR and TNR bounds, and its line says that
+  instead of asking for labels.
 - Blocking takes at least 16 human-failed and 16 human-passed cases with no disagreement:
   at 16/16 the Wilson lower bound is 0.806. In practice, start as Hamel Husain recommends,
   with about 100 diverse traces ([AI Evals FAQ](https://hamel.dev/blog/posts/evals-faq/)).
