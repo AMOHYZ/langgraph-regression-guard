@@ -1,6 +1,7 @@
 """T121: scoring the synthetic suite: pure rates on small hand-made votes, then the real suite."""
 
 import json
+from collections.abc import Set
 from dataclasses import replace
 from functools import cache
 
@@ -9,6 +10,7 @@ from lgcov.cassette import Cassette, Step, record
 from lgcov.synthetic import Case, GroundTruth, NoiseRate, aa_arms, every_case, generate
 from lgcov.synthetic_score import (
     METHODS,
+    Found,
     Rate,
     Report,
     Vote,
@@ -16,6 +18,7 @@ from lgcov.synthetic_score import (
     by_edit,
     end_to_end_flags,
     first_divergence,
+    node_score,
     rates,
     render_section,
     replace_section,
@@ -241,3 +244,68 @@ def test_writing_the_section_twice_changes_nothing() -> None:
 
 def test_a_doc_with_no_real_prs_gets_the_section_at_its_end() -> None:
     assert replace_section("# T\n", "## Synthetic\n\nnew\n") == "# T\n\n## Synthetic\n\nnew\n"
+
+
+# T222: the labels `lgcov ci` ships can name several roots, or none and an inconclusive node.
+def _found(
+    root: Set[str], unsure: Set[str] = frozenset(), one_sided: Set[str] = frozenset()
+) -> Found:
+    return Found(frozenset(root), frozenset(unsure), frozenset(one_sided))
+
+
+def _labelled_cases() -> list[tuple[Case, Found]]:
+    regressed = _case([Step("edited", 1)], [Step("edited", 2)])
+    benign = _case([Step("edited", 1)], [Step("edited", 2)], regressed=False)
+    return [
+        (regressed, _found({"edited"})),
+        (regressed, _found({"edited", "added"}, one_sided={"added"})),
+        (regressed, _found(set(), {"sub"})),  # names no root: a miss, not a false positive
+        (benign, _found({"edited"})),  # the edited node, but nothing regressed
+    ]
+
+
+def test_per_node_scores_count_each_named_root_and_an_inconclusive_case_as_a_miss() -> None:
+    score = node_score(_labelled_cases())
+    assert score.precision == Rate(2, 4)  # of the 4 nodes named root, 2 are a regression's edit
+    assert score.recall == Rate(2, 3)  # of the 3 regressed cases, 2 have their edited node named
+    assert score.exact == Rate(1, 3)  # and 1 names exactly that node
+    assert score.inconclusive == 1
+    assert score.one_sided == Rate(1, 4)  # roots named because only one side ran the node
+
+
+def _shipped_report() -> Report:
+    def labels(case: Case) -> Found:
+        named = _lgcov(case)
+        return _found(named) if case.truth.edit_kind == "node_body" else _found(set(), named)
+
+    return build_report(
+        _suite(),
+        lambda case: set(labels(case).root),
+        [],
+        "2026-01-02",
+        labels=labels,
+        first_drift=_lgcov,
+    )
+
+
+def test_the_section_scores_the_shipped_labels_first_and_the_older_rule_beside_them() -> None:
+    report = _shipped_report()
+    assert [r.method for r in report.all_edits][:2] == ["lgcov root", "first drift + router rule"]
+    section = render_section(report)
+    assert "### Per node" in section and "| Inconclusive cases |" in section
+    assert "names no root: a miss for recall, and not counted in precision" in section
+    raw = json.loads(report_json(report))
+    assert [g["edits"] for g in raw["per_node"]] == ["All", "Single-node"]
+    assert set(raw["per_node"][0]) == {
+        "edits",
+        "precision",
+        "recall",
+        "exact",
+        "inconclusive",
+        "one_sided",
+    }
+    assert raw["per_node"][0]["inconclusive"] > raw["per_node"][1]["inconclusive"] == 0
+
+
+def test_a_report_without_shipped_labels_has_no_per_node_table() -> None:
+    assert _report().per_node == () and "### Per node" not in render_section(_report())

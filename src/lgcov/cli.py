@@ -160,7 +160,13 @@ from lgcov.sampling import (
 from lgcov.slices import Group, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.synthetic import Agent, Case, aa_arms, every_case, noise_rule_rates
-from lgcov.synthetic_score import build_report, render_section, replace_section, report_json
+from lgcov.synthetic_score import (
+    Found,
+    build_report,
+    render_section,
+    replace_section,
+    report_json,
+)
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
 from lgcov.verdict_actions import CI_STATUSES, MODES, CodeFailure, gate_findings
 
@@ -2594,8 +2600,24 @@ def _synthetic_agents() -> Sequence[Agent]:
     return agents
 
 
+def _shipped(case: Case) -> Found:
+    """T222: what `lgcov ci` says about a case: replay the edited agent, serving what it left
+    alone, probe its changed nodes offline, and label as ci does (`_node_labels`)."""
+    runs = [case.base]
+    done = replay_run(case.graph, case.base, (), serve=True)
+    probes = judge_probes(runs, probe_steps(case.graph, runs, changed_nodes(case.graph, runs)))
+    labels = _node_labels(runs, [done.steps], [list(done.drifts)], probes)
+    sides = ({s.node for s in case.base.steps}, {s.node for s in done.steps})
+    return Found(
+        frozenset(labels.root),
+        frozenset(labels.inconclusive),
+        frozenset(labels.root) & (sides[0] ^ sides[1]),
+    )
+
+
 def _lgcov_root(case: Case) -> set[str]:
-    """What `lgcov ci` would call root: replay the edited agent, serving what it left alone. The
+    """The rule `lgcov ci` used before T162, scored beside the shipped labels: replay the edited
+    agent, serving what it left alone. The
     first node to drift, or T175: the source node of a router the edit changed."""
     done = replay_run(case.graph, case.base, (), serve=True)
     root = _run_root(case.base, list(done.drifts))
@@ -2618,7 +2640,16 @@ def _bench_synthetic(out: Path, results: Path) -> int:
     cases = [case for agent in agents for case in every_case(agent)]
     aa = [(agent.name, arm) for agent in agents for arm in aa_arms(agent)]
     noise = [(agent.name, rate) for agent in agents for rate in noise_rule_rates(agent)]
-    report = build_report(cases, _lgcov_root, aa, datetime.now(UTC).date().isoformat(), noise)
+    found = {id(case): _shipped(case) for case in cases}  # the cases stay alive in `cases`
+    report = build_report(
+        cases,
+        lambda case: set(found[id(case)].root),
+        aa,
+        datetime.now(UTC).date().isoformat(),
+        noise,
+        labels=lambda case: found[id(case)],
+        first_drift=_lgcov_root,
+    )
     section = render_section(report)
     doc = out.read_text(encoding="utf-8") if out.exists() else ""
     for path, text in ((out, replace_section(doc, section)), (results, report_json(report))):
