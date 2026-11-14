@@ -5,7 +5,26 @@ only the nodes a PR can reach, and shows which node's output changed first and w
 after it. Each KPI in your taxonomy gets a paired test, and a judge can block only once it
 has earned that against human labels. A GitHub Action; first report in 2 minutes.
 
+[![PyPI](https://img.shields.io/pypi/v/lgcov)](https://pypi.org/project/lgcov/)
+[![Python](https://img.shields.io/pypi/pyversions/lgcov)](https://pypi.org/project/lgcov/)
+[![License: MIT](https://img.shields.io/pypi/l/lgcov)](LICENSE)
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
+
+```bash
+pip install lgcov
+```
+
+Change one prompt in the demo agent, and `lgcov replay` answers with the node whose output
+changed and the ones it left alone:
+
+| node | drift | runs |
+|---|---|---|
+| `respond` | root | 2/2 |
+
+Unchanged: `classify`, `lookup_order`
+
+That is the [quickstart](#quickstart) below: five commands, offline, about 2 minutes. In CI
+the same table lands in a PR comment: [use in your repo](#use-in-your-repo).
 
 ## The problem
 
@@ -39,61 +58,27 @@ so far, one real PR, and what lgcov missed: [docs/benchmark.md](docs/benchmark.m
 
 ## Install
 
-The package is `lgcov`, like its command. It isn't on PyPI yet. Until it is, from TestPyPI,
-with its dependencies from PyPI first (`--no-deps`: anyone can upload to TestPyPI, so
-nothing else should come from there):
-
 ```bash
-pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
-pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.3.0
+pip install lgcov
 ```
 
-Or from GitHub, as the quickstart does. Once on PyPI: `pip install lgcov`.
+Python 3.12 or newer. The package is [`lgcov` on PyPI](https://pypi.org/project/lgcov/), like
+its command. With uv: `uv add --dev lgcov`. For the newest commit instead of the latest
+release: `pip install "git+https://github.com/AMOHYZ/langgraph-regression-guard"`.
 
-Maintainers: `release.yml` publishes to TestPyPI, then PyPI, with trusted publishing (OIDC,
-no token). Set up once, before the first tag (done for 0.1.0), on test.pypi.org:
-
-1. Sign in, then **Your account → Publishing**
-   (https://test.pypi.org/manage/account/publishing/). The account needs 2FA: without
-   it, TestPyPI shows its 2FA setup page instead, and no publisher can be added.
-2. Under **Add a new pending publisher**, on the GitHub tab: TestPyPI project name `lgcov`,
-   owner `AMOHYZ`, repository name `langgraph-regression-guard`, workflow name
-   `release.yml`, environment name `testpypi`.
-3. Click **Add**. The first publish makes it the project's own publisher, so later tags
-   need nothing more on TestPyPI. A publish that fails with `invalid-publisher` found no
-   publisher there matching the claims its log prints.
-
-PyPI has its own job, `publish-pypi`, which runs after the TestPyPI one. Set up once, before
-the first tag that should reach PyPI:
-
-1. On pypi.org, use a personal account with a personal email, not a work one, with 2FA on.
-   It is a separate account from the TestPyPI one.
-2. **Your account → Publishing** (https://pypi.org/manage/account/publishing/) → **Add a
-   new pending publisher**, GitHub tab: PyPI project name `lgcov`, owner `AMOHYZ`,
-   repository name `langgraph-regression-guard`, workflow name `release.yml`, environment
-   name `pypi`. A pending publisher doesn't reserve the name: only the first upload does.
-3. On GitHub, **Settings → Environments → New environment** `pypi`, with yourself under
-   **Required reviewers**. Each release then waits there for an approval before it uploads.
-
-A version on PyPI can't be uploaded again, so the approval is the last check.
-
-Then pushing a `vX.Y.Z` tag builds, makes the GitHub Release and publishes. Run by hand
-(Actions → release → Run workflow), `dry_run` (on by default) only builds the wheel and
-sdist, checks the wheel installs and runs, and uploads them as the `dist` artifact.
+What changed in each release: [CHANGELOG.md](CHANGELOG.md). How a release is cut:
+[docs/releasing.md](docs/releasing.md).
 
 ## Quickstart
 
 Needs Python 3.12+. Runs offline: the demo agent uses a fake, deterministic LLM.
 
-Minutes to first report: 2 (clean venv, steps below pasted as-is; measured 2026-10-27,
-41–70 s of which is `pip install`).
+Minutes to first report: 2 (clean venv, steps below pasted as-is; measured 2026-10-27 with
+the install from GitHub, 41–70 s of which is `pip install`).
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install "git+https://github.com/AMOHYZ/langgraph-regression-guard"
-# Or 0.3.0 from TestPyPI; dependencies from PyPI, since anyone can upload to TestPyPI:
-#   pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
-#   pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.3.0
+pip install lgcov
 lgcov --version
 
 # 1. A graph to guard: the demo agent (or point graph_entrypoint at your own).
@@ -281,7 +266,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.3.0
         with:
           fail-on: root-drift  # root-drift | any-drift | never
 ```
@@ -335,7 +320,7 @@ jobs:
     schedule:
       - cron: "0 3 * * *"  # the nightly tier, on main
   # ...the same job as above, with:
-        - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
+        - uses: AMOHYZ/langgraph-regression-guard@v0.3.0
           with:
             tier: ${{ github.event_name == 'schedule' && 'nightly' || 'pr' }}
   ```
@@ -387,7 +372,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.3.0
         with:
           phase: candidate  # runs the PR's code and decides nothing
   lgcov:
@@ -405,7 +390,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}  # empty on a push: that commit
-      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.3.0
         with:
           phase: evaluate  # decides from what the other job uploaded; installs no project
 ```
