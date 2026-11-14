@@ -213,6 +213,8 @@ LGCOV_COMMANDS = (
     "round init",
     "round lock",
     "round check",
+    "round new",
+    "guard",
     "bench",
     "metrics summary",
     "selfcheck",
@@ -254,6 +256,26 @@ def test_lgcov_runs_each_command_its_help_lists(
         _script("lgcov")([*command.split(), "--help"])
     assert exc.value.code == 0
     assert capsys.readouterr().out.startswith(f"usage: lgcov {command.split()[0]}")
+
+
+@pytest.mark.parametrize("verb", ["new", "init"])
+def test_each_round_form_reaches_its_own_command(
+    verb: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T202: `round new` is a gate round and `round init` a benchmark round, under one word."""
+    with pytest.raises(SystemExit) as exc:
+        _script("lgcov")(["round", verb, "--help"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.startswith(f"usage: lgcov round {verb} ")
+
+
+def test_round_help_points_to_the_gate_round(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _script("lgcov")(["round", "--help"])
+    assert exc.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "lgcov round new" in out
+    assert "docs/round.md" in out
 
 
 def test_lgcov_version_still_runs(capsys: pytest.CaptureFixture[str]) -> None:

@@ -133,6 +133,8 @@ ruleset or CODEOWNERS on the base branch:
 /taxonomy.yaml   @your-team
 /calibration/    @your-team
 **/baseline.json @your-team
+/lgcov-round.yaml @your-team
+/exposure.json   @your-team
 ```
 
 CODEOWNERS only blocks a merge once a branch protection rule or ruleset requires code-owner review.

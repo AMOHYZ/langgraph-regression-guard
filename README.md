@@ -50,8 +50,8 @@ pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.2.0
 
 Or from GitHub, as the quickstart does. Once on PyPI: `pip install lgcov`.
 
-Maintainers: `release.yml` publishes to TestPyPI with trusted publishing (OIDC, no token).
-Set up once, before the first tag (done for 0.1.0), on test.pypi.org:
+Maintainers: `release.yml` publishes to TestPyPI, then PyPI, with trusted publishing (OIDC,
+no token). Set up once, before the first tag (done for 0.1.0), on test.pypi.org:
 
 1. Sign in, then **Your account → Publishing**
    (https://test.pypi.org/manage/account/publishing/). The account needs 2FA: without
@@ -62,6 +62,20 @@ Set up once, before the first tag (done for 0.1.0), on test.pypi.org:
 3. Click **Add**. The first publish makes it the project's own publisher, so later tags
    need nothing more on TestPyPI. A publish that fails with `invalid-publisher` found no
    publisher there matching the claims its log prints.
+
+PyPI has its own job, `publish-pypi`, which runs after the TestPyPI one. Set up once, before
+the first tag that should reach PyPI:
+
+1. On pypi.org, use a personal account with a personal email, not a work one, with 2FA on.
+   It is a separate account from the TestPyPI one.
+2. **Your account → Publishing** (https://pypi.org/manage/account/publishing/) → **Add a
+   new pending publisher**, GitHub tab: PyPI project name `lgcov`, owner `AMOHYZ`,
+   repository name `langgraph-regression-guard`, workflow name `release.yml`, environment
+   name `pypi`. A pending publisher doesn't reserve the name: only the first upload does.
+3. On GitHub, **Settings → Environments → New environment** `pypi`, with yourself under
+   **Required reviewers**. Each release then waits there for an approval before it uploads.
+
+A version on PyPI can't be uploaded again, so the approval is the last check.
 
 Then pushing a `vX.Y.Z` tag builds, makes the GitHub Release and publishes. Run by hand
 (Actions → release → Run workflow), `dry_run` (on by default) only builds the wheel and
@@ -569,6 +583,14 @@ every one of them SHIPs. A KPI's own BLOCK still blocks. `report.group_by: [node
 future work.
 
 Planned: sequential stopping (mSPRT), to stop judging once a KPI's verdict is clear.
+
+To fix the plan across several runs, lock a round. `lgcov round new` writes `lgcov-round.yaml`: the
+cases, the judge, each KPI's margin, α, power, K_gate and the candidate commits. `lgcov guard` exits
+2 if any of it moved or the commit isn't a locked candidate. `exposure.json` records which judge
+versions and candidates saw each case, across rounds. The Action doesn't run this yet:
+[docs/round.md](docs/round.md).
+This is a gate round. A [benchmark round](docs/benchmark-rounds.md), `lgcov round init`, `lock` and
+`check`, is a different thing with its own files.
 
 ### Calibrate judges against human labels
 
