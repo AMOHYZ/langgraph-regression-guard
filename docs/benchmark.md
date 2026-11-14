@@ -16,7 +16,7 @@ Each kind of evidence has its own section, and their numbers never combine: demo
 - **No harmless-edit discrimination yet.** lgcov names a root on 21 of 24 harmless synthetic cases and leaves the other 3 inconclusive, and both node-naming baselines flag 24 of 24; negative controls (T123) and non-pinnable edits (T182) are the next tests.
 - **Synthetic cases come from our own generator,** so they share its assumptions about what an edit looks like; real PRs (T171) are the check.
 - **Usage counts are pending.** Request, token and error counts for the `gpt-6-luna` runs and the pilot still have to come from the usage page: see [Cost per run](#cost-per-run).
-- **lgcov's root label has no noise threshold.** Base run against itself gave the same root and propagated labels as both #163 runs, so #163's 1 of 1 can't be told apart from model noise, and real-PR root precision doesn't test the kill criterion yet: see [A/A noise floor](#aa-noise-floor).
+- **lgcov's root label has no noise threshold.** Base run against itself gave the same root and propagated labels as both #163 runs, so #163's 1 of 1 can't be told apart from model noise, and real-PR root precision doesn't test the kill criterion yet: see [A/A noise floor](#aa-noise-floor). `lgcov bench --noise-repeats 3` gave no false alarm on one later base-against-base run ([A/A at K=3](#aa-at-k3)); the gate doesn't use that rule.
 - **More real PRs (T171) are pending,** so there are no numbers for them.
 
 ## Demo fixtures
@@ -283,6 +283,21 @@ These were read the same way as the first run's, and `researcher_uses_think_tool
 - **The drift has two sources.** The model wrote a different brief (1,021 against 1,280 characters), and the searches differed: head found 140 sources to base's 72. `research_supervisor` also keeps response ids inside text (`rs_…`, `fc_…`, `call_…`), which lgcov didn't mask at the time, so it drifted even when the model's text matched; a free run on a stub showed that. lgcov masks those ids since T213, and the `encrypted_content` blob beside them since T213b.
 - **A fix is proposed, not built:** before calling a node root, run it again on base with the same recorded input, and report INCONCLUSIVE if base against base already drifts there. With exact-match drift that makes lgcov honest about model nodes but can't name one as root; that needs a distance measure and a threshold over several base samples.
 
+### A/A at K=3
+
+The same base-against-base row and settings, with `lgcov bench --live --noise-repeats 3` (T232): the first node to drift runs 3 more times on each side, and the [noise rule](#noise-rule) reads the result. A root needs a changed fingerprint and none changes here, so "no root" is true by construction and proves nothing. What the run measures is the noise check: with no change, does it say drift? Written down before the first run: pass if the check on a model node, at `k` 3, reads `no drift detected above noise (K=3)` and no root is named; fail on `drift above noise (K=3)` or any root; inconclusive if the check ran on no model node. An invalid run has no verdict.
+
+| Date | lgcov commit | Validity | Node checked | Spread | Head's nearest to base | Root | Verdict | Time | Spend |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-14 | `16c1b2b` | Invalid: one search timed out on base | not read | not read | not read | not read | None | 517 s, both sides | $0.09 |
+| 2026-11-14 | `16c1b2b` | Valid; all saved answers from `gpt-6-luna` | `write_research_brief`, `k` 3 | 0.234 | 0.149 | None | Pass | 577 s, both sides | $0.34 |
+
+- **One trial of the false-alarm rate.** The rule gave no false alarm on one real-model A/A at K=3. One run can't give a rate.
+- **It doesn't test the other direction.** Nothing changed, so the run can't show that the rule catches a real change; that needs a run with a changed node. Node cause on a real model is still unproven.
+- **`research_supervisor` stayed inconclusive.** It has no fingerprint (T193), so no check ran on it, and `final_report_generation` was labelled propagated with no change.
+- **The second run added one setting.** After the first run, a timed-out search is tried once more on both sides. The pass rule and the validity check didn't change. No search timed out on the second run, so the retry never ran.
+- **The gate doesn't use this rule.** `lgcov ci` still compares one sample.
+
 ## Baselines
 
 ### Comparison points
@@ -329,6 +344,8 @@ From the OpenAI usage page: $0.84 in total for the 3 runs on 5 November. The pag
 | `gpt-6-luna`, invalid and not scored | About $0.16 | Requests, tokens, errors |
 | `gpt-6-luna`, scored | About $0.16 | Requests, tokens, errors |
 | A/A noise floor, `gpt-6-luna`, 10 November | $0.13 | Requests, tokens, errors |
+| A/A at K=3, `gpt-6-luna`, 14 November, invalid | $0.09 | Requests, tokens, errors |
+| A/A at K=3, `gpt-6-luna`, 14 November, valid | $0.34 | Requests, tokens, errors |
 
 ## Rounds
 
