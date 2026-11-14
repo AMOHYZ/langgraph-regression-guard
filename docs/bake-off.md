@@ -115,8 +115,9 @@ Against these seven, as documented. Each has a limit next to it.
   recall 1.00 against lgcov's 0.85 and precision 0.35 against 0.45
   ([synthetic benchmark](benchmark.md#synthetic)). A router edit now names its routing node
   as root (T175), which lifts lgcov's recall on all synthetic edits from 0.55 to 0.90, still
-  under the diff's 1.00. On each of those edits lgcov also names a node only one side ran as a
-  second root, so per node its root precision is 0.47. lgcov doesn't check that the route changed, so a router edit beside a
+  under the diff's 1.00. In `lgcov ci`, a node only the PR reached, which no baseline run ever
+  reached, reads inconclusive whether the PR added it or newly reached it (T238), and blocks
+  either way. lgcov doesn't check that the route changed, so a router edit beside a
   node edit can be named for drift it didn't cause.
 - **A judge earns the right to block.** lgcov lets a judge block only when the lower bounds of
   its TPR and TNR against human labels clear 0.80. Langfuse reports kappa and F1, Confident AI

@@ -69,8 +69,8 @@ None of the tools below labels graph nodes root or propagated between base and P
 A plain baseline does as well: on single-node edits in the [synthetic
 benchmark](benchmark.md#synthetic), naming the node the diff edited matches or beats lgcov's
 root (recall 1.00 against 0.85, precision 0.35 against 0.45). With router and fan-out edits
-counted, lgcov's recall is 0.90 against the diff's 1.00. On each of those edits lgcov also names
-a node only one side ran as a second root, so per node its root precision is 0.47.
+counted, lgcov's recall is 0.90 against the diff's 1.00. Per node its root precision is 0.57,
+the same as by case.
 
 **(c) Judges that earn the right to block.** A KPI's judge may block a PR only once the
 lower bounds of the 95% intervals of its TPR and TNR against human labels both clear
@@ -237,6 +237,9 @@ Added on 13 Nov 2026, from a research memo's reads of that day (not re-read here
 - Serve a subgraph or a `ToolNode` from the cassette: they always run live. Drift
   inside a subgraph is blamed on the subgraph node (`sub`), not its inner node; a crash
   there does name the inner node (`sub.inner`).
+- Tell an added node from a newly reached one in `lgcov ci`: a node only the PR reached, which
+  no baseline run ever reached, reads inconclusive either way, and blocks either way. The
+  baseline recording doesn't hold the graph's node names yet (T238).
 - Name a model node as root: since T162 a second root in the same run is named only if a
   probe with the network blocked shows it drifting, so a model node is inconclusive in the gate. `lgcov bench
   --noise-repeats K` (T211) names one only above base's own spread, and misses a smaller shift.
