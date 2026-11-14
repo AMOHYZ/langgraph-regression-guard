@@ -35,6 +35,37 @@ fingerprints for a node, the current one and the one from before T212, because a
 doesn't say which scheme its values use. Once a cassette carries that as a field, the old
 scheme (`_Raw` in [`fingerprint.py`](../src/lgcov/fingerprint.py)) can go.
 
+## The graph's node names (T238)
+
+**One more field in the same change, on the recording, not on a step:** the node names of the
+graph `lgcov record` ran, kept beside the runs in the baseline file.
+
+**Why.** Since T238 a node only one side ran is root only when the other side's graph doesn't
+have it. `lgcov ci` has head's graph and not base's, so a node only the PR reached, which no
+baseline run ever reached, reads inconclusive whether the PR added it or newly reached it.
+With base's node names in the baseline, that node is root when base's graph lacks it and
+propagated when it doesn't.
+
+**Why the baseline, and not the candidate file.** The candidate job runs the PR's code. A node
+list it wrote could say an added node was already in base's graph, which turns a root into
+propagated, and propagated doesn't block. The deciding job reads the baseline from the base
+checkout, which the PR can't write.
+
+| Case | Ruling |
+|---|---|
+| The baseline holds node names, and they are base's graph | Used as base's graph |
+| The baseline was recorded before this field | Not known: inconclusive, as today |
+| The baseline is older than base's graph: base's graph changed and nobody re-recorded | Not known: inconclusive. A stale list would call a node base already has "added" |
+| The PR edits its own baseline | The names come from the base checkout's baseline, never the PR's |
+
+How the deciding job tells a stale baseline from a current one is open. It can't load base's
+graph, since it installs no project code. A hash of the graph's node and edge names, written
+by `lgcov record` and checked against the base checkout by a job that can load it, is one way;
+it needs its own design before this is built.
+
+One job and two jobs must keep giving the same labels, so one-job `ci` reads the names from
+the baseline too, and not from the base graph it happens to have loaded.
+
 ## New fields on a step
 
 | Field | Recorded | Holds |
@@ -100,6 +131,9 @@ Also one test per row of the rulings table, and one that a `router_state` over t
 back to rule 2.
 
 ## What stays true until this is built
+
+T238's limit: in `lgcov ci` a node only the PR reached, which no baseline run ever reached, is
+inconclusive, and blocks, whether it was added or newly reached.
 
 T175's limit, as documented: a changed router is root whenever a node drifts after it,
 measured on synthetic edits only, and a router edit that routes as before is named root of

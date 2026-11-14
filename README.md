@@ -300,6 +300,13 @@ jobs:
   the run not checked. `budget-seconds` stops starting live node calls once the run is
   projected to take longer, and the nodes it stops before are not checked either. A node
   not checked is INCONCLUSIVE: never a fail, never a harness error.
+- A node only one side ran is root when the other side's graph doesn't have it: the PR added or
+  removed it. A node in both graphs that a run stopped reaching is propagated when a root or a
+  changed router before it explains the run. **Limit:** `lgcov ci` doesn't know base's graph
+  yet, so a node only the PR reached, which no baseline run ever reached, reads inconclusive
+  whether the PR added it or newly reached it. It blocks under `fail-on: root-drift` either
+  way. The label becomes precise once the baseline recording holds the graph's node names; a
+  fix is in progress.
 - A node's retry policy and error handler work as they do outside lgcov. Each attempt that
   raised counts as a live call and the report names the node, because what the attempt did
   before raising, like a write, still happened.
