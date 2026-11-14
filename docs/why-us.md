@@ -55,7 +55,9 @@ The [replay audit](validation/replay-audit.md) checks the replay this rests on, 
 labels, and a change replay can't see can give no drift, so no root.
 `diff_cassettes` classifies by each node's recorded input, but only tests call it so far. A
 noise check, base against base on a real model (T173), gave the same root as the PR, so that
-1 of 1 can't be told apart from model noise: lgcov's root has no noise threshold yet.
+1 of 1 can't be told apart from model noise: lgcov's root has no noise threshold yet. With
+`lgcov bench --noise-repeats 3`, one later base-against-base run gave no false alarm (T232,
+[A/A at K=3](benchmark.md#aa-at-k3)): one trial, and it doesn't show the rule catches a real change.
 Reenact records each LangGraph node boundary in its trajectory and shows them to its judges,
 but it gates per scenario, at the first call that diverges from the recording; lgcov's rule is the same
 first-divergence idea, labelled per graph node. EvalView names a root tool call.
@@ -250,7 +252,9 @@ Added on 13 Nov 2026, from a research memo's reads of that day (not re-read here
   node, even drift a node edit caused. A router inside a subgraph isn't seen (T193), and a
   cassette recorded before routers were fingerprinted needs a re-record first.
 - Tell root drift from model noise: a base-against-base run on a real model (T173) gave the
-  same root as #163, so the root label has no noise threshold yet.
+  same root as #163, so the root label has no noise threshold yet. The `--noise-repeats` rule
+  gave no false alarm on one real-model A/A at K=3 (T232). That is one trial, the gate doesn't
+  use the rule, and no run has tested it on a real change.
 - Judge a real PR: the judge gate is built, but no judge has run on one yet.
 - See a node function that is also passed to `bind_tools`: its docstring is the tool's
   description, and an edit to it leaves the node served (T212). `--live` runs it.
