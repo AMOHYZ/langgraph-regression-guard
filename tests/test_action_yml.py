@@ -187,6 +187,22 @@ def test_release_ignores_the_floating_v0_tag() -> None:
     assert push["tags"] == ["v*.*.*"]
 
 
+def test_release_publishes_to_pypi_after_testpypi_behind_its_own_environment() -> None:
+    jobs = _dict(_yaml(ROOT / ".github" / "workflows" / "release.yml")["jobs"])
+    testpypi, pypi = _dict(jobs["publish"]), _dict(jobs["publish-pypi"])
+    assert pypi["needs"] == "publish"  # PyPI only after TestPyPI took the same files
+    assert pypi["if"] == testpypi["if"]  # a version tag only, never a dry run
+    # Its own environment: PyPI's publisher names it, and it holds the required reviewer.
+    assert _dict(pypi["environment"])["name"] == "pypi"
+    assert pypi["permissions"] == {"id-token": "write"}  # OIDC, so no token is stored
+    steps, steps_test = pypi["steps"], testpypi["steps"]
+    assert isinstance(steps, list)
+    assert isinstance(steps_test, list)
+    upload = _dict(steps[-1])
+    assert upload["uses"] == _dict(steps_test[-1])["uses"]  # pinned as the TestPyPI job is
+    assert "with" not in upload  # no repository-url (the default is PyPI) and no password
+
+
 def test_readme_snippet_uses_the_action_on_pull_request() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "uses: AMOHYZ/langgraph-regression-guard@v0" in readme
