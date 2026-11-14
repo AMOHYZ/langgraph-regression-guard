@@ -623,3 +623,233 @@ def test_code_it_cannot_vouch_for_has_no_fingerprint(tmp_path: Path) -> None:
     graph = _module(tmp_path / "g.py", src + "def node(state):\n    return INNER.invoke(state)\n")
     assert fingerprint(graph.node) is None  # a compiled graph it invokes is not followed
     assert fingerprint(len) is None  # not a Python function
+
+
+# T212: a function is hashed from its syntax tree, so comments and formatting don't count.
+PINNED = """\
+import inspect
+
+LIMIT = 3
+
+
+def helper(x):
+    return x + LIMIT
+
+
+def node(state):
+    total = helper(state["x"])
+    return {"x": [total, "a"], "ok": total > 0}
+
+
+async def anode(state, *, flag=False):
+    return {"x": [i async for i in state["x"] if i] if flag else None}
+
+
+def looks(state):
+    return {"x": f"{state['x']!r:>{LIMIT}}", "n": len(inspect.signature(looks).parameters)}
+"""
+REFORMATTED = """\
+import inspect
+
+LIMIT = 3  # how many
+
+
+def helper(x):
+    # a comment
+    return (x + LIMIT)
+
+
+def node(state):  # the node
+
+    total = helper(
+        state['x'],
+    )
+    return {
+        'x': [total, 'a'],  # quotes, wrapping and a trailing comma
+        "ok": (total > 0),
+    }
+"""
+
+
+def test_comments_and_formatting_keep_a_fingerprint(tmp_path: Path) -> None:
+    one = _module(tmp_path / "one.py", PINNED)
+    two = _module(tmp_path / "two.py", REFORMATTED)
+    assert fingerprint(one.node) == fingerprint(two.node) is not None
+    edited = _module(tmp_path / "three.py", REFORMATTED.replace("x + LIMIT", "x - LIMIT"))
+    assert fingerprint(edited.node) != fingerprint(one.node)  # a helper's body still counts
+
+
+def test_fingerprints_are_the_same_on_every_python(tmp_path: Path) -> None:
+    # Literal values: CI runs the newest Python, and a cassette recorded on one must serve on
+    # another. A new Python that changes one fails here before it reaches a baseline.
+    pinned = _module(tmp_path / "pinned.py", PINNED)
+    found = {n: fingerprint(getattr(pinned, n)) for n in ("node", "anode", "looks")}
+    assert found == {
+        "node": "1f1ec544dc4c45c4",
+        "anode": "091cc1cf1e0158aa",
+        "looks": "d5efa1d120d3940e",
+    }
+    # The old scheme, from the function's raw lines: what recordings made before T212 hold.
+    old = {n: fingerprint(getattr(pinned, n), raw=True) for n in ("node", "anode", "looks")}
+    assert old == {
+        "node": "4516f98c0333a7a2",
+        "anode": "a027a7447681e77d",
+        "looks": "22ac0d31f3ed7b22",
+    }
+
+
+# Two functions that differ must never share a fingerprint: that would serve a stale output.
+_DISTINCT = [
+    ["return 0", "return None", "return False", "return ''", "return 0.0", "return", "pass"],
+    ["x = 0", "x = None", "x = False", "x = []", "x = ()", "x = {}", "x = ''"],
+    ["return 1", "return 1.0", "return True", "return '1'", "return 1j", "return -1"],
+    ["return b'a'", "return 'a'", "return ...", "return a"],
+    ["yield", "yield None", "yield 0", "yield from ()"],
+    ["return []", "return ()", "return [[]]", "return [()]", "return {}", "return {**a}"],
+    ["return f()", "return f(*[])", "return f(**{})", "return f(None)", "return f(0)"],
+    [
+        "try:\n        f()\n    except:\n        pass",
+        "try:\n        f()\n    except Exception:\n        pass",
+        "try:\n        f()\n    except Exception as e:\n        pass",
+        "try:\n        f()\n    finally:\n        pass",
+    ],
+    ["import a", "from . import a", "from .. import a", "from a import a", "import a as a"],
+    ["x: int = 0", "x: int", "(x): int = 0", "x = 0", "x += 0"],
+    ["return f'{a}'", "return f'{a!r}'", "return f'{a!s}'", "return f'{a:0}'", "return a"],
+    ["return [i for i in a]", "return [i async for i in a]", "return (i for i in a)"],
+    ["return a[0]", "return a[:0]", "return a[0:]", "return a[::0]", "return a[:]", "return a"],
+    ["return lambda: 0", "return lambda: None", "return lambda a=0: a", "return lambda a: a"],
+]
+
+
+@pytest.mark.parametrize("bodies", _DISTINCT)
+def test_bodies_that_differ_get_different_fingerprints(tmp_path: Path, bodies: list[str]) -> None:
+    found = []
+    for i, body in enumerate(bodies):
+        kind = "async def" if "async for" in body else "def"
+        source = f"{kind} node(state, a=1, f=len):\n    {body}\n"
+        found.append(fingerprint(_module(tmp_path / f"m{i}.py", source).node))
+    assert None not in found and len(set(found)) == len(bodies)
+
+
+def test_a_function_that_reads_source_is_hashed_from_its_raw_lines(tmp_path: Path) -> None:
+    source = "import inspect\n\n\ndef node(state):\n    return inspect.getsource(node)\n"
+    one = _module(tmp_path / "one.py", source)
+    two = _module(tmp_path / "two.py", source.replace("return", "# a comment\n    return"))
+    assert fingerprint(one.node) != fingerprint(two.node)
+    assert fingerprint(one.node) == fingerprint(one.node, raw=True)
+
+
+# T212: a node function's own docstring doesn't count, where nothing can read it.
+DOCS = '''\
+import inspect
+
+
+def helper(x):
+    """Add one."""
+    return x + 1
+
+
+def node(state):
+    """Summarise the order."""
+    return {"x": helper(state["x"])}
+
+
+async def anode(state):
+    """Summarise the order."""
+    return {"x": state["x"]}
+
+
+
+def keep(fn):
+    return fn
+
+
+@keep
+def decorated(state):
+    """Summarise the order."""
+    return {"x": state["x"]}
+
+
+def reads(state):
+    """Summarise the order."""
+    return {"x": reads.__doc__}
+
+
+def asks(state):
+    """Summarise the order."""
+    return {"x": inspect.getdoc(asks)}
+
+
+def described(fn):
+    return fn.__doc__
+
+
+def passes(state):
+    """Summarise the order."""
+    return {"x": described(passes)}
+
+
+def one_line(state): """Summarise the order."""; return {"x": 1}
+
+
+def nested(state):
+    def inner():
+        """Summarise the order."""
+        return 1
+
+    class Box:
+        """Summarise the order."""
+
+    return {"x": inner(), "b": Box.__name__}
+'''
+_REWORDED = DOCS.replace("Summarise the order.", "Sum the order up.\n\n    In two lines.")
+
+
+def test_a_node_s_own_docstring_does_not_count(tmp_path: Path) -> None:
+    one, two = _module(tmp_path / "one.py", DOCS), _module(tmp_path / "two.py", _REWORDED)
+    for name in ("node", "anode"):
+        assert fingerprint(getattr(one, name), node=True) is not None
+        assert fingerprint(getattr(one, name), node=True) == fingerprint(
+            getattr(two, name), node=True
+        )
+    # Writing one, or deleting it, is the same kind of edit.
+    gone = _module(tmp_path / "gone.py", DOCS.replace('    """Summarise the order."""\n', "", 1))
+    assert fingerprint(gone.node, node=True) == fingerprint(one.node, node=True)
+    body = _module(tmp_path / "three.py", _REWORDED.replace('helper(state["x"])', "0"))
+    assert fingerprint(body.node, node=True) != fingerprint(one.node, node=True)
+
+
+def test_a_docstring_counts_for_any_function_that_is_not_a_node(tmp_path: Path) -> None:
+    # A router, or any caller that doesn't say `node`: as before.
+    one, two = _module(tmp_path / "one.py", DOCS), _module(tmp_path / "two.py", _REWORDED)
+    assert fingerprint(one.node) != fingerprint(two.node)
+
+
+@pytest.mark.parametrize(
+    ("name", "old"),
+    [
+        ("node", "Add one."),  # a helper's docstring: the helper may be a tool somewhere
+        ("decorated", "Summarise the order."),  # a decorator can read fn.__doc__
+        ("reads", "Summarise the order."),
+        ("asks", "Summarise the order."),
+        ("passes", "Summarise the order."),  # a helper reads it
+        ("one_line", "Summarise the order."),  # shares its line with code
+        ("nested", "Summarise the order."),  # a nested function's and a class's
+    ],
+)
+def test_a_docstring_something_could_read_still_counts(tmp_path: Path, name: str, old: str) -> None:
+    assert old in DOCS
+    one = _module(tmp_path / "one.py", DOCS)
+    two = _module(tmp_path / "two.py", DOCS.replace(old, "Something else."))
+    assert fingerprint(getattr(one, name), node=True) != fingerprint(getattr(two, name), node=True)
+
+
+def test_node_fingerprints_are_the_same_on_every_python(tmp_path: Path) -> None:
+    docs = _module(tmp_path / "docs.py", DOCS)
+    found = {n: fingerprint(getattr(docs, n), node=True) for n in ("node", "anode", "reads")}
+    assert found == {
+        "node": "964711741fd433b7",
+        "anode": "6aa9cccf9c92df3e",
+        "reads": "47aff0937771fd56",
+    }

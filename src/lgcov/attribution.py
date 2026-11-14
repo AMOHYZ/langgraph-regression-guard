@@ -306,8 +306,8 @@ def classify(
 ) -> NodeLabels:
     """T162: each drifted node is root when its fingerprint changed (base's code against head's)
     and it drifts on base's recorded input (`probes`), propagated when it only drifts because its
-    input did. A node only one side ran is root: the PR added or removed it. T212: docstrings are
-    still in the fingerprint, so a docstring edit with a probe that drifts is a false root."""
+    input did. A node only one side ran is root: the PR added or removed it. T212: a comment, a
+    reformat or the node function's own docstring doesn't change a fingerprint."""
     base, head = codes
     root: list[str] = []
     propagated: list[str] = []

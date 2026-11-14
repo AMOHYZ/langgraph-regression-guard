@@ -1,16 +1,18 @@
 import contextlib
+import dataclasses
 import random
 import socket
 import time
 from collections.abc import Callable, Hashable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TypedDict, cast
 from unittest.mock import Mock
 from uuid import uuid4
 
 import httpx
 import pytest
-from fixtures.graphs import S, _noop, fan_out_send, linear
+from fixtures.graphs import S, _noop, conditional, fan_out_send, linear
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
@@ -20,6 +22,9 @@ from lgcov.cassette import (
     Cassette,
     ProbeStep,
     Step,
+    _plain,
+    _router_prints,
+    changed_nodes,
     judge_probes,
     judge_repeats,
     probe_nodes,
@@ -27,7 +32,11 @@ from lgcov.cassette import (
     record,
     repeat_steps,
     replay,
+    replay_run,
+    unservable,
 )
+from lgcov.cli import _import_file
+from lgcov.fingerprint import fingerprint
 
 
 def _b_changed(state: S) -> S:
@@ -664,3 +673,123 @@ def test_judge_repeats_leaves_out_a_node_whose_repeat_raised() -> None:
     ran = repeat_steps(_one_node(breaks), [base], ["n"], 1)
     assert ran == (ProbeStep(0, 0, "n", raised="raised RuntimeError on base's input"),)
     assert judge_repeats([base], ran, ran) == {}
+
+
+# T212: a recording made before fingerprints ignored comments holds the old scheme's values. A
+# node whose old-scheme fingerprint still matches is byte-identical, so it is unchanged.
+def _recorded_before_t212(graph: CompiledStateGraph[S], run: Cassette) -> Cassette:
+    routers = _router_prints(graph, raw=True)
+    steps = [
+        dataclasses.replace(
+            s,
+            code=fingerprint(_plain(graph.nodes[s.node].bound), raw=True),
+            router=routers.get(s.node),
+        )
+        for s in run.steps
+    ]
+    return Cassette(run.inputs, steps)
+
+
+def test_a_new_recording_holds_the_new_scheme_s_fingerprints() -> None:
+    run = record(linear(), {"x": 1})
+    assert {s.code for s in run.steps} == {fingerprint(_noop)} != {fingerprint(_noop, raw=True)}
+
+
+def test_a_recording_from_before_t212_still_serves_its_unchanged_nodes() -> None:
+    graph = conditional()
+    old = _recorded_before_t212(graph, record(graph, {"x": 1, "route": "tools"}))
+    assert old != record(graph, {"x": 1, "route": "tools"})  # the two schemes do differ
+    assert unservable(graph, [old]) == 0 and changed_nodes(graph, [old]) == set()
+    done = replay_run(graph, old, (), serve=True)
+    assert {c.how for c in done.calls} == {"served"} and not done.drifts
+    # What ran is written in the recording's scheme, so later comparisons are plain equality.
+    assert [(s.code, s.router) for s in done.steps] == [(s.code, s.router) for s in old.steps]
+
+
+def test_a_recording_from_before_t212_still_sees_an_edit() -> None:
+    old = _recorded_before_t212(linear(), record(linear(), {"x": 1}))
+    assert changed_nodes(_linear_changed(), [old]) == {"b"}
+    done = replay_run(_linear_changed(), old, (), serve=True)
+    assert [c.how for c in done.calls] == ["served", "live"]
+    assert done.steps[1].code == fingerprint(_b_changed)  # a changed node: the new scheme
+
+
+def test_a_recording_made_to_compare_with_an_older_one_uses_its_fingerprints() -> None:
+    # As the synthetic suite does: the PR side is recorded afresh and compared with a baseline.
+    old = _recorded_before_t212(linear(), record(linear(), {"x": 1}))
+    assert record(linear(), {"x": 1}, like=[old]) == old
+    edited = record(_linear_changed(), {"x": 1}, like=[old])
+    assert [s.code for s in edited.steps] == [old.steps[0].code, fingerprint(_b_changed)]
+
+
+def test_a_node_only_another_run_recorded_gets_that_recording_s_scheme() -> None:
+    # The PR's run reaches a node this run's recording never did: it must not read as changed.
+    graph = conditional()
+    tools, answer = (
+        _recorded_before_t212(graph, record(graph, {"x": 1, "route": r})) for r in ("tools", "")
+    )
+    codes = {s.node: s.code for s in (*tools.steps, *answer.steps)}
+    rerouted = Cassette({"x": 1, "route": "tools"}, answer.steps)  # as if the route had flipped
+    for serve in (True, False):
+        done = replay_run(graph, rerouted, (), serve=serve, baseline=[tools, answer])
+        assert {s.node: s.code for s in done.steps}.items() <= codes.items()
+
+
+# T212: a node function's own docstring doesn't count, unless a ToolNode exposes it as a tool.
+_DOC_GRAPH = '''\
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
+
+
+class S(TypedDict, total=False):
+    x: int
+
+
+def plain(state: S) -> S:
+    """Add one to x."""
+    return {"x": state["x"] + 1}
+
+
+def shared(state: S) -> S:
+    """Add two to x."""
+    return {"x": state["x"] + 2}
+
+
+g = StateGraph(S)
+g.add_node("plain", plain)
+g.add_node("shared", shared)
+g.add_node("tools", ToolNode([shared]))
+g.add_edge(START, "plain")
+g.add_edge("plain", "shared")
+g.add_edge("shared", END)
+g.add_edge("tools", END)  # never reached: the test is who holds `shared`
+graph = g.compile()
+'''
+
+
+def _doc_graph(path: Path, source: str) -> CompiledStateGraph[S]:
+    path.write_text(source, encoding="utf-8")
+    graph: CompiledStateGraph[S] = _import_file(str(path)).graph
+    return graph
+
+
+def test_a_reformat_and_a_node_docstring_edit_leave_every_step_served(tmp_path: Path) -> None:
+    base = record(_doc_graph(tmp_path / "base.py", _DOC_GRAPH), {"x": 1})
+    edited = _DOC_GRAPH.replace("Add one to x.", "Increment x.\n\n    Twice as long.")
+    edited = edited.replace(
+        '{"x": state["x"] + 1}', "{\n        'x': (state['x'] + 1),  # one\n    }"
+    )
+    assert edited.count("Add") == 1 and "# one" in edited
+    head = _doc_graph(tmp_path / "head.py", edited)
+    assert changed_nodes(head, [base]) == set() and unservable(head, [base]) == 0
+    done = replay_run(head, base, (), serve=True)
+    assert [c.how for c in done.calls] == ["served", "served"] and not done.drifts
+
+
+def test_a_docstring_edit_counts_for_a_node_function_a_toolnode_exposes(tmp_path: Path) -> None:
+    # ToolNode builds the tool's description from the docstring: a model can see it.
+    base = record(_doc_graph(tmp_path / "base.py", _DOC_GRAPH), {"x": 1})
+    head = _doc_graph(tmp_path / "head.py", _DOC_GRAPH.replace("Add two to x.", "Double x."))
+    assert changed_nodes(head, [base]) == {"shared"}

@@ -94,7 +94,7 @@ def generate(
     rng = Random(seed)
     base = passing[int(rng.random() * len(passing))]
     mutation = mutations[int(rng.random() * len(mutations))]
-    pr = record(mutation.graph, base.inputs)
+    pr = record(mutation.graph, base.inputs, like=runs)
     truth = GroundTruth(
         mutation.edited_node,
         mutation.edit_kind,

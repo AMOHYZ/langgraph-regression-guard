@@ -389,7 +389,7 @@ def test_a_fan_out_that_only_finished_in_another_order_is_labelled_inert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     base = record(FANOUT.graph, {"question": ORDER})
-    monkeypatch.setattr("lgcov.synthetic.record", lambda graph, inputs: _reordered(base))
+    monkeypatch.setattr("lgcov.synthetic.record", lambda graph, inputs, like: _reordered(base))
     mutation = Mutation("plan", "no edit", FANOUT.graph)
     assert generate("x", (mutation,), (base,), FANOUT.outcome_ok, 0).truth.label == "inert"
 

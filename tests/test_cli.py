@@ -13,8 +13,9 @@ import pytest
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from examples.synthetic_agents import AGENTS
-from lgcov.cassette import _codes, replay_run
-from lgcov.cli import _l2_judge, _lgcov_root, _load_graph, main
+from lgcov.cassette import _codes, _router_prints, replay_run
+from lgcov.cli import _import_file, _l2_judge, _lgcov_root, _load_graph, main
+from lgcov.fingerprint import fingerprint
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, NodeState, Verdict
 from lgcov.slices import Group
@@ -1063,6 +1064,44 @@ def test_cli_ci_on_a_baseline_from_before_routers_were_kept_stays_inconclusive(
     assert code == 1
     assert "| `lookup_order` | inconclusive (drifted with no changed node before it:" in report
     assert "routing change" not in report
+
+
+# T212: a baseline recorded before fingerprints ignored comments holds the old scheme's values.
+def _baseline_from_before_t212(tmp_path: Path) -> None:
+    graph = _load_graph(f"{DEMO_GRAPH}:graph")
+    routers = _router_prints(graph, raw=True)
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    old = json.loads(baseline.read_text(encoding="utf-8"))
+    for step in (s for r in old["runs"] for s in r["steps"]):
+        node = getattr(_import_file(str(DEMO_GRAPH)), step["node"])
+        step["code"], step["router"] = fingerprint(node, raw=True), routers.get(step["node"])
+        assert step["code"] != _codes(graph)[step["node"]]
+    baseline.write_text(json.dumps(old), encoding="utf-8")
+
+
+@pytest.mark.parametrize("flags", [[], ["--live"]])
+def test_cli_ci_on_a_baseline_from_before_t212_sees_no_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str]
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    _baseline_from_before_t212(tmp_path)
+    code, report, outputs = _run_ci(tmp_path, *flags)
+    assert code == 0 and "0 of 2 runs touched" in report
+    assert (outputs["root-drift-count"], outputs["inconclusive-count"]) == ("0", "0")
+
+
+def test_cli_ci_on_a_baseline_from_before_t212_names_only_what_the_pr_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The flipped router sends the second run to a node only the first run recorded. That node's
+    # code is as recorded, so it must not read as changed: the router's source node is the root.
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace(*ROUTER_EDIT))
+    _baseline_from_before_t212(tmp_path)
+    code, report, _ = _run_ci(tmp_path)
+    assert code == 1
+    assert "root node: `classify`" in report
+    assert "root drift: 1 · propagated drift: 2" in report  # lookup_order is not a second root
 
 
 # T083: `lgcov coverage` from the recorded runs (nothing re-runs), with trend vs main.

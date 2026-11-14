@@ -138,8 +138,9 @@ table per node, one row per slice.
 recording is served from the cassette, so changed nodes run live, and so do nodes whose input
 changed in a part the mask leaves in. A change only to a masked value, such as a message's id
 or usage, doesn't re-run the nodes below it, so they can be served stale
-([known replay limits](../README.md#known-replay-limits)). A comment or docstring edit counts
-as a change for now, so that node runs live too.
+([known replay limits](../README.md#known-replay-limits)). A comment, a reformat or an edit to a
+node function's own docstring isn't a change (T212). A docstring something could read still
+is: a decorated function's, a `ToolNode` tool's, a helper's.
 *Status: built ([PR #18](https://github.com/AMOHYZ/langgraph-regression-guard/pull/18));
 measured on the demo in [benchmark-speed.md](benchmark-speed.md).* Not novel: Reenact, graphtrace,
 [docker-agent](https://github.com/docker/docker-agent) and LangSmith's pytest cache
@@ -247,8 +248,8 @@ Added on 13 Nov 2026, from a research memo's reads of that day (not re-read here
 - Tell root drift from model noise: a base-against-base run on a real model (T173) gave the
   same root as #163, so the root label has no noise threshold yet.
 - Judge a real PR: the judge gate is built, but no judge has run on one yet.
-- Leave a node served after a comment or docstring edit: that counts as a code change, so
-  the node runs live.
+- See a node function that is also passed to `bind_tools`: its docstring is the tool's
+  description, and an edit to it leaves the node served (T212). `--live` runs it.
 
 ## How this was checked
 

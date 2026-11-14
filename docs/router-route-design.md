@@ -30,6 +30,11 @@ fields, a later one writes them. Baselines must be re-recorded to gain the field
 **Held until T193.** Subgraph support also changes the cassette schema. The two land as one
 schema change, with one re-record, not two.
 
+**A fingerprint-scheme field goes in the same change.** Since T212 lgcov computes two
+fingerprints for a node, the current one and the one from before T212, because a cassette
+doesn't say which scheme its values use. Once a cassette carries that as a field, the old
+scheme (`_Raw` in [`fingerprint.py`](../src/lgcov/fingerprint.py)) can go.
+
 ## New fields on a step
 
 | Field | Recorded | Holds |

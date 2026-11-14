@@ -346,8 +346,9 @@ def _replay_under(
     serve: bool,
     on_divergence: OnDivergence = "flag",
     budget: Budget | None = None,
+    baseline: Sequence[Cassette] = (),
 ) -> Replay:
-    """`replay_run` with what lgcov.yaml says to mask."""
+    """`replay_run` with what lgcov.yaml says to mask. `baseline`: every run of the recording."""
     return replay_run(
         graph,
         run,
@@ -356,6 +357,7 @@ def _replay_under(
         on_divergence,
         budget,
         mask_volatile=cfg.mask_volatile_in_key,
+        baseline=baseline,
     )
 
 
@@ -536,7 +538,7 @@ def _replay(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return _harness_error("lgcov replay", "cannot read baseline", exc)
     try:
-        replays = [_replay_under(cfg, graph, run, serve=not args.live) for run in runs]
+        replays = [_replay_under(cfg, graph, run, not args.live, baseline=runs) for run in runs]
     except NodeError as exc:
         return _node_failure("lgcov replay", exc)
     except Exception as exc:  # replay itself: no node or router raised it
@@ -1042,7 +1044,7 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
     agent_start = perf_counter()
     try:
         replays = [
-            _replay_under(cfg, graph, recorded, serve, args.on_divergence, budget)
+            _replay_under(cfg, graph, recorded, serve, args.on_divergence, budget, runs)
             for recorded in runs
         ]
     except NodeError as exc:
@@ -1854,7 +1856,7 @@ def _judge_cmd(argv: list[str]) -> int:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             return _harness_error("lgcov judge", "cannot read baseline", exc)
         try:
-            done = [_replay_under(cfg, graph, r, serve=not args.live) for r in runs]
+            done = [_replay_under(cfg, graph, r, not args.live, baseline=runs) for r in runs]
             replays = [(list(r.drifts), list(r.steps)) for r in done]
             _say_replay_notes(done)
         except NodeError as exc:
@@ -2057,7 +2059,7 @@ def _review_cmd(argv: list[str]) -> int:
     try:
         # Exception: importing and running user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
-        done = [_replay_under(cfg, graph, run, serve=True) for run in runs]
+        done = [_replay_under(cfg, graph, run, serve=True, baseline=runs) for run in runs]
     except Exception as exc:
         return _harness_error("lgcov review", "cannot replay the graph", exc)
     _say_replay_notes(done)
