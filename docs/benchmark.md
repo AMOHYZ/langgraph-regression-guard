@@ -96,7 +96,7 @@ Cases sharing an edit aren't independent, so each edit also gets one vote, by ma
 
 | Edits | Precision | Recall | Exact match | Inconclusive cases | One side only |
 |---|---|---|---|---|---|
-| All | 0.47 (28 of 60) | 0.90 (28 of 31) | 0.55 (17 of 31) | 6 | 0.18 (11 of 60) |
+| All | 0.57 (28 of 49) | 0.90 (28 of 31) | 0.90 (28 of 31) | 6 | 0.00 (0 of 49) |
 | Single-node | 0.45 (17 of 38) | 0.85 (17 of 20) | 0.85 (17 of 20) | 6 | 0.00 (0 of 38) |
 
 ### What this says
