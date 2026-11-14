@@ -326,6 +326,29 @@ def test_tier_input_is_checked_first_and_reaches_lgcov_ci() -> None:
     assert "--tier" in str(run["run"])
 
 
+def test_a_pr_run_s_metrics_record_is_uploaded_from_wherever_lgcov_ran() -> None:
+    """T233: a hosted runner drops .lgcov/metrics.jsonl with the job, so the Action keeps it."""
+    steps = {str(s.get("name")): s for s in _steps()}
+    upload = steps["Upload the PR's metrics record"]
+    assert str(upload["uses"]).startswith("actions/upload-artifact@")
+    assert upload["continue-on-error"] is True  # keeping a record never changes the verdict
+    condition = str(upload["if"])
+    assert "pull_request" in condition and "inputs.phase != 'candidate'" in condition
+    settings = _dict(upload["with"])
+    assert settings["name"] == "lgcov-metrics"
+    # one job runs lgcov in the workspace, the deciding job of two in the PR's checkout
+    assert str(settings["path"]).splitlines() == [
+        ".lgcov/metrics.jsonl",
+        "${{ runner.temp }}/lgcov-pr/.lgcov/metrics.jsonl",
+    ]
+    assert settings["include-hidden-files"] is True  # .lgcov is a dot folder
+    # a project whose own lgcov predates the record writes none: nothing to upload, no error
+    assert settings["if-no-files-found"] == "ignore"
+    # ...and would exit 2 on a flag it doesn't know, so the Action passes none for this
+    assert "--metrics-out" not in str(steps["Run lgcov"]["run"])
+    assert list(steps).index("Run lgcov") < list(steps).index("Upload the PR's metrics record")
+
+
 def test_the_nightly_report_is_uploaded_and_prs_link_main_s_latest() -> None:
     steps = {str(s.get("name")): s for s in _steps()}
     upload = steps["Upload the nightly report"]
@@ -524,6 +547,7 @@ PHASES = {
         "Post or update the PR comment",
         "Upload coverage for main",
         "Upload the nightly report",
+        "Upload the PR's metrics record",
         "Exit with the verdict",
     ],
     # The fetch comes first because it is the one step with a token it can use: from the install
@@ -549,6 +573,7 @@ PHASES = {
         "Post or update the PR comment",
         "Upload coverage for main",
         "Upload the nightly report",
+        "Upload the PR's metrics record",
         "Exit with the verdict",
     ],
 }
