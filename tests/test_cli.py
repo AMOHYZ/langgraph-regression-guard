@@ -3238,3 +3238,27 @@ def test_bench_and_ci_name_the_same_roots_on_a_multi_root_pr(
     bench, ci = seen
     assert (bench.root, bench.propagated) == (ci.root, ci.propagated) == (("b", "c"), ("d", "e"))
     assert bench.inconclusive == ci.inconclusive == {}
+
+
+def test_the_synthetic_bench_scores_the_labels_ci_ships() -> None:
+    from lgcov.cli import _shipped
+
+    by_agent = {case.agent: case for case in _real_suite() if case.truth.activated}
+    inner = next(
+        c for c in _real_suite() if c.truth.edited_node == "sub.inner" and c.truth.activated
+    )
+    found = _shipped(inner)
+    # A subgraph has no fingerprint: the first-drift rule named `sub`, ci calls it inconclusive.
+    assert (found.root, found.inconclusive) == (frozenset(), frozenset({"sub"}))
+    assert _lgcov_root(inner) == {"sub"} and len(by_agent) == 3
+
+
+def test_bench_synthetic_writes_the_per_node_scores(tmp_path: Path) -> None:
+    results = tmp_path / "results.json"
+    main(["bench", "--synthetic", "--out", str(tmp_path / "b.md"), "--json", str(results)])
+    raw = json.loads(results.read_text(encoding="utf-8"))
+    assert [row["method"] for row in raw["all_edits"]][:2] == [
+        "lgcov root",
+        "first drift + router rule",
+    ]
+    assert raw["per_node"][0]["recall"]["of"] == 31

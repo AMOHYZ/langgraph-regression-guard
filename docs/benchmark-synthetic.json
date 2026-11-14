@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-13",
+  "date": "2026-11-14",
   "cases": 72,
   "edits": 24,
   "agents": 3,
@@ -12,6 +12,53 @@
   "all_edits": [
     {
       "method": "lgcov root",
+      "cases": {
+        "precision": {
+          "hits": 28,
+          "of": 49,
+          "value": 0.5714285714285714
+        },
+        "recall": {
+          "hits": 28,
+          "of": 31,
+          "value": 0.9032258064516129
+        },
+        "coverage": {
+          "hits": 49,
+          "of": 55,
+          "value": 0.8909090909090909
+        },
+        "false_flag": {
+          "hits": 21,
+          "of": 24,
+          "value": 0.875
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 11,
+          "of": 19,
+          "value": 0.5789473684210527
+        },
+        "recall": {
+          "hits": 11,
+          "of": 12,
+          "value": 0.9166666666666666
+        },
+        "coverage": {
+          "hits": 19,
+          "of": 21,
+          "value": 0.9047619047619048
+        },
+        "false_flag": {
+          "hits": 8,
+          "of": 9,
+          "value": 0.8888888888888888
+        }
+      }
+    },
+    {
+      "method": "first drift + router rule",
       "cases": {
         "precision": {
           "hits": 28,
@@ -202,6 +249,53 @@
   "single_node": [
     {
       "method": "lgcov root",
+      "cases": {
+        "precision": {
+          "hits": 17,
+          "of": 38,
+          "value": 0.4473684210526316
+        },
+        "recall": {
+          "hits": 17,
+          "of": 20,
+          "value": 0.85
+        },
+        "coverage": {
+          "hits": 38,
+          "of": 44,
+          "value": 0.8636363636363636
+        },
+        "false_flag": {
+          "hits": 21,
+          "of": 24,
+          "value": 0.875
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 7,
+          "of": 15,
+          "value": 0.4666666666666667
+        },
+        "recall": {
+          "hits": 7,
+          "of": 8,
+          "value": 0.875
+        },
+        "coverage": {
+          "hits": 15,
+          "of": 17,
+          "value": 0.8823529411764706
+        },
+        "false_flag": {
+          "hits": 8,
+          "of": 9,
+          "value": 0.8888888888888888
+        }
+      }
+    },
+    {
+      "method": "first drift + router rule",
       "cases": {
         "precision": {
           "hits": 17,
@@ -481,6 +575,56 @@
       "k": 3,
       "runs": 200,
       "flagged": 112
+    }
+  ],
+  "per_node": [
+    {
+      "edits": "All",
+      "precision": {
+        "hits": 28,
+        "of": 60,
+        "value": 0.4666666666666667
+      },
+      "recall": {
+        "hits": 28,
+        "of": 31,
+        "value": 0.9032258064516129
+      },
+      "exact": {
+        "hits": 17,
+        "of": 31,
+        "value": 0.5483870967741935
+      },
+      "inconclusive": 6,
+      "one_sided": {
+        "hits": 11,
+        "of": 60,
+        "value": 0.18333333333333332
+      }
+    },
+    {
+      "edits": "Single-node",
+      "precision": {
+        "hits": 17,
+        "of": 38,
+        "value": 0.4473684210526316
+      },
+      "recall": {
+        "hits": 17,
+        "of": 20,
+        "value": 0.85
+      },
+      "exact": {
+        "hits": 17,
+        "of": 20,
+        "value": 0.85
+      },
+      "inconclusive": 6,
+      "one_sided": {
+        "hits": 0,
+        "of": 38,
+        "value": 0.0
+      }
     }
   ]
 }
