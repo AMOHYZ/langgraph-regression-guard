@@ -2893,7 +2893,12 @@ def _round_check(path: Path, run_id: str | None, now: str) -> int:
 
 def _round_cmd(argv: list[str]) -> int:
     """T119: a benchmark round: init writes a template, lock freezes it, check verifies it."""
-    ap = argparse.ArgumentParser(prog="lgcov round")
+    ap = argparse.ArgumentParser(
+        prog="lgcov round",
+        description="A benchmark round, for `lgcov bench`: docs/benchmark-rounds.md.",
+        epilog="A gate round is a different thing, with its own file: lgcov round new and "
+        "lgcov guard, docs/round.md.",
+    )
     verbs = ap.add_subparsers(dest="verb", required=True)
     init = verbs.add_parser("init", help="write an unfrozen round to fill in")
     init.add_argument("--id", required=True, help="the round's id, unique in its ledger")

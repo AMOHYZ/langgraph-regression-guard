@@ -5,6 +5,12 @@ which judge, which margins, and which commits may use the gate. `lgcov guard` ex
 has moved, or if the commit isn't one the round locked. `exposure.json` records what has already
 seen each case, and outlives the round.
 
+**A gate round and a benchmark round are different things that share a word.** This page is about
+gate rounds: `lgcov round new` and `lgcov guard`, with `lgcov-round.yaml` and `exposure.json`.
+`lgcov round init`, `lock` and `check` work on a [benchmark round](benchmark-rounds.md), which fixes
+what `lgcov bench` compares and keeps its own `exposure.jsonl`. Neither command reads the other's
+files.
+
 **`lgcov ci` and the Action don't call `lgcov guard` yet.** Until they do, a round holds only where
 you run the command yourself, and nothing records exposure on its own.
 
