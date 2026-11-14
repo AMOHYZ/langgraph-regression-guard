@@ -17,8 +17,10 @@ from lgcov.calibration import (
     judge_bands,
     judge_stats,
     labels_needed,
+    labels_needed_lines,
     moved_band,
     read_labels,
+    recorded_bands,
     rows_from_overrides,
     saved_case_lines,
     tune_threshold,
@@ -301,3 +303,58 @@ def test_a_label_never_reaches_both_the_fit_and_the_estimate_of_its_fold() -> No
     after = cross_fit(ids, numbered, fit, estimate, seed=3)
     assert after[0] == before[0]
     assert all(a != b for a, b in zip(after[1:], before[1:], strict=True))
+
+
+# T187: what a judge that can't block still needs, the band rule first and kappa second.
+def _needs(entry: dict[str, object] | None, kind: str = "jev") -> list[str]:
+    doc = {"version": 1, "jev_model": None, "judges": {"tone": entry} if entry else {}}
+    kinds = {"tone": kind, "visits": "code"}
+    return labels_needed_lines(judge_bands(kinds, doc, None), doc, kinds)
+
+
+def test_bands_json_records_the_agreed_counts_and_a_reader_ignores_keys_it_does_not_know() -> None:
+    doc = json.loads(bands_document([judge_stats("grounded", _judge(11, 2, 14, 1))], None))
+    entry = doc["judges"]["grounded"]
+    assert (entry["agreed_failures"], entry["agreed_passes"]) == (11, 14)
+    entry["a_key_from_a_newer_lgcov"] = 1  # the base's lgcov reads the PR's file
+    assert recorded_bands(doc)[0] == {"grounded": entry["band"]}
+
+
+def test_the_labels_line_leads_with_the_agreed_counts_then_the_kappa_gap() -> None:
+    entry: dict[str, object] = {"band": "advisory", "n": 46, "labels_for_kappa_010": 107}
+    assert _needs({**entry, "agreed_failures": 11, "agreed_passes": 14}) == [
+        "- `tone` (advisory): needs 5 more agreed failures (11 of 16) and 2 more agreed passes "
+        "(14 of 16); κ ±0.10: 61 more labels (46 of 107)."
+    ]
+    assert _needs({**entry, "agreed_failures": 16, "agreed_passes": 3, "n": 120}) == [
+        "- `tone` (advisory): needs 13 more agreed passes (3 of 16)."
+    ]
+
+
+def test_a_judge_with_both_counts_gets_no_needs_line_its_rates_hold_it_back() -> None:
+    entry: dict[str, object] = {"band": "flag", "n": 46, "labels_for_kappa_010": 107}
+    assert _needs({**entry, "agreed_failures": 18, "agreed_passes": 16}) == [
+        "- `tone` (flag): has 16 agreed failures and 16 agreed passes; held by its TPR and TNR "
+        "lower bounds, which must both reach 0.80; κ ±0.10: 61 more labels (46 of 107)."
+    ]
+
+
+def test_an_unlabelled_judge_and_a_bands_json_without_the_counts() -> None:
+    assert _needs(None, "fake") == [
+        "- `tone` (advisory): no labels yet; needs 16 agreed failures and 16 agreed passes."
+    ]
+    assert _needs({"band": "flag", "n": 40, "labels_for_kappa_010": 107}) == [
+        "- `tone` (flag): κ ±0.10: 67 more labels (40 of 107); run `lgcov calibrate` to see "
+        "the agreed counts."
+    ]
+    assert _needs({"band": "flag", "n": 40, "labels_for_kappa_010": None}) == [
+        "- `tone` (flag): run `lgcov calibrate` to see the agreed counts."
+    ]
+
+
+def test_blocking_code_and_model_capped_judges_get_no_labels_line() -> None:
+    assert _needs({"band": "blocking", "n": 40, "agreed_failures": 20, "agreed_passes": 20}) == []
+    doc = {"jev_model": "jev-2026-10", "judges": {"tone": {"band": "blocking", "n": 40}}}
+    capped = judge_bands({"tone": "jev"}, doc, "jev-2026-11")
+    assert capped.of == {"tone": "flag"}  # recalibration lifts it, not labels
+    assert labels_needed_lines(capped, doc, {"tone": "jev"}) == []

@@ -450,6 +450,8 @@ def bands_document(
         s.judge_id: {
             "band": moved_band((previous or {}).get(s.judge_id, "advisory"), s),
             "n": s.n,
+            "agreed_failures": s.caught,  # T187: what moved_band's up-guard counts
+            "agreed_passes": s.cleared,
             "tpr": _triple(s.tpr, s.tpr_ci),
             "tnr": _triple(s.tnr, s.tnr_ci),
             "kappa": _triple(s.kappa, s.kappa_ci),
@@ -547,6 +549,58 @@ def _lower(entry: Mapping[str, object] | None, rate: str) -> float | None:
     triple = entry.get(rate) if entry else None
     low = triple[1] if isinstance(triple, list) and len(triple) == 3 else None
     return float(low) if isinstance(low, int | float) else None
+
+
+def _whole(entry: Mapping[str, object], key: str) -> int | None:
+    value = entry.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _kappa_gap(entry: Mapping[str, object]) -> str:
+    n, target = _whole(entry, "n"), _whole(entry, "labels_for_kappa_010")
+    if n is None or target is None or target <= n:
+        return ""
+    return f"κ ±0.10: {target - n} more labels ({n} of {target})"
+
+
+def _needs(entry: Mapping[str, object] | None) -> str:
+    """What one non-blocking judge's bands.json entry says it still needs."""
+    rule = f"{MIN_AGREED} agreed failures and {MIN_AGREED} agreed passes"
+    if entry is None:
+        return f"no labels yet; needs {rule}"
+    counts = (
+        (_whole(entry, "agreed_failures"), "agreed failures"),
+        (_whole(entry, "agreed_passes"), "agreed passes"),
+    )
+    known = [(count, what) for count, what in counts if count is not None]
+    if len(known) < len(counts):  # written before T187
+        tail = "run `lgcov calibrate` to see the agreed counts"
+        return "; ".join(part for part in (_kappa_gap(entry), tail) if part)
+    short = [
+        f"{MIN_AGREED - count} more {what} ({count} of {MIN_AGREED})"
+        for count, what in known
+        if count < MIN_AGREED
+    ]
+    if short:
+        lead = "needs " + " and ".join(short)
+    else:  # more labels alone won't move it, so nothing here says "needs"
+        lead = f"has {rule}; held by its TPR and TNR lower bounds, which must both reach 0.80"
+    return "; ".join(part for part in (lead, _kappa_gap(entry)) if part)
+
+
+def labels_needed_lines(bands: Bands, document: object, kinds: Mapping[str, str]) -> list[str]:
+    """T187: one line per model judge that can't block: first the rule that holds its band
+    (moved_band's MIN_AGREED), then the gap to κ ±0.10. A judge bands.json calls blocking is
+    left out: only a jev_model mismatch caps it, and that has its own warning."""
+    lines = []
+    for kpi, kind in sorted(kinds.items()):
+        entry = _entry(document, kpi)
+        if kind == "code" or bands.of.get(kpi) == "blocking":
+            continue
+        if entry is not None and entry.get("band") == "blocking":
+            continue
+        lines.append(f"- `{kpi}` ({bands.of.get(kpi, 'advisory')}): {_needs(entry)}.")
+    return lines
 
 
 def band_changes(before: object, after: object) -> list[str]:

@@ -59,6 +59,7 @@ from lgcov.calibration import (
     bands_document,
     calibrate,
     judge_bands,
+    labels_needed_lines,
     read_labels,
     recorded_bands,
     render_calibration,
@@ -1601,6 +1602,7 @@ def _gate_bands(
     bands = judge_bands(kinds, raw, cfg.jev_model, cfg.gate.uncalibrated)
     advisory = cfg.gate.advisory(list(kinds)) | _in_band(bands, "advisory")
     lines = [uncalibrated_line(bands, kinds, cfg.gate.uncalibrated), *bands.warnings]
+    lines += labels_needed_lines(bands, raw, kinds)  # T187
     return advisory, _in_band(bands, "flag") - advisory, [line for line in lines if line]
 
 
