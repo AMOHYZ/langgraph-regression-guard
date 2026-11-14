@@ -68,8 +68,9 @@ ablates recorded trajectory steps one at a time to find the culprit step, not a 
 None of the tools below labels graph nodes root or propagated between base and PR.
 A plain baseline does as well: on single-node edits in the [synthetic
 benchmark](benchmark.md#synthetic), naming the node the diff edited matches or beats lgcov's
-root (recall 1.00 against 0.85, precision 0.35 against 0.39). With router and fan-out edits
-counted, lgcov's recall is 0.90 against the diff's 1.00.
+root (recall 1.00 against 0.85, precision 0.35 against 0.45). With router and fan-out edits
+counted, lgcov's recall is 0.90 against the diff's 1.00. On each of those edits lgcov also names
+a node only one side ran as a second root, so per node its root precision is 0.47.
 
 **(c) Judges that earn the right to block.** A KPI's judge may block a PR only once the
 lower bounds of the 95% intervals of its TPR and TNR against human labels both clear

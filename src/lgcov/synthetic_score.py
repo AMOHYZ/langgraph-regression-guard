@@ -14,6 +14,18 @@ Method = Callable[[Case], set[str]]
 
 
 @dataclass(frozen=True)
+class Found:
+    """T222: what `lgcov ci` says about one case's nodes."""
+
+    root: frozenset[str]
+    inconclusive: frozenset[str] = frozenset()
+    one_sided: frozenset[str] = frozenset()  # roots named because only one side ran the node
+
+
+Labeller = Callable[[Case], Found]
+
+
+@dataclass(frozen=True)
 class Vote:
     """One case, or one edit's majority across its questions, under one method."""
 
@@ -54,6 +66,30 @@ def rates(votes: Sequence[Vote]) -> Rates:
         Rate(caught, sum(v.regressed for v in votes)),
         Rate(sum(v.hit for v in activated), len(activated)),
         Rate(sum(v.named for v in harmless), len(harmless)),
+    )
+
+
+@dataclass(frozen=True)
+class NodeScore:
+    """T222: each node named root counted on its own, since the shipped labels can name several."""
+
+    precision: Rate  # of the nodes named root, the edited node of a regressed case
+    recall: Rate  # of regressed cases, the edited node named root
+    exact: Rate  # of regressed cases, the roots named are exactly the edited node
+    inconclusive: int  # cases that name no root and an inconclusive node: misses, not false roots
+    one_sided: Rate  # of the nodes named root, named because only one side ran them
+
+
+def node_score(found: Sequence[tuple[Case, Found]]) -> NodeScore:
+    regressed = [(case, f) for case, f in found if case.truth.regressed]
+    hits = sum(case.truth.edited_node in f.root for case, f in regressed)
+    named = sum(len(f.root) for _, f in found)
+    return NodeScore(
+        Rate(hits, named),
+        Rate(hits, len(regressed)),
+        Rate(sum(f.root == {case.truth.edited_node} for case, f in regressed), len(regressed)),
+        sum(1 for _, f in found if f.inconclusive and not f.root),
+        Rate(sum(len(f.one_sided & f.root) for _, f in found), named),
     )
 
 
@@ -102,6 +138,7 @@ def _no_node(case: Case) -> set[str]:
     return set()
 
 
+FIRST_DRIFT = "first drift + router rule"  # T222: what "lgcov root" scored before
 METHODS: dict[str, Method] = {
     "edited node from the diff": _edited_node,
     "first divergence": first_divergence,
@@ -136,6 +173,7 @@ class Report:
     end_to_end_false: Rate  # of edits that changed the run and did not regress, the same
     aa: tuple[tuple[str, AaResult], ...]
     noise: tuple[tuple[str, NoiseRate], ...] = ()  # T211
+    per_node: tuple[tuple[str, NodeScore], ...] = ()  # T222: by group of edits, as the rows are
 
 
 def _row(name: str, method: Method, cases: Sequence[Case]) -> Row:
@@ -152,9 +190,16 @@ def build_report(
     aa: Sequence[tuple[str, AaResult]],
     date: str,
     noise: Sequence[tuple[str, NoiseRate]] = (),
+    *,
+    labels: Labeller | None = None,
+    first_drift: Method | None = None,
 ) -> Report:
-    methods = {"lgcov root": lgcov, **METHODS}
+    """`lgcov`: the roots the "lgcov root" row scores. T222: `labels` is the same answer in full,
+    for the per-node table, and `first_drift` the rule that row scored before, kept beside it."""
+    older = {FIRST_DRIFT: first_drift} if first_drift else {}
+    methods = {"lgcov root": lgcov, **older, **METHODS}
     single = [case for case in cases if case.truth.edit_kind == "node_body"]
+    groups = (("All", cases), ("Single-node", single)) if labels else ()
     regressed = [case for case in cases if case.truth.regressed]
     harmless = [case for case in cases if case.truth.label == "benign"]
     return Report(
@@ -170,6 +215,9 @@ def build_report(
         Rate(sum(map(end_to_end_flags, harmless)), len(harmless)),
         tuple(aa),
         tuple(noise),
+        tuple((name, node_score([(c, labels(c)) for c in group])) for name, group in groups)
+        if labels
+        else (),
     )
 
 
@@ -241,6 +289,36 @@ def _noise_lines(noise: Sequence[tuple[str, NoiseRate]]) -> list[str]:
     ]
 
 
+def _node_lines(per_node: Sequence[tuple[str, NodeScore]]) -> list[str]:
+    """T222: the shipped labels, node by node."""
+    if not per_node:
+        return []
+    return [
+        "### Per node",
+        "",
+        "`lgcov root` above is the label `lgcov ci` ships. It can name several nodes on one case, "
+        "or none, so here each node it names root counts on its own. A case with only an "
+        "inconclusive node names no root: a miss for recall, and not counted in precision.",
+        "",
+        "- **Precision:** of the nodes named root, the share that are the edited node of a "
+        "regressed case.",
+        "- **Recall:** of regressed cases, the share whose edited node is named root.",
+        "- **Exact match:** of regressed cases, the share where the roots named are exactly the "
+        "edited node.",
+        "- **One side only:** of the nodes named root, the share named because only base or only "
+        "the PR ran them.",
+        "",
+        "| Edits | Precision | Recall | Exact match | Inconclusive cases | One side only |",
+        "|---|---|---|---|---|---|",
+        *(
+            f"| {group} | {_plain(n.precision)} | {_plain(n.recall)} | {_plain(n.exact)} "
+            f"| {n.inconclusive} | {_plain(n.one_sided)} |"
+            for group, n in per_node
+        ),
+        "",
+    ]
+
+
 def render_section(report: Report) -> str:
     """The "## Synthetic" section of docs/benchmark.md."""
     groups = (("All", report.all_edits), ("Single-node", report.single_node))
@@ -248,6 +326,7 @@ def render_section(report: Report) -> str:
     diff = _method(report.single_node, "edited node from the diff")
     ours = _method(report.all_edits, "lgcov root")
     first = _method(report.all_edits, "first divergence")
+    narrow = _method(report.single_node, "first divergence")
     labels = ", ".join(f"{report.labels.get(k, 0)} {k}" for k in ("regressed", "benign", "inert"))
     lines = [
         "## Synthetic",
@@ -280,6 +359,7 @@ def render_section(report: Report) -> str:
         "",
         *_table(groups, lambda row: row.by_edit, _ranged),
         "",
+        *_node_lines(report.per_node),
         "### What this says",
         "",
         "- **Edited node from the diff matches or beats lgcov on recall and coverage on "
@@ -292,13 +372,14 @@ def render_section(report: Report) -> str:
         "diff can't pin to one node: a shared helper, a model or version swap, a shared config. "
         "Those are follow-up T182 and aren't here.",
         f"- **lgcov flags harmless changes without judges:** its false-flag rate is "
-        f"{_plain(lgcov.false_flag)} on single-node edits. This run scores drift only. The rate "
-        "can't separate the methods: drift and the diff both name a node on every harmless change, "
-        "and end-to-end's 0 only means it names no node.",
-        "- **First divergence ties lgcov on single-node edits,** because the first node to drift "
-        "is lgcov's root rule there. On a router or fan-out edit lgcov names the routing node, "
-        "from the router's fingerprint, and first divergence names a node downstream: recall on "
-        f"all edits is {_plain(ours.recall)} against {_plain(first.recall)}.",
+        f"{_plain(lgcov.false_flag)} on single-node edits, against {_plain(diff.false_flag)} for "
+        "the edited node from the diff. This run scores drift only, so a harmless change that "
+        "moves an output gets a root. A changed run lgcov names no root on is one it left "
+        "inconclusive, not one it found harmless, and end-to-end's 0 only means it names no node.",
+        "- **On a router or fan-out edit lgcov names the routing node,** from the router's "
+        "fingerprint, and first divergence names a node downstream: recall on all edits is "
+        f"{_plain(ours.recall)} against {_plain(first.recall)}. On single-node edits it is "
+        f"{_plain(lgcov.recall)} against {_plain(narrow.recall)}.",
         f"- **End-to-end names no node.** As a detector, its final answer changed on "
         f"{_plain(report.end_to_end_caught)} regressed cases and on "
         f"{_plain(report.end_to_end_false)} harmless ones.",
@@ -318,8 +399,9 @@ def render_section(report: Report) -> str:
         *_noise_lines(report.noise),
         "### Limitations",
         "",
-        "- Exact match on the edited node: parent-only naming counts as a miss, so lgcov's `sub` "
-        "doesn't score for an edit to `sub.inner`. That is every single-node miss lgcov makes.",
+        "- Exact match on the edited node: parent-only naming counts as a miss, so an edit to "
+        "`sub.inner` is a miss whatever a method says about `sub`. lgcov calls `sub` inconclusive, "
+        "since a subgraph has no fingerprint.",
         "- A router edit counts as a hit whenever the router's code changed and a node drifted "
         "after it. lgcov doesn't check that the run took another branch, and no case here has a "
         "router edit beside a node edit.",
@@ -383,6 +465,17 @@ def report_json(report: Report) -> str:
                     for agent, a in report.aa
                 ],
                 "noise_rule": [{"agent": agent, **asdict(n)} for agent, n in report.noise],
+                "per_node": [
+                    {
+                        "edits": group,
+                        "precision": _rate_json(n.precision),
+                        "recall": _rate_json(n.recall),
+                        "exact": _rate_json(n.exact),
+                        "inconclusive": n.inconclusive,
+                        "one_sided": _rate_json(n.one_sided),
+                    }
+                    for group, n in report.per_node
+                ],
             },
             indent=2,
         )

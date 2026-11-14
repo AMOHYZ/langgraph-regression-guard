@@ -94,7 +94,7 @@ from lgcov.cassette import (
     unservable,
 )
 from lgcov.ci_report import CiResult, Tally, Timing, render_ci_report
-from lgcov.code_judges import code_judge
+from lgcov.code_judges import code_judge, unknown_names
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import (
     TIERS,
@@ -160,7 +160,13 @@ from lgcov.sampling import (
 from lgcov.slices import Group, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.synthetic import Agent, Case, aa_arms, every_case, noise_rule_rates
-from lgcov.synthetic_score import build_report, render_section, replace_section, report_json
+from lgcov.synthetic_score import (
+    Found,
+    build_report,
+    render_section,
+    replace_section,
+    report_json,
+)
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
 from lgcov.verdict_actions import CI_STATUSES, MODES, CodeFailure, gate_findings
 
@@ -1191,6 +1197,10 @@ def _evaluate(
     )
     base_runs, base_notes = _base_runs(args, cfg) if edited else (list[Cassette](), list[str]())
     paired, removed = _pair_with_base(runs, base_runs, cfg.ignore_paths)
+    no_data: list[str] = []
+    if l2 is not None:  # T197: before anything below reads the KPIs
+        recorded = [r.steps for r in (*runs, *base_runs)]
+        l2, no_data = _known_sequences(l2, recorded, [steps for _, steps in pairs], run.head)
     result = replace(
         partial,
         inconclusive_blocks=args.fail_on_inconclusive or cfg.gate.inconclusive_blocks,
@@ -1213,6 +1223,7 @@ def _evaluate(
             *_removed_note(removed, cfg.cassette_dir),
             *policy.llm_notes,
             *_whole_run_note(l2[0] if l2 else []),
+            *no_data,
             *([note] if note else []),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
             *_langsmith_notes(cfg.langsmith, args.commit),
@@ -1378,6 +1389,35 @@ def _whole_run_note(specs: list[KPISpec]) -> list[str]:
     """T181: a tool check reads every tool the run called, not only its KPI's node's (T210)."""
     tools = [s.name for s in specs if (s.check or {}).get("type") in _TOOL_CHECKS]
     return [f"⚠️ {_WHOLE_RUN}: {_quoted(tools)}."] if tools else []
+
+
+def _known_sequences(
+    l2: tuple[list[KPISpec], list[Judge]],
+    recorded: list[list[Step]],
+    fresh: list[list[Step]],
+    head: GraphSnapshot,
+) -> tuple[tuple[list[KPISpec], list[Judge]], list[str]]:
+    """T197: the KPIs without the sequence checks naming something neither side has, and a
+    note for each of those. The base's side is what its runs recorded: a name found there
+    stays judged, so a PR can't drop a check by removing what it names."""
+
+    def names(runs: list[list[Step]]) -> set[str]:
+        tools = (t for steps in runs for t in run_tools([s.output for s in steps]))
+        return {s.node for steps in runs for s in steps} | {*tools}
+
+    base, here = names(recorded), names(fresh) | head.nodes
+    kept, notes = [], []
+    for spec, judge in zip(*l2, strict=True):
+        unknown = unknown_names(spec.check or {}, base, here) if spec.judge == "code" else ()
+        if not unknown:
+            kept.append((spec, judge))
+            continue
+        notes.append(
+            f"⚠️ `{spec.name}`: {_quoted(list(unknown))} is in neither the base's runs nor this "
+            "PR's graph (a typo, or inside a subgraph, which lgcov doesn't record yet): "
+            "not checked."
+        )
+    return ([s for s, _ in kept], [j for _, j in kept]), notes
 
 
 def _ci_gate(
@@ -1587,7 +1627,7 @@ def _verify_result_cmd(argv: list[str]) -> int:
 
 
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
-_TOOL_CHECKS = ("tool_called", "tool_not_called")
+_TOOL_CHECKS = ("tool_called", "tool_not_called", "tool_sequence")
 _WHOLE_RUN = "node scope not applied to tool checks yet (whole-run)"
 # T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
 # never runs one, and a nightly run reports the KPIs it couldn't judge.
@@ -2594,8 +2634,24 @@ def _synthetic_agents() -> Sequence[Agent]:
     return agents
 
 
+def _shipped(case: Case) -> Found:
+    """T222: what `lgcov ci` says about a case: replay the edited agent, serving what it left
+    alone, probe its changed nodes offline, and label as ci does (`_node_labels`)."""
+    runs = [case.base]
+    done = replay_run(case.graph, case.base, (), serve=True)
+    probes = judge_probes(runs, probe_steps(case.graph, runs, changed_nodes(case.graph, runs)))
+    labels = _node_labels(runs, [done.steps], [list(done.drifts)], probes)
+    sides = ({s.node for s in case.base.steps}, {s.node for s in done.steps})
+    return Found(
+        frozenset(labels.root),
+        frozenset(labels.inconclusive),
+        frozenset(labels.root) & (sides[0] ^ sides[1]),
+    )
+
+
 def _lgcov_root(case: Case) -> set[str]:
-    """What `lgcov ci` would call root: replay the edited agent, serving what it left alone. The
+    """The rule `lgcov ci` used before T162, scored beside the shipped labels: replay the edited
+    agent, serving what it left alone. The
     first node to drift, or T175: the source node of a router the edit changed."""
     done = replay_run(case.graph, case.base, (), serve=True)
     root = _run_root(case.base, list(done.drifts))
@@ -2618,7 +2674,16 @@ def _bench_synthetic(out: Path, results: Path) -> int:
     cases = [case for agent in agents for case in every_case(agent)]
     aa = [(agent.name, arm) for agent in agents for arm in aa_arms(agent)]
     noise = [(agent.name, rate) for agent in agents for rate in noise_rule_rates(agent)]
-    report = build_report(cases, _lgcov_root, aa, datetime.now(UTC).date().isoformat(), noise)
+    found = {id(case): _shipped(case) for case in cases}  # the cases stay alive in `cases`
+    report = build_report(
+        cases,
+        lambda case: set(found[id(case)].root),
+        aa,
+        datetime.now(UTC).date().isoformat(),
+        noise,
+        labels=lambda case: found[id(case)],
+        first_drift=_lgcov_root,
+    )
     section = render_section(report)
     doc = out.read_text(encoding="utf-8") if out.exists() else ""
     for path, text in ((out, replace_section(doc, section)), (results, report_json(report))):

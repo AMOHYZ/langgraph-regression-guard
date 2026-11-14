@@ -36,6 +36,10 @@ or slice group never goes further than its KPIs' own verdicts.
   - `tool_called` and `tool_not_called` see the tools a run called, read from the AI messages in
     its steps, but over the whole run: `node:` isn't applied to them yet, so a tool another node
     calls passes or fails the check too. The comment says so for each tool check.
+  - `node_sequence` and `tool_sequence` read the whole run too. A name that is in neither the
+    base's recorded runs nor the PR's graph (a typo, or a node inside a subgraph, which lgcov
+    doesn't record yet) leaves the check not checked, with a ⚠️ line, and never fails the PR. A
+    name the base's runs have and the PR dropped is judged, so it fails.
 - **The 2.5%** is at the default α = 0.05. With no discordant pair, SHIP reads the no-drop
   bound at α/2 instead of the CI. That is the same 2.5% at α = 0.05, and more if α is set
   higher, as the PR comment then says.

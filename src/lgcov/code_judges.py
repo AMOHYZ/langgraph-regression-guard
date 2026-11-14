@@ -7,7 +7,7 @@ a missing or malformed trace raises JudgeInfraError, never a fail.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 
 from lgcov.judges import KPI, Judge, JudgeInfraError, NodeState, Verdict
@@ -86,6 +86,44 @@ class MaxSteps:
         return _verdict(self.kpi, steps <= self.n, f"{steps} steps, max {self.n}")
 
 
+def _in_order(kpi: KPI, kind: str, want: tuple[str, ...], seq: tuple[str, ...]) -> Verdict:
+    """T197: pass when `want` is found in `seq` in this order; other steps may come between."""
+    verb = "called" if kind == "tool" else "visited"
+    at = 0  # steps of seq used so far, so also the 1-based step of the last name found
+    for i, name in enumerate(want):
+        if name not in seq[at:]:
+            if i == 0:
+                return _verdict(kpi, False, f"{kind} {name} never {verb}")
+            return _verdict(kpi, False, f"{kind} {name} not {verb} after {want[i - 1]} (step {at})")
+        at += seq[at:].index(name) + 1
+    return _verdict(kpi, True, f"{kind}s {', '.join(want)} {verb} in order")
+
+
+@dataclass(frozen=True)
+class NodeSequence:
+    kpi: KPI
+    nodes: tuple[str, ...]
+
+    def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
+        return _in_order(self.kpi, "node", self.nodes, _run(node_output).nodes)
+
+
+@dataclass(frozen=True)
+class ToolSequence:
+    kpi: KPI
+    tools: tuple[str, ...]
+
+    def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
+        return _in_order(self.kpi, "tool", self.tools, _run(node_output).tools)
+
+
+def _names(value: str) -> tuple[str, ...]:
+    names = tuple(name.strip() for name in value.split(","))
+    if not all(names):
+        raise ValueError(f"a sequence needs comma-separated names, got {value!r}")
+    return names
+
+
 def _positive_int(value: str) -> int:
     if not value.isdigit() or int(value) < 1:
         raise ValueError(f"'n' must be a positive integer, got {value!r}")
@@ -96,10 +134,26 @@ def _positive_int(value: str) -> int:
 CODE_CHECKS: dict[str, tuple[str, Callable[[KPI, str], Judge]]] = {
     "max_steps": ("n", lambda k, v: MaxSteps(k, _positive_int(v))),
     "node_not_visited": ("node", NodeNotVisited),
+    "node_sequence": ("nodes", lambda k, v: NodeSequence(k, _names(v))),
     "node_visited": ("node", NodeVisited),
     "tool_called": ("tool", ToolCalled),
     "tool_not_called": ("tool", ToolNotCalled),
+    "tool_sequence": ("tools", lambda k, v: ToolSequence(k, _names(v))),
 }
+_SEQUENCES = {"node_sequence": "nodes", "tool_sequence": "tools"}
+
+
+def unknown_names(
+    check: Mapping[str, str], base: Collection[str], head: Collection[str]
+) -> tuple[str, ...]:
+    """T197: a sequence check's names that neither the base nor the PR has: a typo, or a node
+    inside a subgraph. There is nothing to judge them on. A name the base has and the PR lost
+    is not one of these: the check runs, and fails on the PR."""
+    param = _SEQUENCES.get(check.get("type", ""))
+    if param is None:
+        return ()
+    names = dict.fromkeys(_names(check.get(param, "")))
+    return tuple(n for n in names if n not in base and n not in head)
 
 
 def code_judge(kpi: KPI, check: Mapping[str, str]) -> Judge:

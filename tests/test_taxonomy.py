@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lgcov.code_judges import ToolNotCalled
+from lgcov.code_judges import NodeSequence, ToolNotCalled
 from lgcov.judges import KPI, FakeJudge, Judge
 from lgcov.taxonomy import judges_from_taxonomy, load_taxonomy, parse_taxonomy
 
@@ -168,6 +168,13 @@ def test_code_judge_builds_tool_not_called(tmp_path: Path) -> None:
     )
     judges = judges_from_taxonomy(load_taxonomy(_write(tmp_path, doc)), FAKES)
     assert judges["kpi_a"] == ToolNotCalled(judges["kpi_a"].kpi, "web_search")
+    # T197: a sequence's names as a YAML list or as one comma-separated string
+    for names in ("[plan, search]", '"plan, search"'):
+        listed = doc.replace("{type: tool_not_called, tool: web_search}", "CHECK").replace(
+            "CHECK", f"{{type: node_sequence, nodes: {names}}}"
+        )
+        judge = judges_from_taxonomy(load_taxonomy(_write(tmp_path, listed)), FAKES)["kpi_a"]
+        assert judge == NodeSequence(judge.kpi, ("plan", "search"))
 
 
 def test_code_judge_unknown_check_fails_at_load(tmp_path: Path) -> None:

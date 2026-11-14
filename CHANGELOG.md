@@ -2,7 +2,7 @@
 
 ## 0.3.0 (2026-11-14)
 
-Everything merged from 9 to 14 November 2026 (#95 to #141), one line per change, with its PR. Docs-only, test-only and refactoring PRs have no line.
+Everything merged from 9 to 14 November 2026 (#95 to #143), one line per change, with its PR. Docs-only, test-only and refactoring PRs have no line.
 
 ### Changed
 
@@ -34,6 +34,8 @@ Everything merged from 9 to 14 November 2026 (#95 to #141), one line per change,
 - A gate round after the first now carries `reference`, the first round's number and digest, inside its own digest. `lgcov guard` exits 2 if it is edited or missing. Nothing counts cumulative loss from it yet, and nothing re-checks the reference round itself. [The reference round](docs/round.md#the-reference-round). (#140)
 - `lgcov replay` no longer fails with "Object of type … is not JSON serializable" when a node's output holds a dataclass: the fresh run is compared as the cassette saved it, and a step whose input holds one gets a replay key instead of always running live. The cassette format doesn't change (#105).
 - `lgcov import langsmith` and the PR report's experiment link work with an org-scoped LangSmith key: set `LANGSMITH_WORKSPACE_ID` and every request names the workspace. Before, such a key got HTTP 403 (#100).
+- `lgcov bench --synthetic` scores the labels `lgcov ci` ships: its "lgcov root" row now comes from the same function as the PR comment, with the rule it scored before beside it as "first drift + router rule". A new "Per node" table counts each node named root on its own, with exact match, the inconclusive cases and the roots named only because one side ran the node; `docs/benchmark-synthetic.json` holds them under `per_node`. An inconclusive case names no root: a miss for recall, not counted in precision. Result: by case, precision 0.57 (28 of 49) and recall 0.90 (28 of 31) on all edits; per node, precision 0.47 (28 of 60), because every router or fan-out case gets a second root. (#143)
+- Two code checks for a taxonomy KPI, `node_sequence` and `tool_sequence`: the `nodes` or `tools` listed must appear in that order, and other steps may come between. Both read the whole run. A name that neither the base's recorded runs nor the PR's graph has, such as a typo or a node inside a subgraph, leaves the check not checked, with a note, and never fails a PR (#142).
 - `release.yml` has a `publish-pypi` job: after TestPyPI takes a tagged release, the same files go to PyPI by trusted publishing, once a reviewer approves the `pypi` environment. 0.3.0 is the first release cut with it. (#137)
 
 ## 0.2.0 (2026-11-08)
