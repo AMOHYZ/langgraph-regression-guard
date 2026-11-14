@@ -1,6 +1,6 @@
 [project]
 name = "lgcov"
-version = "0.2.0"
+version = "0.3.0"
 description = "Catch silent regressions in LangGraph agents on every PR. lgcov re-runs only the nodes a PR can reach and shows which node's output changed first."
 readme = "README.md"
 license = "MIT"
