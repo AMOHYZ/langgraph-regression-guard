@@ -45,7 +45,7 @@ nothing else should come from there):
 
 ```bash
 pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
-pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.2.0
+pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.3.0
 ```
 
 Or from GitHub, as the quickstart does. Once on PyPI: `pip install lgcov`.
@@ -91,9 +91,9 @@ Minutes to first report: 2 (clean venv, steps below pasted as-is; measured 2026-
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install "git+https://github.com/AMOHYZ/langgraph-regression-guard"
-# Or 0.2.0 from TestPyPI; dependencies from PyPI, since anyone can upload to TestPyPI:
+# Or 0.3.0 from TestPyPI; dependencies from PyPI, since anyone can upload to TestPyPI:
 #   pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
-#   pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.2.0
+#   pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.3.0
 lgcov --version
 
 # 1. A graph to guard: the demo agent (or point graph_entrypoint at your own).
@@ -691,6 +691,24 @@ elsewhere):
   down at once.
 - One label per case and reviewer: overriding the same case again replaces your earlier
   override, while a second reviewer's counts on its own.
+
+### One record per PR run
+
+On a PR, `lgcov ci` appends one JSON line per run to `.lgcov/metrics.jsonl`, in the directory
+it runs in (`--metrics-out` to put it elsewhere): the PR, the verdict, wall time, cases,
+samples per case and judge calls. The PR is named from `GITHUB_REPOSITORY` and `GITHUB_REF`,
+or `--pr owner/repo#12`; a local run, a push or a nightly names none, so nothing is written.
+Overrides, spend, labels added and time to node are not known to the run and are yours to fill in.
+
+```bash
+lgcov metrics summary .lgcov/metrics.jsonl
+```
+
+- A PR that ran several times counts once, as its last run.
+- A run that never got as far as timing records 0 seconds, and the wall-time percentiles
+  leave those out ("known on 3 of 4 checked PRs").
+- A hosted runner discards the file when the job ends: the Action does not upload or commit
+  it. Keep it with your own `actions/upload-artifact` step, or a cache, if you want the history.
 
 ## Development
 

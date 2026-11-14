@@ -1,14 +1,16 @@
 """T156: one record per PR, one JSON object per line, and the summary of them (pure).
 
-Nothing writes these yet: records are written by hand. An overridden block is a `fail` a reviewer
-overrode, so it is their disagreement and not verified truth. A checked PR is any but an `error`:
-a harness error means the PR wasn't checked, so only the harness error rate counts those.
+T233: `lgcov ci` appends one per run of a PR; the rest is filled in by hand. An overridden
+block is a `fail` a reviewer overrode, so it is their disagreement and not verified truth. A
+checked PR is any but an `error`: a harness error means the PR wasn't checked, so only
+the harness error rate counts those.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from statistics import median
@@ -52,6 +54,7 @@ class MetricsSummary:
     labels_per_pr: float | None = None
     spend_known: int = 0
     cost_per_pr: float | None = None
+    wall_known: int = 0  # T233: checked PRs with a time; 0 seconds is "not measured"
     wall_p50: float | None = None
     wall_p95: float | None = None
     time_to_node_reported: int = 0
@@ -141,8 +144,31 @@ def parse_record(line: str) -> PrMetrics:
     )
 
 
+def pr_name(repository: str, ref: str) -> str | None:
+    """T233: `owner/repo#12` from GITHUB_REPOSITORY and GITHUB_REF; None outside a PR."""
+    number = re.fullmatch(r"refs/pull/(\d+)/.+", ref)
+    return f"{repository}#{number[1]}" if repository and number else None
+
+
+def pr_metrics(
+    pr: str,
+    verdict: ReviewVerdict,
+    *,
+    wall_seconds: float,
+    cases: int,
+    repeats: int,
+    judge_calls: int,
+) -> PrMetrics:
+    """T233: what one `lgcov ci` run knows of its PR. An override, spend, labels and the time
+    to the node are not its to know, so they stay unset. No timing is 0 seconds."""
+    return PrMetrics(
+        pr, verdict, False, "", wall_seconds, None, cases, repeats, judge_calls, 0, None
+    )
+
+
 def parse_records(text: str) -> tuple[PrMetrics, ...]:
-    """Every record in a file. A repeated PR is an error: a re-run would skew the rates."""
+    """Every PR's record in a file. T233: a PR with several lines, one per run, counts once,
+    as its last, so a re-run doesn't skew the rates."""
     records: dict[str, PrMetrics] = {}
     for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
@@ -151,8 +177,6 @@ def parse_records(text: str) -> tuple[PrMetrics, ...]:
             record = parse_record(line)
         except ValueError as exc:
             raise ValueError(f"line {number}: {exc}") from None
-        if record.pr in records:
-            raise ValueError(f"line {number}: a second record for {record.pr}")
         records[record.pr] = record
     return tuple(records.values())
 
@@ -175,7 +199,7 @@ def summarize(records: Sequence[PrMetrics]) -> MetricsSummary:
     needs_human = sum(r.verdict == "needs_human" for r in checked)
     labels = sum(r.labels_added for r in checked)
     spend = [r.api_spend_usd for r in checked if r.api_spend_usd is not None]
-    walls = [r.wall_seconds for r in checked]
+    walls = [r.wall_seconds for r in checked if r.wall_seconds > 0]
     minutes = [r.time_to_node_minutes for r in checked if r.time_to_node_minutes is not None]
     errors = len(records) - len(checked)
     return MetricsSummary(
@@ -192,6 +216,7 @@ def summarize(records: Sequence[PrMetrics]) -> MetricsSummary:
         labels_per_pr=labels / len(checked) if checked else None,
         spend_known=len(spend),
         cost_per_pr=sum(spend) / len(spend) if spend else None,
+        wall_known=len(walls),
         wall_p50=_nearest_rank(walls, 50),
         wall_p95=_nearest_rank(walls, 95),
         time_to_node_reported=len(minutes),
@@ -228,7 +253,7 @@ def format_summary(s: MetricsSummary) -> str:
             f"needs_human: {s.needs_human} of {checked} ({_rate(s.needs_human_rate, '%')})",
             f"Label burden: {burden} ({s.labels} labels, {checked})",
             f"Cost: {_cost(s.cost_per_pr)} (known on {s.spend_known} of {checked})",
-            f"Wall time: {wall} ({checked})",
+            f"Wall time: {wall} (known on {s.wall_known} of {checked})",
             f"Time to node: {node} (reported on {s.time_to_node_reported} of {checked})",
         )
     )

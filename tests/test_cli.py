@@ -2384,6 +2384,52 @@ def test_cli_ci_writes_its_timing_as_json_for_the_benchmark(
     assert timing["total"] >= timing["agent"] >= 0
 
 
+def test_cli_ci_appends_one_metrics_record_per_run_of_a_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T233: .lgcov/metrics.jsonl, one line per run; outside a PR nothing is written."""
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    monkeypatch.delenv("GITHUB_REF", raising=False)
+    metrics = tmp_path / ".lgcov" / "metrics.jsonl"
+    _run_ci(tmp_path)
+    assert not metrics.exists()  # a local run, a push or a nightly names no PR
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/agent")
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/7/merge")
+    _run_ci(tmp_path)
+    _run_ci(tmp_path, "--pr", "example/agent#8")
+    (tmp_path / "cassettes" / "baseline.json").unlink()  # a harness error: no timing
+    assert _run_ci(tmp_path)[0] == 2
+    records = [json.loads(line) for line in metrics.read_text(encoding="utf-8").splitlines()]
+    assert [(r["pr"], r["verdict"]) for r in records] == [
+        ("example/agent#7", "pass"),
+        ("example/agent#8", "pass"),
+        ("example/agent#7", "error"),
+    ]
+    assert (records[0]["cases"], records[0]["overridden"], records[0]["api_spend_usd"]) == (
+        2,
+        False,
+        None,
+    )
+    assert records[0]["wall_seconds"] > 0 and records[2]["wall_seconds"] == 0
+    capsys.readouterr()
+    assert main(["metrics", "summary", str(metrics)]) == 0
+    out = capsys.readouterr().out
+    assert "PRs: 2 (1 checked)" in out  # #7 counts once, as its last run
+    assert "Harness errors: 1 of 2 PRs" in out
+
+
+def test_cli_ci_records_the_samples_per_case_and_judge_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    (tmp_path / "taxonomy.yaml").write_text(UNDECIDED_TAXONOMY, encoding="utf-8")
+    out = tmp_path / "kept" / "m.jsonl"
+    _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--pr", "a/b#1", "--metrics-out", str(out))
+    (record,) = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert (record["repeats"], record["judge_calls"], record["verdict"]) == (1, 4, "pass")
+
+
 def test_cli_ci_links_main_s_latest_nightly_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

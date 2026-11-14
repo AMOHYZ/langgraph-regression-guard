@@ -15,6 +15,8 @@ from lgcov.metrics import (
     format_summary,
     parse_record,
     parse_records,
+    pr_metrics,
+    pr_name,
     record_to_json,
     summarize,
 )
@@ -124,9 +126,45 @@ def test_a_bad_record_names_its_line() -> None:
         parse_records(f"{LINE}\nnot json\n")
 
 
-def test_a_repeated_pr_is_rejected_because_it_would_skew_the_rates() -> None:
-    with pytest.raises(ValueError, match=r"line 2.*example/agent#1"):
-        parse_records(f"{LINE}\n{LINE}\n")
+def test_a_repeated_pr_counts_once_as_its_last_record() -> None:
+    # T233: `lgcov ci` appends a line per run, so a PR pushed to twice is in the file twice
+    first, again = replace(PLAIN, pr="a/b#1", verdict="fail"), replace(PLAIN, pr="a/b#1")
+    other = replace(PLAIN, pr="a/b#2")
+    text = "\n".join(record_to_json(r) for r in (first, other, again))
+    assert parse_records(text) == (again, other)
+
+
+def test_a_run_with_no_timing_is_left_out_of_the_percentiles() -> None:
+    # T233: schema 1 has no null for wall_seconds, so 0 is "not measured", never a fast run
+    summary = summarize(_prs(replace(PLAIN, wall_seconds=0.0), replace(PLAIN, wall_seconds=7.0)))
+    assert (summary.checked, summary.wall_known) == (2, 1)
+    assert (summary.wall_p50, summary.wall_p95) == (7.0, 7.0)
+    assert "Wall time: p50 7 s / p95 7 s (known on 1 of 2 checked PRs)" in format_summary(summary)
+    none = summarize((replace(PLAIN, wall_seconds=0.0),))
+    assert (none.wall_known, none.wall_p50) == (0, None)
+    assert "Wall time: n/a (known on 0 of 1 checked PRs)" in format_summary(none)
+
+
+def test_the_pr_is_named_from_the_actions_environment() -> None:
+    assert pr_name("example/agent", "refs/pull/12/merge") == "example/agent#12"
+    assert pr_name("example/agent", "refs/heads/main") is None  # a push or a nightly
+    assert pr_name("", "refs/pull/12/merge") is None
+
+
+def test_a_ci_run_s_record_leaves_what_ci_cannot_know_unknown() -> None:
+    record = pr_metrics(
+        "a/b#3", "needs_human", wall_seconds=4.5, cases=2, repeats=3, judge_calls=12
+    )
+    assert record == replace(
+        PLAIN,
+        pr="a/b#3",
+        verdict="needs_human",
+        wall_seconds=4.5,
+        cases=2,
+        repeats=3,
+        judge_calls=12,
+    )
+    assert parse_record(record_to_json(record)) == record
 
 
 def test_only_a_fail_that_was_overridden_is_an_overridden_block() -> None:
@@ -207,7 +245,7 @@ Overridden blocks per 100 checked PRs: 100.0 (1 overridden of 1 blocks, 1 checke
 needs_human: 0 of 1 checked PRs (0.0%)
 Label burden: 2.0 labels per checked PR (2 labels, 1 checked PRs)
 Cost: $0.42 per checked PR (known on 1 of 1 checked PRs)
-Wall time: p50 180 s / p95 180 s (1 checked PRs)
+Wall time: p50 180 s / p95 180 s (known on 1 of 1 checked PRs)
 Time to node: median 12 min (reported on 1 of 1 checked PRs)"""
 EMPTY_OUTPUT = """\
 PRs: 0 (0 checked)
@@ -216,7 +254,7 @@ Overridden blocks per 100 checked PRs: n/a (0 overridden of 0 blocks, 0 checked 
 needs_human: 0 of 0 checked PRs (n/a)
 Label burden: n/a (0 labels, 0 checked PRs)
 Cost: n/a (known on 0 of 0 checked PRs)
-Wall time: n/a (0 checked PRs)
+Wall time: n/a (known on 0 of 0 checked PRs)
 Time to node: n/a (reported on 0 of 0 checked PRs)"""
 
 

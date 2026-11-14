@@ -100,6 +100,7 @@ class CiResult:
     timing: Timing | None = None  # T089
     tally: Tally | None = None  # T199; None: replay compared no runs, so no tally line
     tier: str = ""  # T089: pr or nightly
+    samples: int = 0  # T233: k, the judge samples per case; 0: no KPI judged
     lint_summary: str = ""  # T104: "🧹 Lint: 2 warnings"; never changes the exit code
     lint_lines: tuple[str, ...] = ()  # T104: one per finding
     locked: str = ""  # T114: the commits this run compared, from lock.locked_line
