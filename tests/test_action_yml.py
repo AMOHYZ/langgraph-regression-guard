@@ -200,6 +200,9 @@ def test_release_publishes_to_pypi_after_testpypi_behind_its_own_environment() -
     assert isinstance(steps_test, list)
     upload = _dict(steps[-1])
     assert upload["uses"] == _dict(steps_test[-1])["uses"]  # pinned as the TestPyPI job is
+    # A full commit SHA: a tag or branch can be moved to code this repo never ran, and this
+    # step holds the token that uploads to PyPI.
+    assert re.fullmatch(r"pypa/gh-action-pypi-publish@[0-9a-f]{40}", str(upload["uses"]))
     assert "with" not in upload  # no repository-url (the default is PyPI) and no password
 
 
