@@ -30,3 +30,9 @@ A version on PyPI can't be uploaded again, so the approval is the last check.
 Then pushing a `vX.Y.Z` tag builds, makes the GitHub Release and publishes. Run by hand
 (Actions → release → Run workflow), `dry_run` (on by default) only builds the wheel and
 sdist, checks the wheel installs and runs, and uploads them as the `dist` artifact.
+
+Both publish jobs pin `pypa/gh-action-pypi-publish` to a full commit SHA, with its version in a
+comment: the commit the 0.3.0 release ran. To update it, take the commit a release tag of that
+action points at, and change both lines in `release.yml` together. A dry run skips the
+publish jobs, so a mistyped SHA shows only at the next tag: the job fails while setting up,
+before anything uploads.
