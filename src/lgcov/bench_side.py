@@ -7,7 +7,10 @@ each side here, with that side's folders first on its path, and a run crosses ov
     check  <target>                                can the graph be loaded?
     record <target> <cases.json> <runs.json>       record each case, and save the runs
     replay <target> <runs.json> <drifted> <fresh>  replay them, and save the nodes that drifted in
-                                                   each, and the fresh runs
+           [<probes>] [--live]                     each, the fresh runs, and T162's probe of each
+                                                   changed node that drifted; --live runs every node
+    repeat <target> <runs.json> <nodes> <out> <k>  T211: run each named node live, k times on each
+                                                   input it was recorded with, and save the samples
 
 T169: runs are saved as each one finishes, so a crash can't lose what was already paid for.
 
@@ -17,10 +20,22 @@ nothing ran. Exit 1: it failed later.
 
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
-from lgcov.cassette import Cassette, Replay, record, replay_run, runs_from_json, runs_to_json
+from lgcov.cassette import (
+    Cassette,
+    Replay,
+    changed_nodes,
+    probe_nodes,
+    record,
+    repeat_steps,
+    replay_run,
+    runs_from_json,
+    runs_to_json,
+)
 from lgcov.cli import CANT_IMPORT, _load_graph, _say_replay_notes
+from lgcov.messages import encode
 
 
 def _save(path: Path, runs: list[Cassette]) -> None:
@@ -31,8 +46,16 @@ def _save(path: Path, runs: list[Cassette]) -> None:
     partial.replace(path)
 
 
+def _probes(graph: object, recorded: list[Cassette], drifted: list[list[str]]) -> object:
+    # T162: each node whose code changed and that drifted, run on base's input, offline.
+    changed = changed_nodes(graph, recorded)
+    probes = probe_nodes(graph, recorded, changed & {n for d in drifted for n in d})
+    return {n: [p.drifted, p.reason] for n, p in probes.items()}
+
+
 def side_main(argv: list[str]) -> int:
     mode, target, *paths = argv
+    live = paths[-1:] == ["--live"]  # T173: run every node, serve none
     try:
         # Exception: importing user graph code can raise anything.
         graph = _load_graph(target)
@@ -48,15 +71,23 @@ def side_main(argv: list[str]) -> int:
         elif mode == "replay":
             done: list[Replay] = []
             fresh: list[Cassette] = []
+            recorded = runs_from_json(Path(paths[0]).read_text(encoding="utf-8"))
             try:
-                for run in runs_from_json(Path(paths[0]).read_text(encoding="utf-8")):
-                    done.append(replay_run(graph, run, (), serve=True))
+                for run in recorded:
+                    done.append(replay_run(graph, run, (), serve=not live, baseline=recorded))
                     fresh.append(Cassette(run.inputs, list(done[-1].steps)))
                     _save(Path(paths[2]), fresh)
             finally:
                 _say_replay_notes(done)
             drifted = [[d.node for d in r.drifts] for r in done]
             Path(paths[1]).write_text(json.dumps(drifted), encoding="utf-8")
+            if len([p for p in paths if p != "--live"]) > 3:  # T162: the probes' file
+                Path(paths[3]).write_text(json.dumps(_probes(graph, recorded, drifted)), "utf-8")
+        elif mode == "repeat":
+            recorded = runs_from_json(Path(paths[0]).read_text(encoding="utf-8"))
+            nodes = json.loads(Path(paths[1]).read_text(encoding="utf-8"))
+            samples = [asdict(p) for p in repeat_steps(graph, recorded, nodes, int(paths[3]))]
+            Path(paths[2]).write_text(json.dumps(samples, default=encode), encoding="utf-8")
     except Exception as exc:  # user graph code can raise anything: the parent reports it
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

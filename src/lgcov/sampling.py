@@ -12,6 +12,7 @@ Benjamini-Hochberg across the advisory ones. Flakiness is shown, never decided o
 from __future__ import annotations
 
 import time
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from statistics import fmean
@@ -25,6 +26,7 @@ from lgcov.stats import (
     PairedResult,
     benjamini_hochberg,
     benjamini_hochberg_adjusted,
+    cases_needed,
     decide,
     holm,
     holm_adjusted,
@@ -44,6 +46,7 @@ class Sample:
     tokens_in: int | None = None  # None: the judge reported no usage
     tokens_out: int | None = None
     score: float | None = None  # T091: the judge's score, in [0, 1]; None on an infra error
+    error: str = ""  # T195: why an infra sample didn't run; "" for a sample that did
 
 
 def usage_tokens(raw: Mapping[str, object]) -> tuple[int, int] | None:
@@ -73,8 +76,12 @@ def judge_samples(
         start = clock()
         try:
             v = judge.judge(node_input, node_output)
-        except (JudgeInfraError, *TRANSPORT_ERRORS):  # T074: a judge's network trouble too
-            samples.append(Sample(None, 0.0, (clock() - start) * 1000))
+        except (JudgeInfraError, *TRANSPORT_ERRORS) as exc:  # T074: network trouble too
+            # T195: a judge words its own errors without secrets; anything else's text could
+            # carry a URL, so only its type is kept
+            own = isinstance(exc, JudgeInfraError)
+            why = " ".join(str(exc).split())[:200] if own else type(exc).__name__
+            samples.append(Sample(None, 0.0, (clock() - start) * 1000, error=why))
             continue
         ms = (clock() - start) * 1000
         t_in, t_out = usage_tokens(v.raw) or (None, None)
@@ -140,6 +147,8 @@ class KpiStats:
     cases: tuple[tuple[tuple[float, ...], tuple[float, ...]], ...] = ()  # T090: paired scores
     score_range: float = 1.0  # T150: the KPI's highest score minus its lowest
     new_failures: tuple[str, ...] = ()  # code judges: cases that passed on base, fail here
+    worse: tuple[str, ...] = ()  # T199, every judge: cases this PR scores lower than the base
+    infra_reasons: tuple[tuple[str, int], ...] = ()  # T195: why, and how often; most first
 
     @property
     def flakiness(self) -> float:
@@ -185,6 +194,7 @@ def kpi_stats(
         )
     changed = [c for c in pairs if fmean(b_scores[c]) != fmean(n_scores[c])]
     new_failures = [c for c in changed if code and fmean(n_scores[c]) < fmean(b_scores[c])]
+    worse = [c for c in changed if fmean(n_scores[c]) < fmean(b_scores[c])]
     roots = sorted({case_roots[c] for c in changed if c in case_roots}) if case_roots else []
     confidence = {c.case_id: c.confidence for c in new_cases}
     outcome: GateOutcome = "infra_error" if infra else "needs_human"  # unless pairs decide
@@ -221,9 +231,11 @@ def kpi_stats(
         margin=margin,
         roots=tuple(roots),
         new_failures=tuple(new_failures),
+        worse=tuple(worse),
         score_range=max(kpi.score_map.values()) - min(kpi.score_map.values()),
+        infra_reasons=tuple(Counter(s.error for s in samples if s.error).most_common()),
     )
-    return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence)[0]
+    return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence, power=power)[0]
 
 
 def k_gate(stats: Sequence[KpiStats]) -> int:
@@ -238,11 +250,14 @@ def gate_kpis(
     alpha: float = 0.05,
     min_confidence: float = 0.7,
     flagged: Collection[str] = (),
+    power: float = 0.8,
 ) -> list[KpiStats]:
     """T091: Holm across the blocking KPIs (T114: all K_gate of them, paired or not),
     Benjamini-Hochberg across the advisory ones, then each KPI's decision against its margin.
     An advisory KPI never fails the gate, and (T063) a flagged one, a judge whose band is
-    flag, stops it at most as INCONCLUSIVE."""
+    flag, stops it at most as INCONCLUSIVE. T215: a blocking KPI's N* is sized at
+    alpha / K_gate, Holm's strictest step, so it never understates the cases a BLOCK needs;
+    an advisory one's stays at alpha."""
 
     def band(kpi: str) -> str:
         return "advisory" if kpi in advisory else "flag" if kpi in flagged else "blocking"
@@ -259,7 +274,9 @@ def gate_kpis(
         for (i, r), p_adj, significant in zip(  # not strict: it stops before the padding
             family, adjust(pvalues), reject(pvalues, alpha), strict=False
         ):
-            s = gated[i]
+            sized = alpha / max(k_gate(gated), 1) if blocking else alpha
+            r = replace(r, required_n=cases_needed(r.sd, r.delta, sized, power))
+            s = replace(gated[i], paired=r)
             decision = decide(
                 r.delta,
                 r.ci,
@@ -376,6 +393,9 @@ def render_gate_table(
         "smallest drop this n detects. N*: "
         f"cases needed to detect Δ (α {alpha:g}, power {power:g}); with no discordant pair, "
         "the identical cases that rule out a drop of δ.",
+        "N* is sized at α/K_gate for a blocking KPI, Holm's strictest step, so it can ask for "
+        "more cases than a BLOCK ends up needing; an advisory KPI's is sized at α. MDE stays "
+        "at α.",
         "",
         _guarantee(k_gate(stats), alpha),
     ]
@@ -426,4 +446,8 @@ def render_kpi_table(stats: Sequence[KpiStats]) -> list[str]:
     infra = [f"{s.kpi} {s.infra}" for s in stats if s.infra]
     if infra:
         lines.append("Infra errors, not counted toward k: " + ", ".join(infra))
+    for s in stats:
+        if s.infra_reasons:  # T195: the reason, so a failed judge call can be fixed
+            why = "; ".join(f"{count} × {reason}" for reason, count in s.infra_reasons)
+            lines.append(f"- {s.kpi}: {why}")
     return lines

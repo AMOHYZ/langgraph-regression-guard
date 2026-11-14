@@ -3,6 +3,7 @@ docs/mutations.yaml. That file's entries name open_deep_research's nodes, so onl
 carry over. Each edit changes the agent's code, and the fake LLM keeps the re-run offline."""
 
 from collections.abc import Callable
+from functools import cache, partial
 from random import Random
 from types import FunctionType
 from typing import Any, Literal
@@ -19,6 +20,10 @@ NOT_ON_DEMO = {
     "subgraph_output_change": "the demo agent has no subgraph",
 }
 
+# The prompt cassettes/baseline.json was recorded with. The demo PR edits graph.py's copy, and
+# the edits here must start from the recording, or they would carry that PR's change too.
+RECORDED_PROMPT = "You are a concise support agent."
+
 
 def outcome_ok(run: Cassette) -> bool:
     """The end-to-end outcome, read from the question and not from `needs_tool`, so a broken
@@ -32,7 +37,7 @@ def outcome_ok(run: Cassette) -> bool:
 
 def build(
     lookup: Callable[..., Any] = lookup_order,
-    answer: Callable[..., Any] = respond,
+    answer: Callable[..., Any] | None = None,
     router: Callable[..., Any] = route,
     schema: Any = State,
 ) -> Any:
@@ -41,7 +46,7 @@ def build(
     b = StateGraph(schema)
     b.add_node("classify", classify)
     b.add_node("lookup_order", lookup)
-    b.add_node("respond", answer)
+    b.add_node("respond", answer or _respond_with())
     b.add_edge(START, "classify")
     b.add_conditional_edges("classify", router)
     b.add_edge("lookup_order", "respond")
@@ -65,7 +70,8 @@ def _returning(tool_result: str) -> Callable[[State], State]:
 
 
 def _respond_with(**names: object) -> FunctionType:
-    """respond as a PR editing these module-level names would leave it."""
+    """respond as recorded, with these module-level names changed as a PR would change them."""
+    names = {"SYSTEM_PROMPT": RECORDED_PROMPT, **names}
     return FunctionType(respond.__code__, {**respond.__globals__, **names}, respond.__name__)
 
 
@@ -191,7 +197,24 @@ MORE_MUTATIONS: dict[str, tuple[Mutation, ...]] = {
 NOISE_RATE = 0.2  # ours, for the A/A wiring test: it says nothing about a real model
 
 
-def noisy_graph(seed: int) -> Any:
-    """The unedited agent, except that its fake model sometimes keeps too little of the prompt."""
-    window = 12 if Random(seed).random() < NOISE_RATE else 40
-    return build(answer=_respond_with(fake_llm=_model(window)))
+@cache
+def _noisy(window: int, prompt: str) -> Any:
+    return build(answer=_respond_with(fake_llm=_model(window), SYSTEM_PROMPT=prompt))
+
+
+def noisy_graph(seed: int, prompt: str = RECORDED_PROMPT) -> Any:
+    """The unedited agent, except that its fake model sometimes keeps too little of the prompt.
+    T211: `prompt` edits respond as a PR would, under the same noise."""
+    return _noisy(12 if Random(seed).random() < NOISE_RATE else 40, prompt)
+
+
+# T211: two prompt edits from above, on the noisy agent: (size, what it does, the agent by seed).
+SMALL_SHIFT, LARGE_SHIFT = MUTATIONS["prompt_edit"][0], MORE_MUTATIONS["prompt_edit"][0]
+SHIFTS = (
+    (
+        "small",
+        SMALL_SHIFT.variant,
+        partial(noisy_graph, prompt="You are a friendly, detailed support agent."),
+    ),
+    ("large", LARGE_SHIFT.variant, partial(noisy_graph, prompt="Say when an item has shipped.")),
+)

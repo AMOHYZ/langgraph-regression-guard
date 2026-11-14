@@ -1,6 +1,17 @@
-"""The Action's PR comment (pure): T089's timing line, T104's lint line."""
+"""The Action's PR comment (pure): T089's timing line, T104's lint line, T199's tally line."""
 
-from lgcov.ci_report import CiResult, Timing, format_timing, render_ci_report
+from dataclasses import replace
+
+import pytest
+
+from lgcov.ci_report import (
+    CiResult,
+    Tally,
+    Timing,
+    format_tally,
+    format_timing,
+    render_ci_report,
+)
 
 
 def test_timing_line_shows_each_phase_the_counts_and_the_budget() -> None:
@@ -34,3 +45,37 @@ def test_the_lint_line_and_its_findings_render_in_the_pr_comment() -> None:
     assert "\n🧹 Lint: 1 warning\n" in report
     assert "<summary>Lint findings</summary>" in report
     assert "- warn `c`: unreachable from START. Fix: add an edge into it." in report
+
+
+TALLIES = {
+    "0 runs touched": (Tally(2, 0, worse=0), "0 of 2 runs touched · 0 worse · root node: none"),
+    "no root found": (Tally(2, 1), "1 of 2 runs touched · no KPI judged · root node: none"),
+    "multiple roots": (
+        Tally(3, 3, ("respond", "classify", "lookup_order")),
+        "3 of 3 runs touched · no KPI judged · root node: `respond` +2 more",
+    ),
+    "worse per KPI": (
+        Tally(3, 2, ("respond",), 2, (("tone", 2), ("polite", 1))),
+        "2 of 3 runs touched · 2 worse (`tone` 2, `polite` 1) · root node: `respond`",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", TALLIES)
+def test_the_tally_line_for_each_case(case: str) -> None:
+    tally, want = TALLIES[case]
+    assert format_tally(tally) == want
+
+
+def test_the_tally_line_sits_under_the_heading_and_changes_nothing_else() -> None:
+    table = ("| node | drift | runs |", "|---|---|---|", "| `respond` | root | 2/2 |")
+    drifted = CiResult("root-drift", replay_lines=table, root_drift=("respond",))
+    plain = render_ci_report(drifted).splitlines()
+    tallied = render_ci_report(replace(drifted, tally=Tally(2, 2, ("respond",)))).splitlines()
+    line = "2 of 2 runs touched · no KPI judged · root node: `respond`"
+    assert tallied == [*plain[:3], line, "", *plain[3:]]
+
+
+def test_a_comment_on_a_pr_lgcov_did_not_check_has_no_tally_line() -> None:
+    report = render_ci_report(CiResult("root-drift", harness_error="boom", tally=Tally(2, 0)))
+    assert "runs touched" not in report

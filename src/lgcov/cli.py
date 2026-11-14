@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import importlib
 import importlib.machinery
 import importlib.util
 import json
@@ -10,26 +11,44 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
-from types import CodeType
+from types import CodeType, ModuleType
 from typing import Any
 
 import yaml
 
 from lgcov.attribution import (
+    NEEDS_LIVE,
+    ROUTING,
     Benchmark,
+    NodeLabels,
+    NoiseCheck,
+    Probe,
     Result,
     Score,
+    classify,
+    explain_runs,
     parse_benchmark,
     pending_result,
     render_markdown,
     results_json,
     score,
+)
+from lgcov.bench_round import check as check_round
+from lgcov.bench_round import (
+    exposures,
+    ledger_lines,
+    lock_round,
+    new_round,
+    parse_ledger,
+    parse_round,
+    round_to_yaml,
+    tree_state,
 )
 from lgcov.calibration import (
     Band,
@@ -48,6 +67,7 @@ from lgcov.calibration import (
     uncalibrated_line,
     upsert_case,
 )
+from lgcov.candidate import CandidateRun, FreshRun, candidate_to_json, parse_candidate
 from lgcov.cassette import (
     ON_DIVERGENCE,
     TRANSPORT_ERRORS,
@@ -56,16 +76,22 @@ from lgcov.cassette import (
     Drift,
     NodeError,
     OnDivergence,
+    ProbeStep,
     Replay,
     Step,
     accept_nodes,
+    changed_nodes,
+    compared_run,
+    judge_probes,
+    judge_repeats,
+    probe_steps,
     record,
     replay_run,
     runs_from_json,
     runs_to_json,
     unservable,
 )
-from lgcov.ci_report import CiResult, Timing, render_ci_report
+from lgcov.ci_report import CiResult, Tally, Timing, render_ci_report
 from lgcov.code_judges import code_judge
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import (
@@ -74,6 +100,7 @@ from lgcov.config import (
     GateConfig,
     LangSmithConfig,
     Tier,
+    TierPolicy,
     load_config,
     tier_policy,
 )
@@ -94,13 +121,13 @@ from lgcov.gate_round import (
     JudgeLock,
     case_ids,
     is_full_sha,
-    lock_round,
     parse_draft,
-    parse_round,
     prompt_hash,
     round_problems,
-    round_to_yaml,
 )
+from lgcov.gate_round import lock_round as lock_gate_round
+from lgcov.gate_round import parse_round as parse_gate_round
+from lgcov.gate_round import round_to_yaml as gate_round_to_yaml
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
@@ -114,7 +141,7 @@ from lgcov.langsmith import (
 )
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
-from lgcov.messages import plain
+from lgcov.messages import decode, plain, run_tools
 from lgcov.metrics import format_summary, parse_records, summarize
 from lgcov.normalize import normalize
 from lgcov.review import ReviewDecision, apply_decision
@@ -130,6 +157,8 @@ from lgcov.sampling import (
 )
 from lgcov.slices import Group, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
+from lgcov.synthetic import Agent, Case, aa_arms, every_case, noise_rule_rates
+from lgcov.synthetic_score import build_report, render_section, replace_section, report_json
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
 from lgcov.verdict_actions import CI_STATUSES, MODES, CodeFailure, gate_findings
 
@@ -190,13 +219,7 @@ def _load_drafter(target: str) -> Drafter:
     path, sep, attr = target.rpartition(":")
     if not sep or not path or not attr:
         raise ValueError(f"client must be <file.py>:<attr>, got {target!r}")
-    name = Path(path).stem
-    spec = importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
-    if spec is None or spec.loader is None:
-        raise ValueError(f"cannot import {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    make = getattr(module, attr, None)
+    make = getattr(_import_file(path), attr, None)
     client = make() if callable(make) else None
     if not isinstance(client, Drafter):
         raise ValueError(f"{target} makes no drafting client (one with a propose method)")
@@ -282,18 +305,45 @@ class _SourceOnlyLoader(importlib.machinery.SourceFileLoader):
         return self.source_to_code(self.get_data(self.path), self.path)
 
 
-# Any: a compiled graph from user code; see cassette.record for why it stays untyped.
-def _load_graph(target: str) -> Any:
-    path, sep, attr = target.rpartition(":")
-    if not sep or not path or not attr:
-        raise ValueError(f"target must be <file.py>:<attr>, got {target!r}")
-    name = Path(path).stem
+def _hides_a_module(name: str, path: str) -> bool:
+    """Would the file, registered as `name`, hide a real module from every import of it, the
+    file's own too? Finding itself, or a graph lgcov loaded earlier, hides nothing."""
+    try:
+        found = importlib.util.find_spec(name)
+    except ImportError:  # a dotted stem with no such parent
+        return False
+    except ValueError:  # in sys.modules with no spec, as __main__ can be
+        return True
+    if found is None or isinstance(found.loader, _SourceOnlyLoader):
+        return False
+    return found.origin is None or Path(found.origin).resolve() != Path(path).resolve()
+
+
+def _import_file(path: str, name: str | None = None) -> ModuleType:
+    """Import a user's file and keep it in sys.modules, as an import does: the standard library,
+    pydantic and LangGraph look a class's module up there, while loading and while a node runs.
+
+    The name is the file's stem unless a real module has it. It stays the same from one run to
+    the next because fingerprints can include it (a pydantic ref, a dataclass's methods).
+    """
+    if name is None:
+        stem = Path(path).stem
+        name = f"lgcov_user_{stem}" if _hides_a_module(stem, path) else stem
     spec = importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot import {path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
-    graph = getattr(module, attr, None)
+    return module
+
+
+# Any: a compiled graph from user code; see cassette.record for why it stays untyped.
+def _load_graph(target: str, name: str | None = None) -> Any:
+    path, sep, attr = target.rpartition(":")
+    if not sep or not path or not attr:
+        raise ValueError(f"target must be <file.py>:<attr>, got {target!r}")
+    graph = getattr(_import_file(path, name), attr, None)
     if not hasattr(graph, "stream"):
         raise ValueError(f"{target} is not a compiled graph")
     return graph
@@ -310,8 +360,9 @@ def _replay_under(
     serve: bool,
     on_divergence: OnDivergence = "flag",
     budget: Budget | None = None,
+    baseline: Sequence[Cassette] = (),
 ) -> Replay:
-    """`replay_run` with what lgcov.yaml says to mask."""
+    """`replay_run` with what lgcov.yaml says to mask. `baseline`: every run of the recording."""
     return replay_run(
         graph,
         run,
@@ -320,6 +371,7 @@ def _replay_under(
         on_divergence,
         budget,
         mask_volatile=cfg.mask_volatile_in_key,
+        baseline=baseline,
     )
 
 
@@ -327,7 +379,7 @@ def _drift_kinds(
     runs: list[Cassette], drifts: list[list[Drift]]
 ) -> tuple[dict[str, int], set[str]]:
     """Runs each node drifted in, and the root nodes. "root" = the first node to drift
-    in some run, in execution order; "downstream" nodes drifted only after an earlier one.
+    in some run, in execution order; "propagated" nodes drifted only after an earlier one.
     """
     counts: dict[str, int] = {}
     roots: set[str] = set()
@@ -348,18 +400,28 @@ def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
 
 
 def _replay_markdown(
-    runs: list[Cassette], drifts: list[list[Drift]], not_checked: tuple[str, ...] = ()
+    runs: list[Cassette],
+    drifts: list[list[Drift]],
+    not_checked: tuple[str, ...] = (),
+    labels: NodeLabels | None = None,
 ) -> list[str]:
-    """Per-node drift table: root or downstream, and in how many runs."""
+    """Per-node drift table: root or propagated, and in how many runs. T162: with `labels`, root,
+    propagated or inconclusive by them; without, root is the first node to drift in some run."""
     counts, roots = _drift_kinds(runs, drifts)
+    roots = roots if labels is None else set(labels.root)
+    unsure = {} if labels is None else labels.inconclusive
+    routing = {} if labels is None else labels.routing  # T175: root, though its output held
     lines = ["### Cassette replay", ""]
     if not counts:
         return [*lines, f"No cassette drift ({len(runs)} runs)."]
     lines += ["| node | drift | runs |", "|---|---|---|"]
-    for node in sorted(counts):
-        kind = "root" if node in roots else "downstream"
-        lines.append(f"| `{node}` | {kind} | {counts[node]}/{len(runs)} |")
-    unchanged = sorted({s.node for r in runs for s in r.steps} - counts.keys() - set(not_checked))
+    for node in sorted({*counts, *routing}):
+        kind = "root" if node in roots else "propagated"
+        kind = f"inconclusive ({unsure[node]})" if node in unsure else kind
+        kind = f"root ({ROUTING.format(node)})" if node in routing else kind
+        lines.append(f"| `{node}` | {kind} | {routing.get(node, counts.get(node))}/{len(runs)} |")
+    drifted = {*counts, *routing, *not_checked}
+    unchanged = sorted({s.node for r in runs for s in r.steps} - drifted)
     if unchanged:
         lines += ["", "Unchanged: " + ", ".join(f"`{n}`" for n in unchanged)]
     return lines
@@ -490,7 +552,7 @@ def _replay(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return _harness_error("lgcov replay", "cannot read baseline", exc)
     try:
-        replays = [_replay_under(cfg, graph, run, serve=not args.live) for run in runs]
+        replays = [_replay_under(cfg, graph, run, not args.live, baseline=runs) for run in runs]
     except NodeError as exc:
         return _node_failure("lgcov replay", exc)
     except Exception as exc:  # replay itself: no node or router raised it
@@ -823,7 +885,8 @@ def _base_diff(base_dir: str | None, target: str, head: GraphSnapshot) -> tuple[
         return _graph_diff_lines(diff_graphs(empty, head)), note
     try:
         # Exception: the base graph's own code or deps; not this PR's problem.
-        base = snapshot_from_compiled(_load_graph(base_target))
+        # A name of its own: head runs after this, and must still find head in sys.modules.
+        base = snapshot_from_compiled(_load_graph(base_target, "lgcov_base_graph"))
     except Exception as exc:
         return [], f"Could not load the base graph ({_harness_message('load', exc)}); skipped."
     return _graph_diff_lines(diff_graphs(base, head)), ""
@@ -902,12 +965,25 @@ def _policy_notes(args: argparse.Namespace, cfg: Config, cassettes_edited: bool)
     return notes
 
 
-def _ci_result(args: argparse.Namespace) -> CiResult:
-    start = perf_counter()
-    budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
-    fail_on: FailOn = args.fail_on
-    if args.harness_error:
-        return CiResult(fail_on, harness_error=args.harness_error)
+@dataclass(frozen=True)
+class _GatePolicy:
+    """T179: what a gate run reads before either half of it starts, from the base on a PR."""
+
+    cfg: Config
+    tier: Tier
+    rules: TierPolicy
+    budget: float | None  # seconds for live node calls
+    l2: tuple[list[KPISpec], list[Judge]] | None = None
+    advisory: frozenset[str] = frozenset()
+    flagged: frozenset[str] = frozenset()
+    llm_code: int = 0
+    llm_notes: tuple[str, ...] = ()
+    calibration: tuple[str, ...] = ()
+    kpi_nodes: frozenset[str] | None = None  # T104: for lint; None: no taxonomy, no check
+
+
+def _gate_policy(args: argparse.Namespace) -> _GatePolicy | str:
+    """lgcov.yaml, the taxonomy and the bands; a string says why they can't be read."""
     overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
     # T154: a fix or a new file in this PR can't help until it merges, so a broken policy says so.
     from_base = (
@@ -918,76 +994,156 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     try:
         cfg = load_config(_policy_path(args, args.config), overrides)
     except (OSError, ValueError) as exc:
-        msg = f"invalid lgcov.yaml: {exc}{from_base}"
-        return CiResult(fail_on, harness_error=msg)
+        return f"invalid lgcov.yaml: {exc}{from_base}"
     tier: Tier = args.tier or cfg.tier
-    policy = tier_policy(tier, cfg.samples_per_case)
-    budget.seconds = policy.budget if args.budget_seconds is None else args.budget_seconds
-    l2, advisory, flagged, llm_code = None, frozenset[str](), frozenset[str](), 0
-    llm_notes: list[str] = []
-    calibration: list[str] = []
-    kpi_nodes: set[str] | None = None  # T104: for lint; None: no taxonomy, no check
-    if args.taxonomy:
-        try:
-            every = list(load_taxonomy(_policy_path(args, args.taxonomy)).kpi_specs)
-            kpi_nodes = {s.node for s in every}
-            llm = [s.name for s in every if s.judge == "llm"]
-            runs_llm = policy.llm_judges and _llm_judge is not None
-            specs = every if runs_llm else [s for s in every if s.judge != "llm"]
-            l2 = (specs, [_l2_judge(spec, cfg.jev_model) for spec in specs])
-        except (OSError, ValueError) as exc:
-            msg = f"invalid taxonomy: {exc}{from_base}"
-            return CiResult(fail_on, harness_error=msg)
-        try:
-            advisory, flagged, calibration = _gate_bands(_policy_path(args, args.bands), every, cfg)
-        except (OSError, ValueError) as exc:
-            msg = f"invalid lgcov.yaml or bands.json: {exc}{from_base}"
-            return CiResult(fail_on, harness_error=msg)
-        llm_notes, llm_code = _llm_notes(llm, advisory, policy.llm_judges)
+    rules = tier_policy(tier, cfg.samples_per_case)
+    budget = rules.budget if args.budget_seconds is None else args.budget_seconds
+    if not args.taxonomy:
+        return _GatePolicy(cfg, tier, rules, budget)
+    try:
+        every = list(load_taxonomy(_policy_path(args, args.taxonomy)).kpi_specs)
+        llm = [s.name for s in every if s.judge == "llm"]
+        runs_llm = rules.llm_judges and _llm_judge is not None
+        specs = every if runs_llm else [s for s in every if s.judge != "llm"]
+        l2 = (specs, [_l2_judge(spec, cfg.jev_model, cfg.jev_timeout_s) for spec in specs])
+    except (OSError, ValueError) as exc:
+        return f"invalid taxonomy: {exc}{from_base}"
+    try:
+        advisory, flagged, calibration = _gate_bands(_policy_path(args, args.bands), every, cfg)
+    except (OSError, ValueError) as exc:
+        return f"invalid lgcov.yaml or bands.json: {exc}{from_base}"
+    llm_notes, llm_code = _llm_notes(llm, advisory, rules.llm_judges)
+    return _GatePolicy(
+        cfg,
+        tier,
+        rules,
+        budget,
+        l2,
+        advisory,
+        flagged,
+        llm_code,
+        tuple(llm_notes),
+        tuple(calibration),
+        frozenset(s.node for s in every),
+    )
+
+
+def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget) -> CandidateRun:
+    """T179: the half of a gate run that runs the PR's code: it loads the graph and replays the
+    runs. Nothing here judges, compares or decides."""
+    cfg = policy.cfg
+    budget.seconds = policy.budget
     try:
         # Exception: importing user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
         head = snapshot_from_compiled(graph)
     except Exception as exc:
         msg = _harness_message("cannot load graph", exc) + _moved_graph(args, cfg)
-        return CiResult(fail_on, harness_error=msg)
+        return CandidateRun(harness_error=msg)
     graph_lines, graph_note = _base_diff(args.base_dir, cfg.graph_entrypoint, head)
-    edited = _cassettes_edited(args, cfg)
-    partial = CiResult(fail_on, tuple(graph_lines), graph_note, cassettes_edited=edited)
+    run = CandidateRun(
+        tier=policy.tier, head=head, graph_lines=tuple(graph_lines), graph_note=graph_note
+    )
     try:
         runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
+        return replace(run, harness_error=_harness_message("cannot read baseline", exc))
+    kpi_nodes = None if policy.kpi_nodes is None else set(policy.kpi_nodes)
     found = lint(head, routers_of(graph), {s.node for r in runs for s in r.steps}, kpi_nodes)
-    partial = replace(  # T104: before replay; warnings only, it never blocks
-        partial, lint_summary=summary(found), lint_lines=tuple(f.line() for f in found)
+    run = replace(  # T104: before replay; warnings only, it never blocks
+        run, lint_summary=summary(found), lint_lines=tuple(f.line() for f in found)
     )
-    serve = policy.serve and not args.live
+    serve = policy.rules.serve and not args.live
     budget.expected_live = unservable(graph, runs) if serve else sum(len(r.steps) for r in runs)
     agent_start = perf_counter()
     try:
         replays = [
-            _replay_under(cfg, graph, run, serve, args.on_divergence, budget) for run in runs
+            _replay_under(cfg, graph, recorded, serve, args.on_divergence, budget, runs)
+            for recorded in runs
         ]
     except NodeError as exc:
         original = exc.raised
         if exc.transport:
-            return replace(partial, harness_error=original, harness_node=exc.node)
-        return replace(
-            partial,
-            crash=f"Node `{exc.node}` raised {original}",
-            root_drift=(exc.node,),
-        )
+            return replace(run, harness_error=original, harness_node=exc.node)
+        return replace(run, crash=f"Node `{exc.node}` raised {original}", crash_node=exc.node)
     except Exception as exc:  # replay itself: no node or router raised it
-        msg = _harness_message("replay failed outside node code", exc)
+        return replace(run, harness_error=_harness_message("replay failed outside node code", exc))
+    probes = probe_steps(graph, runs, changed_nodes(graph, runs))  # T162: offline, no verdict
+    return replace(
+        run,
+        fresh=tuple(FreshRun(r.steps, r.calls, r.halt) for r in replays),
+        probes=probes,
+        agent_seconds=perf_counter() - agent_start,
+        budget_hit=budget.hit,
+    )
+
+
+def _evaluate(
+    args: argparse.Namespace, policy: _GatePolicy, run: CandidateRun, start: float
+) -> CiResult:
+    """T179: the half of a gate run that decides. It only reads: what the other half ran, the
+    PR's cassette and the base's policy. So it needs no project install, and with the other half
+    in another job, the PR's code never runs where this does."""
+    fail_on: FailOn = args.fail_on
+    cfg, l2 = policy.cfg, policy.l2
+    if run.head is None:
+        return CiResult(fail_on, harness_error=run.harness_error)
+    edited = _cassettes_edited(args, cfg)
+    partial = CiResult(
+        fail_on,
+        run.graph_lines,
+        run.graph_note,
+        cassettes_edited=edited,
+        lint_summary=run.lint_summary,
+        lint_lines=run.lint_lines,
+    )
+    if run.harness_error:
+        return replace(partial, harness_error=run.harness_error, harness_node=run.harness_node)
+    if run.crash:
+        return replace(partial, crash=run.crash, root_drift=(run.crash_node,))
+    try:
+        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
+    if len(run.fresh) != len(runs):
+        msg = (
+            "The candidate job's result doesn't match this PR's cassette: "
+            f"{len(run.fresh)} runs replayed, {len(runs)} recorded."
+        )
         return replace(partial, harness_error=msg)
-    agent = perf_counter() - agent_start
+    replays = [
+        compared_run(recorded, fresh.steps, fresh.calls, fresh.halt, cfg.ignore_paths)
+        for recorded, fresh in zip(runs, run.fresh, strict=True)
+    ]
     pairs = [(list(r.drifts), list(r.steps)) for r in replays]
     drifts = [d for d, _ in pairs]
-    counts, roots = _drift_kinds(runs, drifts)
-    root, downstream = sorted(roots), sorted(counts.keys() - roots)
+    try:
+        probes = judge_probes(runs, run.probes, cfg.ignore_paths)
+    except ValueError as exc:
+        return replace(partial, harness_error=_harness_message("cannot use the probes", exc))
+    # T162: root by fingerprint and probe. Under fail-on: root-drift an inconclusive node blocks
+    # with the roots, since a live model node can't be probed until T211.
+    counts, _ = _drift_kinds(runs, drifts)
+    bases = {s.node: s.code for r in runs for s in r.steps}
+    heads = {s.node: s.code for f in run.fresh for s in f.steps}
+    firsts = [_run_root(r, d) for r, d in zip(runs, drifts, strict=True)]
+    nodes = [{x.node for x in d} for d in drifts]
+    # T175: a changed router makes its source node root. Old recordings have no router print.
+    routers = (
+        {s.node: s.router for r in runs for s in r.steps},
+        {s.node: s.router for f in run.fresh for s in f.steps},
+    )
+    ran = [[s.node for s in r.steps] for r in runs]
+    by_node = classify(counts.keys(), (bases, heads), probes)
+    labels = explain_runs(by_node, firsts, nodes, routers, ran)
+    blocking = {*labels.root, *labels.inconclusive}
+    root, downstream = sorted(blocking), list(labels.propagated)
+    # T199: the comment's tally line: each run's root and inconclusive nodes, in run order.
+    in_order = [s.node for r, n in zip(runs, nodes, strict=True) for s in r.steps if s.node in n]
+    named = dict.fromkeys(n for n in [*in_order, *root] if n in blocking)
+    tally = Tally(len(runs), sum(1 for d in drifts if d), tuple(named))
     # T083: coverage of the runs replay just did; nothing executes again for it.
-    cov = snapshot_coverage(head, [[s.node for s in steps] for _, steps in pairs], args.commit)
+    cov = snapshot_coverage(run.head, [[s.node for s in steps] for _, steps in pairs], args.commit)
     if args.coverage_out:
         Path(args.coverage_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.coverage_out).write_text(cov.to_json(), encoding="utf-8")
@@ -1003,11 +1159,11 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     calls = [c for r in replays for c in r.calls]
     timing = Timing(
         0.0,
-        agent,
+        run.agent_seconds,
         live=sum(1 for c in calls if c.how != "served"),
         served=sum(1 for c in calls if c.how == "served"),
-        budget=budget.seconds,
-        budget_hit=budget.hit,
+        budget=policy.budget,
+        budget_hit=run.budget_hit,
     )
     base_runs, base_notes = _base_runs(args, cfg) if edited else (list[Cassette](), list[str]())
     paired, removed = _pair_with_base(runs, base_runs, cfg.ignore_paths)
@@ -1015,12 +1171,15 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         partial,
         inconclusive_blocks=args.fail_on_inconclusive or cfg.gate.inconclusive_blocks,
         replay_lines=(
-            *_replay_markdown(runs, drifts, not_checked),
+            *_replay_markdown(runs, drifts, not_checked, labels),
             *([""] if diverged else []),
             *diverged,
         ),
         root_drift=tuple(root),
         propagated_drift=tuple(downstream),
+        first_drift=tuple(n for n in dict.fromkeys(firsts) if n),
+        inconclusive=tuple(sorted(labels.inconclusive)),
+        tally=tally,
         coverage_line=format_coverage_line(cov, base),
         newly_uncovered=coverage_delta(base, cov).newly_uncovered if base else (),
         under_floor=under_floor,
@@ -1028,14 +1187,15 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
             *_policy_notes(args, cfg, edited),
             *base_notes,
             *_removed_note(removed, cfg.cassette_dir),
-            *llm_notes,
+            *policy.llm_notes,
+            *_whole_run_note(l2[0] if l2 else []),
             *([note] if note else []),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
             *_langsmith_notes(cfg.langsmith, args.commit),
         ),
-        tier=tier,
+        tier=policy.tier,
         not_checked=not_checked,
-        timing=replace(timing, total=perf_counter() - start),
+        timing=replace(timing, total=run.seconds + perf_counter() - start),
     )
     try:
         changes = _calibration_changes(args, l2[0] if l2 else [], cfg)
@@ -1050,7 +1210,16 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         extra = sum(len(saved.get(s.name, [])) for s in l2[0] if s.judge != "code")
         stopped = frozenset(i for i, r in enumerate(replays) if r.not_checked)
         stats, gate = _ci_gate(
-            args, cfg, policy.k, advisory, flagged, *l2, runs, pairs, extra, stopped
+            args,
+            cfg,
+            policy.rules.k,
+            policy.advisory,
+            policy.flagged,
+            *l2,
+            runs,
+            pairs,
+            extra,
+            stopped,
         )
     except Exception as exc:  # a judge's own bug or the call limit: harness, not the PR's graph
         msg = _harness_message("L2 gate failed", exc)
@@ -1065,17 +1234,100 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
     groups = _groups(stats, l2[0], cfg, gate)
     findings = gate_findings(stats, groups)
     hidden = _hidden_failures(*l2, stats, [steps for _, steps in pairs], paired, stopped)
+    worse = {s.kpi: {*s.worse} for s in stats}
+    for failure in hidden:  # a re-baseline can't hide a run from the tally either
+        worse[failure.kpi] |= {*failure.cases}
+    by_kpi = tuple((kpi, len(cases)) for kpi, cases in worse.items() if cases)
+    runs_worse = {case.split("/", 1)[0] for cases in worse.values() for case in cases}  # run-{i}
     return replace(
         result,
-        gate=replace(findings, infra=findings.infra or bool(llm_code), hidden_failures=hidden),
+        tally=replace(tally, worse=len(runs_worse), worse_by_kpi=by_kpi) if stats else tally,
+        gate=replace(
+            findings, infra=findings.infra or bool(policy.llm_code), hidden_failures=hidden
+        ),
         l2_lines=(
-            *calibration,
-            *([""] if calibration and stats else []),
+            *policy.calibration,
+            *([""] if policy.calibration and stats else []),
             *(_l2_tables(stats, groups, gate) if stats else ()),
         ),
-        timing=replace(judged, total=perf_counter() - start),
+        timing=replace(judged, total=run.seconds + perf_counter() - start),
         calibration_lines=(*changes, *_rejudge(saved, l2[0], l2[1])),
     )
+
+
+def _read_candidate(path: str, tier: str) -> CandidateRun:
+    """T179: what the candidate job left. That job runs the PR's code, so the file is only that
+    code's word, and one this job can't use gives no verdict."""
+    try:
+        run = parse_candidate(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        msg = "The candidate job left no result, so this PR has no verdict. Its log says why."
+        return CandidateRun(harness_error=msg)
+    except Exception as exc:  # that code wrote this file, so anything can come out of it
+        return CandidateRun(
+            harness_error=_harness_message("The candidate job's result can't be read", exc)
+        )
+    if run.head is None:
+        return run
+    here = _head(".") or ""
+    if run.commit != here:
+        msg = (
+            f"The candidate job ran on `{run.commit[:7]}`, and this job reads the PR at "
+            f"`{here[:7]}`: use a plain `actions/checkout` in the candidate job."
+        )
+        return CandidateRun(harness_error=msg)
+    if run.tier != tier:
+        msg = (
+            f"The candidate job ran tier `{run.tier}`, and this job's is `{tier}`: give both jobs "
+            "the same inputs."
+        )
+        return CandidateRun(harness_error=msg)
+    return run
+
+
+def _ci_result(args: argparse.Namespace) -> CiResult:
+    start = perf_counter()
+    budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
+    fail_on: FailOn = args.fail_on
+    if args.harness_error:
+        return CiResult(fail_on, harness_error=args.harness_error)
+    policy = _gate_policy(args)
+    if isinstance(policy, str):
+        return CiResult(fail_on, harness_error=policy)
+    if not args.candidate_in:
+        return _evaluate(args, policy, _run_candidate(args, policy, budget), start)
+    try:
+        return _evaluate(args, policy, _read_candidate(args.candidate_in, policy.tier), start)
+    except Exception as exc:  # the PR's code wrote that file, so it can break what reads it
+        msg = _harness_message("The candidate job's result can't be evaluated", exc)
+        return CiResult(fail_on, harness_error=msg)
+
+
+def _write_candidate(args: argparse.Namespace, start: Commits) -> int:
+    """T179: `--candidate-out`: only the half that runs the PR's code. Nothing it finds changes
+    this exit code, since `--candidate-in` decides in another job."""
+    began = perf_counter()
+    budget = Budget(None, perf_counter)
+    policy = args.harness_error or _gate_policy(args)
+    run = (
+        CandidateRun(harness_error=policy)
+        if isinstance(policy, str)
+        else _run_candidate(args, policy, budget)
+    )
+    refused = moved(start, _commits(args.base_dir))
+    if refused:
+        run = CandidateRun(harness_error=refused)
+    commit = start.candidate or ""
+    try:
+        text = candidate_to_json(replace(run, commit=commit, seconds=perf_counter() - began))
+    except (TypeError, ValueError) as exc:
+        msg = _harness_message("this run's steps can't be saved", exc)
+        text = candidate_to_json(CandidateRun(commit, harness_error=msg))
+    out = Path(args.candidate_out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    print(f"lgcov: what this run did is at {out}; the job with --candidate-in decides it.")
+    return 0
 
 
 def _llm_notes(
@@ -1096,6 +1348,12 @@ def _llm_notes(
 
 def _quoted(names: list[str]) -> str:
     return ", ".join(f"`{n}`" for n in names)
+
+
+def _whole_run_note(specs: list[KPISpec]) -> list[str]:
+    """T181: a tool check reads every tool the run called, not only its KPI's node's (T210)."""
+    tools = [s.name for s in specs if (s.check or {}).get("type") in _TOOL_CHECKS]
+    return [f"⚠️ {_WHOLE_RUN}: {_quoted(tools)}."] if tools else []
 
 
 def _ci_gate(
@@ -1206,12 +1464,18 @@ def _ci(argv: list[str]) -> int:
     ap.add_argument("--mode", choices=MODES, default="enforcing", help=_MODE_HELP)
     ap.add_argument("--approved-by", default="", help=_APPROVED_BY_HELP)
     ap.add_argument("--ci-status", choices=CI_STATUSES, default="", help=_CI_STATUS_HELP)
+    ap.add_argument("--candidate-out", help="only run the PR's code; write what it did here")
+    ap.add_argument("--candidate-in", help="only decide, from what --candidate-out wrote")
     args = ap.parse_args(argv)
+    if args.candidate_out and args.candidate_in:
+        ap.error("--candidate-out and --candidate-in are the two halves of a run; pass one")
     policy = _policy_hashes(args)  # T154: the base's, before the PR's code can touch them
     bootstrap = _first_adoption(args)
     if bootstrap:
         args.policy_dir = None  # T154: the PR's policy is all there is, so nothing is enforced
     start = _commits(args.base_dir)  # T114: before anything is loaded
+    if args.candidate_out:
+        return _write_candidate(args, start)
     result = replace(
         _locked(_ci_result(args), start, args.base_dir),
         first_adoption=bootstrap,
@@ -1224,7 +1488,10 @@ def _ci(argv: list[str]) -> int:
     report.parent.mkdir(parents=True, exist_ok=True)
     body = render_ci_report(result)
     report.write_text(body, encoding="utf-8")
-    print(body, end="")
+    if args.candidate_in:  # the runner reads `::` commands from stdout, and that file fed this
+        print(f"lgcov: the report is at {report}")
+    else:
+        print(body, end="")
     if args.result_out:
         bound = GateResult(
             start.base or "",
@@ -1243,6 +1510,8 @@ def _ci(argv: list[str]) -> int:
     if args.github_output:
         outputs = {
             "exit-code": action.exit_code,
+            "first-drift": ",".join(result.first_drift),
+            "inconclusive-count": len(result.inconclusive),
             "propagated-drift-count": len(result.propagated_drift),
             "report-path": report,
             "root-drift-count": len(result.root_drift),
@@ -1294,6 +1563,8 @@ def _verify_result_cmd(argv: list[str]) -> int:
 
 
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
+_TOOL_CHECKS = ("tool_called", "tool_not_called")
+_WHOLE_RUN = "node scope not applied to tool checks yet (whole-run)"
 # T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
 # never runs one, and a nightly run reports the KPIs it couldn't judge.
 _llm_judge: Callable[[KPI], Judge] | None = None
@@ -1337,7 +1608,7 @@ def _in_band(bands: Bands, band: Band) -> frozenset[str]:
     return frozenset(kpi for kpi, b in bands.of.items() if b == band)
 
 
-def _l2_judge(spec: KPISpec, jev_model: str | None = None) -> Judge:
+def _l2_judge(spec: KPISpec, jev_model: str | None = None, jev_timeout_s: float = 10.0) -> Judge:
     kpi = spec.to_kpi()
     if spec.judge == "code":
         return code_judge(kpi, spec.check or {})
@@ -1357,7 +1628,7 @@ def _l2_judge(spec: KPISpec, jev_model: str | None = None) -> Judge:
             raise ValueError(f"KPI '{spec.name}': fail_every must be a whole number")
         when = check.get("when_input_contains", "")
         return FakeJudge(kpi, "pass", fail_every=int(every), when_input_contains=when)
-    return JevJudge(kpi, model=jev_model)
+    return JevJudge(kpi, model=jev_model, timeout_s=jev_timeout_s)
 
 
 _Cases = dict[str, tuple[NodeState, NodeState]]
@@ -1366,14 +1637,16 @@ _Cases = dict[str, tuple[NodeState, NodeState]]
 def _l2_cases(spec: KPISpec, runs: list[list[Step]], stopped: Collection[int] = ()) -> _Cases:
     """One case per run: the trace for code judges, else the node's own input and output. A
     run in `stopped` has no whole-run case: its trace is cut off, and its last step isn't the
-    final one, so a code check would read as failed when it was never checked."""
+    final one, so a code check would read as failed when it was never checked. The trace's
+    tools are the whole run's, whatever node the KPI names (T181)."""
     cases: _Cases = {}
     for i, steps in enumerate(runs):
         if i in stopped and (spec.judge == "code" or spec.node == "final"):
             continue
         case_id = f"run-{i}/{spec.node}"
         if spec.judge == "code":
-            cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps]}})
+            tools = run_tools([s.output for s in steps])
+            cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps], "tools": tools}})
             continue
         if spec.node == "final":
             step = steps[-1] if steps else None
@@ -1509,7 +1782,19 @@ def _l2_gate(
                 case_roots=roots,
             )
         )
-    return gate_kpis(stats, advisory, gate.alpha, flagged=flagged)
+    return gate_kpis(stats, advisory, gate.alpha, flagged=flagged, power=gate.power)
+
+
+def _saved_pair(folder: Path) -> tuple[list[Cassette], list[tuple[list[Drift], list[Step]]]]:
+    """T195: the base runs `lgcov bench --keep-runs` saved in <folder>, and head's as their
+    replays, compared as `lgcov bench --from-runs` compares them."""
+    runs, fresh = (_load_runs(str(folder / name)) for name in _KEPT)
+    if len(runs) != len(fresh):
+        raise ValueError(f"{len(runs)} runs on base, {len(fresh)} on head")
+    return runs, [
+        (list(compared_run(r, f.steps, (), None).drifts), list(f.steps))
+        for r, f in zip(runs, fresh, strict=True)
+    ]
 
 
 def _judge_cmd(argv: list[str]) -> int:
@@ -1524,9 +1809,20 @@ def _judge_cmd(argv: list[str]) -> int:
     ap.add_argument("--live", action="store_true", help=_LIVE_HELP)
     ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
     ap.add_argument("--bands", default=_BANDS, help="judge bands from `lgcov calibrate`")
+    ap.add_argument(
+        "--from-runs",
+        metavar="DIR",
+        help="judge the base.json and head.json `lgcov bench --keep-runs` saved in DIR; "
+        "nothing is replayed, so the agent makes no call",
+    )
     args = ap.parse_args(argv)
+    if args.from_runs and args.live:
+        print("lgcov judge: --from-runs runs nothing: no --live", file=sys.stderr)
+        return EXIT_ERROR
     start = _commits(None)  # T114: the candidate; its base is the cassette in that checkout
-    overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
+    # T195: saved runs need no graph, so a stand-in entrypoint validates the config
+    entrypoint = args.graph or ("from-runs.py:unused" if args.from_runs else None)
+    overrides = {"graph_entrypoint": entrypoint, "cassette_dir": args.cassette_dir}
     try:
         cfg = load_config(args.config, overrides)
     except (OSError, ValueError) as exc:
@@ -1545,34 +1841,42 @@ def _judge_cmd(argv: list[str]) -> int:
         every = list(load_taxonomy(taxonomy_path).kpi_specs)
         skipped = [s.name for s in every if s.judge == "llm" and _llm_judge is None]
         specs = [s for s in every if s.name not in skipped]
-        judges = [_l2_judge(spec, cfg.jev_model) for spec in specs]
+        judges = [_l2_judge(spec, cfg.jev_model, cfg.jev_timeout_s) for spec in specs]
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid taxonomy: {exc}", file=sys.stderr)
         return EXIT_ERROR
     if skipped:
         print("Skipped, no llm client: " + ", ".join(f"`{n}`" for n in skipped) + ".")
+    for line in _whole_run_note(specs):
+        print(line)
     try:
         advisory, flagged, calibration = _gate_bands(args.bands, every, replace(cfg, gate=gate))
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid config or bands.json: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    try:
-        # Exception: importing user graph code can raise anything.
-        graph = _load_graph(cfg.graph_entrypoint)
-    except Exception as exc:
-        return _harness_error("lgcov judge", "cannot load graph", exc)
-    try:
-        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        return _harness_error("lgcov judge", "cannot read baseline", exc)
-    try:
-        done = [_replay_under(cfg, graph, r, serve=not args.live) for r in runs]
-        replays = [(list(r.drifts), list(r.steps)) for r in done]
-        _say_replay_notes(done)
-    except NodeError as exc:
-        return _node_failure("lgcov judge", exc)
-    except Exception as exc:  # replay itself: no node or router raised it
-        return _harness_error("lgcov judge", "replay failed outside node code", exc)
+    if args.from_runs:
+        try:
+            runs, replays = _saved_pair(Path(args.from_runs))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return _harness_error("lgcov judge", "cannot read saved runs", exc)
+    else:
+        try:
+            # Exception: importing user graph code can raise anything.
+            graph = _load_graph(cfg.graph_entrypoint)
+        except Exception as exc:
+            return _harness_error("lgcov judge", "cannot load graph", exc)
+        try:
+            runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return _harness_error("lgcov judge", "cannot read baseline", exc)
+        try:
+            done = [_replay_under(cfg, graph, r, not args.live, baseline=runs) for r in runs]
+            replays = [(list(r.drifts), list(r.steps)) for r in done]
+            _say_replay_notes(done)
+        except NodeError as exc:
+            return _node_failure("lgcov judge", exc)
+        except Exception as exc:  # replay itself: no node or router raised it
+            return _harness_error("lgcov judge", "replay failed outside node code", exc)
     plan = _l2_plan(specs, runs, replays)
     saved = _saved_cases(Path(args.bands).parent / "cases", specs)
     total, model = _l2_calls(plan, k)
@@ -1810,11 +2114,11 @@ def _round_new_cmd(argv: list[str]) -> int:
     try:
         draft = _read_round(args.round, parse_draft)
         now = _gate_now(args, draft.gate_cases_path)
-        locked = lock_round(draft, now, entries(_read_ledger(args.exposure)))
+        locked = lock_gate_round(draft, now, entries(_read_ledger(args.exposure)))
     except (OSError, ValueError) as exc:
         print(f"lgcov round new: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    _write_atomic(Path(args.round), round_to_yaml(locked))
+    _write_atomic(Path(args.round), gate_round_to_yaml(locked))
     if not Path(args.exposure).is_file():
         _write_atomic(Path(args.exposure), exposure_to_json({}))
     print(
@@ -1859,7 +2163,7 @@ def _guard_cmd(argv: list[str]) -> int:
         )
         return EXIT_ERROR
     try:
-        locked = _read_round(_policy_path(args, args.round), parse_round)
+        locked = _read_round(_policy_path(args, args.round), parse_gate_round)
         now = _gate_now(args, locked.gate_cases_path)
         ledger = _read_ledger(_policy_path(args, args.exposure))
     except (OSError, ValueError) as exc:
@@ -1929,7 +2233,7 @@ def _review_cmd(argv: list[str]) -> int:
     try:
         # Exception: importing and running user graph code can raise anything.
         graph = _load_graph(cfg.graph_entrypoint)
-        done = [_replay_under(cfg, graph, run, serve=True) for run in runs]
+        done = [_replay_under(cfg, graph, run, serve=True, baseline=runs) for run in runs]
     except Exception as exc:
         return _harness_error("lgcov review", "cannot replay the graph", exc)
     _say_replay_notes(done)
@@ -2119,33 +2423,75 @@ def _error_row(b: Benchmark, error: str, seconds: float) -> Result:
     )
 
 
-def _bench_one(b: Benchmark, keep: Path | None = None) -> Result:
+def _repeats(
+    b: Benchmark,
+    tmp: Path,
+    sides: Mapping[str, tuple[Path, str]],
+    saved: Path,
+    repeat: set[str],
+    k: int,
+) -> dict[str, NoiseCheck]:
+    """T211: `repeat`'s nodes run live `k` more times on each side, each in its own process, and
+    what the samples say of each node."""
+    (tmp / "repeat").write_text(json.dumps(sorted(repeat)), encoding="utf-8")
+    samples: list[list[ProbeStep]] = []
+    for side, (root, target) in sides.items():
+        out = tmp / f"{side}-samples"
+        _run_side(
+            b, side, root, "repeat", target, str(saved), str(tmp / "repeat"), str(out), str(k)
+        )
+        raw = json.loads(out.read_text(encoding="utf-8"), object_hook=decode)
+        samples.append([ProbeStep(**p) for p in raw])
+    return judge_repeats(_load_runs(str(saved)), samples[0], samples[1])
+
+
+def _bench_one(
+    b: Benchmark, keep: Path | None = None, live: bool = False, repeats: int = 0
+) -> Result:
     """Record the cases on base, replay head (unchanged nodes served, as `lgcov ci` does),
     and score lgcov's root / propagated labels. A benchmark that can't run says why.
 
     T166: each side runs in its own process. Head's import is checked first, and base's is the
     first thing its recording does, so a bad import costs no real call on either side.
 
-    T169: with `keep`, each side's runs stay in <keep>/<benchmark>/, saved as each one finishes."""
+    T169: with `keep`, each side's runs stay in <keep>/<benchmark>/, saved as each one finishes.
+
+    T173: with `live`, head serves nothing, so base against base measures the model's noise.
+
+    T211: with `repeats`, a changed node that needs a live probe, and under `live` each run's
+    first drifted node, runs that many more times on each side: 2 x `repeats` calls per input."""
     start = perf_counter()
     worktrees: list[Path] = []
-    expected = (tuple(sorted(b.root)), tuple(sorted(b.propagated)))
     try:
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 base_target, head_target, worktrees = _bench_sides(b, Path(tmp))
                 base_root, head_root = Path(tmp) / "base", Path(tmp) / "head"
                 cases, drifted = Path(tmp) / "cases", Path(tmp) / "drifted"
+                probed = Path(tmp) / "probes"
                 here = Path(tmp) if keep is None else keep / b.name
                 saved, fresh = here / "base.json", here / "head.json"
                 cases.write_text(json.dumps(list(b.cases)), encoding="utf-8")
                 _run_side(b, "head", head_root, "check", head_target)
                 _run_side(b, "base", base_root, "record", base_target, str(cases), str(saved))
-                replaying = (head_target, str(saved), str(drifted), str(fresh))
+                replaying = [head_target, str(saved), str(drifted), str(fresh), str(probed)]
+                replaying += ["--live"] if live else []
                 _run_side(b, "head", head_root, "replay", *replaying)
                 runs = _load_runs(str(saved))
+                heads = _load_runs(str(fresh))
                 nodes: list[list[str]] = json.loads(drifted.read_text(encoding="utf-8"))
                 drifts = [[Drift(n, None, None) for n in names] for names in nodes]
+                raw = json.loads(probed.read_text(encoding="utf-8"))
+                probes = {n: Probe(drifted, why) for n, (drifted, why) in raw.items()}
+                firsts = (
+                    {_run_root(r, d) for r, d in zip(runs, drifts, strict=True)} if live else set()
+                )
+                repeat = {n for n, p in probes.items() if p.reason == NEEDS_LIVE}
+                repeat |= {n for n in firsts if n and probes.get(n, Probe(None)).drifted is None}
+                noise: dict[str, NoiseCheck] = {}
+                if repeats and repeat:
+                    sides = {"base": (base_root, base_target), "head": (head_root, head_target)}
+                    noise = _repeats(b, Path(tmp), sides, saved, repeat, repeats)
             finally:
                 for worktree in worktrees:
                     remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]
@@ -2158,18 +2504,111 @@ def _bench_one(b: Benchmark, keep: Path | None = None) -> Result:
         failed = getattr(exc, "stderr", "") or str(exc)
         error = f"{type(exc).__name__}: {str(failed).strip()[:200]}"
         return _error_row(b, error, perf_counter() - start)
-    counts, roots = _drift_kinds(runs, drifts)
-    found = (tuple(sorted(roots)), tuple(sorted(counts.keys() - roots)))
+    return _labelled(b, (runs, heads), drifts, probes, perf_counter() - start, noise)
+
+
+def _bench_saved(b: Benchmark, folder: Path) -> Result:
+    """T162: score the runs `--keep-runs` saved in <folder>/<benchmark>/, compared as replay
+    compares them. Nothing runs, so it costs nothing, whatever the row's `status`."""
+    start = perf_counter()
+    try:
+        runs, fresh = (_load_runs(str(folder / b.name / name)) for name in _KEPT)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _error_row(b, f"{type(exc).__name__}: {str(exc)[:200]}", perf_counter() - start)
+    if len(runs) != len(fresh):
+        return _error_row(b, f"{len(runs)} runs on base, {len(fresh)} on head", 0.0)
+    drifts = [
+        list(compared_run(r, f.steps, (), None).drifts) for r, f in zip(runs, fresh, strict=True)
+    ]
+    return _labelled(b, (runs, fresh), drifts, {}, perf_counter() - start)
+
+
+def _labelled(
+    b: Benchmark,
+    sides: tuple[list[Cassette], list[Cassette]],
+    drifts: list[list[Drift]],
+    probes: Mapping[str, Probe],
+    seconds: float,
+    noise: Mapping[str, NoiseCheck] | None = None,
+) -> Result:
+    """T162: root by fingerprint and probe (`classify`); the first node to drift is kept too.
+
+    T211: with `noise`, a changed node is root only when it drifts above its noise, and otherwise
+    inconclusive: its code changed, and the check misses a shift smaller than the spread. An
+    unchanged node under its noise explains its own drift, so it gets no label, and a run it was
+    first to drift in needs no other cause."""
+    counts, first = _drift_kinds(sides[0], drifts)
+    base, head = ({s.node: s.code for r in side for s in r.steps} for side in sides)
+    firsts = [_run_root(r, d) for r, d in zip(sides[0], drifts, strict=True)]
+    nodes = [{x.node for x in d} for d in drifts]
+    # T175: a changed router makes its source node root, as in `lgcov ci`.
+    base_routers = {s.node: s.router for r in sides[0] for s in r.steps}
+    routers = (base_routers, {s.node: s.router for r in sides[1] for s in r.steps})
+    ran = [[s.node for s in r.steps] for r in sides[0]]
+    checks = dict(noise or {})
+    changed = {n for n in checks if base.get(n) != head.get(n)}
+    judged = {n: Probe(checks[n].drifted or None, checks[n].verdict) for n in changed}
+    quiet = {n for n, c in checks.items() if not c.drifted} - changed
+    firsts = [None if f in quiet else f for f in firsts]
+    nodes = [n - quiet for n in nodes]
+    by_node = classify(counts.keys() - quiet, (base, head), {**probes, **judged})
+    labels = explain_runs(by_node, firsts, nodes, routers, ran)
     return Result(
         b.name,
-        *found,
-        score(found[0], b.root),
-        score(found[1], b.propagated),
-        perf_counter() - start,
-        *expected,
+        labels.root,
+        labels.propagated,
+        score(labels.root, b.root),
+        score(labels.propagated, b.propagated),
+        seconds,
+        tuple(sorted(b.root)),
+        tuple(sorted(b.propagated)),
         b.hard_cases,
         b.notes,
+        first_drift=tuple(sorted(first)),
+        inconclusive=tuple(sorted(labels.inconclusive.items())),
+        noise=tuple(sorted(checks.items())),
     )
+
+
+def _synthetic_agents() -> Sequence[Agent]:
+    """T121: the suite's agents live in examples/, which isn't in the wheel."""
+    sys.path.insert(0, str(Path.cwd()))
+    agents: Sequence[Agent] = importlib.import_module("examples.synthetic_agents").AGENTS
+    return agents
+
+
+def _lgcov_root(case: Case) -> set[str]:
+    """What `lgcov ci` would call root: replay the edited agent, serving what it left alone. The
+    first node to drift, or T175: the source node of a router the edit changed."""
+    done = replay_run(case.graph, case.base, (), serve=True)
+    root = _run_root(case.base, list(done.drifts))
+    routers = (
+        {s.node: s.router for s in case.base.steps},
+        {s.node: s.router for s in done.steps},
+    )
+    ran, drifted = [s.node for s in case.base.steps], {d.node for d in done.drifts}
+    routing = explain_runs(NodeLabels((), (), {}), [root], [drifted], routers, [ran]).routing
+    return set(routing) or ({root} if root else set())
+
+
+def _bench_synthetic(out: Path, results: Path) -> int:
+    """T121: offline, so it costs nothing. A report, not a gate: it exits 0 whatever the scores."""
+    try:
+        agents = _synthetic_agents()
+    except ModuleNotFoundError as exc:
+        print(f"lgcov bench: --synthetic needs a repo checkout's examples/: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    cases = [case for agent in agents for case in every_case(agent)]
+    aa = [(agent.name, arm) for agent in agents for arm in aa_arms(agent)]
+    noise = [(agent.name, rate) for agent in agents for rate in noise_rule_rates(agent)]
+    report = build_report(cases, _lgcov_root, aa, datetime.now(UTC).date().isoformat(), noise)
+    section = render_section(report)
+    doc = out.read_text(encoding="utf-8") if out.exists() else ""
+    for path, text in ((out, replace_section(doc, section)), (results, report_json(report))):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    print(section, end="")
+    return 0
 
 
 def _bench_cmd(argv: list[str]) -> int:
@@ -2177,17 +2616,49 @@ def _bench_cmd(argv: list[str]) -> int:
     each. A report, not a gate: it exits 0 whatever the scores. T166: it exits 2 if a side's
     graph can't be imported, after the other benchmarks have run and the report is written."""
     ap = argparse.ArgumentParser(prog="lgcov bench")
-    ap.add_argument("dir", nargs="?", default="docs/benchmark", help="benchmark files (*.yaml)")
+    ap.add_argument("dir", nargs="?", help="benchmark files (*.yaml); default docs/benchmark")
     ap.add_argument("--only", action="append", default=[], help="run this one (file name)")
     ap.add_argument("--out", default="docs/benchmark.md", help="write the table here")
-    ap.add_argument("--json", default="docs/benchmark-results.json", help="and the numbers")
+    ap.add_argument("--json", help="and the numbers; default docs/benchmark-results.json")
+    ap.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="T121: score the synthetic suite instead, and replace only that section of --out",
+    )
     ap.add_argument(
         "--keep-runs",
         metavar="DIR",
         help="save each side's runs in DIR/<benchmark>/{base,head}.json as each one finishes",
     )
+    ap.add_argument("--live", action="store_true", help="T173: head runs every node, serving none")
+    ap.add_argument(
+        "--from-runs",
+        metavar="DIR",
+        help="T162: score the runs --keep-runs saved in DIR instead of running the agent",
+    )
+    ap.add_argument(
+        "--noise-repeats",
+        type=int,
+        default=0,
+        metavar="K",
+        help="T211: run a changed model node, and under --live each run's first drifted node, K "
+        "more times on each side, and name drift only above base's own spread (2K calls per input)",
+    )
     args = ap.parse_args(argv)
-    folder = Path(args.dir)
+    if args.from_runs and (args.synthetic or args.keep_runs or args.live or args.noise_repeats):
+        print(
+            "lgcov bench: --from-runs runs nothing: no --synthetic, --keep-runs, --live or "
+            "--noise-repeats",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    if args.synthetic:
+        if args.dir or args.only or args.keep_runs or args.live or args.noise_repeats:
+            print("lgcov bench: --synthetic takes only --out and --json", file=sys.stderr)
+            return EXIT_ERROR
+        return _bench_synthetic(Path(args.out), Path(args.json or "docs/benchmark-synthetic.json"))
+    args.json = args.json or "docs/benchmark-results.json"
+    folder = Path(args.dir or "docs/benchmark")
     files = [f for f in sorted(folder.glob("*.yaml")) if not args.only or f.stem in args.only]
     if not files:
         print(f"lgcov bench: no benchmark files (*.yaml) to run in {folder}", file=sys.stderr)
@@ -2215,12 +2686,17 @@ def _bench_cmd(argv: list[str]) -> int:
     code = 0
     for b in benchmarks:
         try:
-            results.append(pending_result(b) if b.status else _bench_one(b, keep))
+            if args.from_runs:
+                results.append(_bench_saved(b, Path(args.from_runs)))
+            else:
+                one = pending_result(b) if b.status else None
+                results.append(one or _bench_one(b, keep, args.live, args.noise_repeats))
         except _CantImport as exc:
             print(f"lgcov bench: {b.name}: {exc}", file=sys.stderr)
             results.append(_error_row(b, str(exc)[:200], 0.0))
             code = EXIT_ERROR
-    command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only)])
+    saved = [f"--from-runs {args.from_runs}"] if args.from_runs else []
+    command = " ".join(["lgcov bench", str(folder), *(f"--only {n}" for n in args.only), *saved])
     source = f"the {len(results)} benchmark file{'' if len(results) == 1 else 's'} in `{folder}`"
     md = render_markdown(results, command, datetime.now(UTC).date().isoformat(), source)
     for path, text in ((Path(args.out), md), (Path(args.json), results_json(results))):
@@ -2348,6 +2824,7 @@ def _selfcheck_cmd(argv: list[str]) -> int:
                 nightly_url=None,
                 bands="calibration/bands.json",
                 policy_dir=None,
+                candidate_in=None,
             )
         )
         actual = Outcome(result.action.exit_code)
@@ -2362,6 +2839,84 @@ def _selfcheck_cmd(argv: list[str]) -> int:
         "\n".join(["| fixture | expected | actual | root | ok |", "|---|---|---|---|---|", *rows])
     )
     return 0 if all_ok else 1
+
+
+def _round_ledger(path: Path) -> str:
+    """The exposure ledger next to a round file; '' before its first row."""
+    ledger = path.with_name("exposure.jsonl")
+    return ledger.read_text(encoding="utf-8") if ledger.exists() else ""
+
+
+def _append_ledger(path: Path, lines: str) -> None:
+    with path.with_name("exposure.jsonl").open("a", encoding="utf-8") as ledger:
+        ledger.write(lines)
+
+
+def _round_lock(path: Path, now: str) -> int:
+    """T119: refuses tracked changes anywhere and untracked files in the round's folder; an
+    untracked file elsewhere only gets a warning, since it can't change what the round locks."""
+    round_ = parse_round(path.read_text(encoding="utf-8"))
+    rows = parse_ledger(_round_ledger(path))
+    folder = str(path.resolve().parent)
+    if _head(folder) is None:
+        raise ValueError(f"{folder} isn't a git checkout with a commit, so nothing can be locked")
+    status = _git_out(folder, "status", "--porcelain", "-z", "--untracked-files=all")
+    tree = tree_state(status, _git_out(folder, "rev-parse", "--show-prefix").strip())
+    if tree.tracked_changes:
+        raise ValueError(f"uncommitted changes: {', '.join(tree.tracked_changes)}")
+    if tree.untracked_in_folder:
+        raise ValueError(f"untracked in the round's folder: {', '.join(tree.untracked_in_folder)}")
+    if tree.untracked_elsewhere:
+        print(
+            f"warning: untracked, outside the round: {', '.join(tree.untracked_elsewhere)}",
+            file=sys.stderr,
+        )
+    locked, lock_rows = lock_round(round_, rows, now)
+    _append_ledger(path, ledger_lines(lock_rows))
+    path.write_text(round_to_yaml(locked), encoding="utf-8")
+    print(f"Locked round {locked.id}. Commit {path.name} and exposure.jsonl.")
+    return 0
+
+
+def _round_check(path: Path, run_id: str | None, now: str) -> int:
+    round_ = parse_round(path.read_text(encoding="utf-8"))
+    problems = check_round(round_, parse_ledger(_round_ledger(path)))
+    for problem in problems:
+        print(f"lgcov round check: {problem}", file=sys.stderr)
+    if problems:
+        return EXIT_ERROR
+    if run_id:
+        _append_ledger(path, ledger_lines(exposures(round_, run_id, now)))
+    print(f"Round {round_.id} is clean.")
+    return 0
+
+
+def _round_cmd(argv: list[str]) -> int:
+    """T119: a benchmark round: init writes a template, lock freezes it, check verifies it."""
+    ap = argparse.ArgumentParser(prog="lgcov round")
+    verbs = ap.add_subparsers(dest="verb", required=True)
+    init = verbs.add_parser("init", help="write an unfrozen round to fill in")
+    init.add_argument("--id", required=True, help="the round's id, unique in its ledger")
+    lock = verbs.add_parser("lock", help="freeze the round and record its SHAs in the ledger")
+    check = verbs.add_parser("check", help="exit 2 on a moved SHA or a re-exposed case")
+    check.add_argument("--record", metavar="RUN_ID", help="after a clean check, record this run")
+    for verb in (init, lock, check):
+        verb.add_argument("path", help="the round file; exposure.jsonl sits next to it")
+    args = ap.parse_args(argv)
+    path, now = Path(args.path), datetime.now(UTC).isoformat(timespec="seconds")
+    try:
+        if args.verb == "lock":
+            return _round_lock(path, now)
+        if args.verb == "check":
+            return _round_check(path, args.record, now)
+        if path.exists():
+            raise ValueError(f"{path} already exists")
+        path.write_text(round_to_yaml(new_round(args.id, now)), encoding="utf-8")
+        print(f"Wrote {path}. Fill in its candidates and cases, commit, then lock it.")
+        return 0
+    except (OSError, ValueError) as exc:
+        print(f"lgcov round {args.verb}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
 
 def _command(argv: list[str]) -> int | None:
@@ -2389,6 +2944,17 @@ def _command(argv: list[str]) -> int | None:
         return _calibrate_cmd(argv[1:])
     if argv[:1] == ["review"]:
         return _review_cmd(argv[1:])
+    if argv[:2] == ["round", "new"]:  # a gate round; every other `round` is a benchmark round
+        return _round_new_cmd(argv[2:])
+    if argv == ["round"]:
+        print(
+            "lgcov round: takes init, lock or check for a benchmark round, or new for a gate "
+            "round (lgcov round new)",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    if argv[:1] == ["round"]:
+        return _round_cmd(argv[1:])
     if argv[:1] == ["bench"]:
         return _bench_cmd(argv[1:])
     if argv[:1] == ["metrics"]:
@@ -2411,11 +2977,6 @@ def _command(argv: list[str]) -> int | None:
         return EXIT_ERROR
     if argv[:1] == ["cassette"]:
         return _cassette_accept(argv[1:])
-    if argv[:2] == ["round", "new"]:
-        return _round_new_cmd(argv[2:])
-    if argv[:1] == ["round"]:
-        print("lgcov round: the one action is new (lgcov round new)", file=sys.stderr)
-        return EXIT_ERROR
     if argv[:1] == ["guard"]:
         return _guard_cmd(argv[1:])
     return None
@@ -2468,6 +3029,9 @@ commands:
   taxonomy draft    draft failure modes and KPIs from traces, each pending review
   taxonomy approve  approve one drafted entry
   import langsmith  turn a LangSmith dataset's examples into lgcov cases
+  round init        write an unfrozen benchmark round to fill in
+  round lock        freeze a benchmark round and record its SHAs
+  round check       exit 2 if a locked SHA moved or a case was already exposed
   round new         lock a round: its cases, judge, margins and candidates
   guard             exit 2 if the round moved or this commit isn't locked in it
   bench             score the root / propagated labels against hand-written ones

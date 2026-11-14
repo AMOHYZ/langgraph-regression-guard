@@ -1,6 +1,8 @@
 <!-- lgcov-report -->
 ## 🟢 lgcov: no drift (no blocking KPI judged)
 
+0 of 2 runs touched · no KPI judged · root node: none
+
 **Next step:** Review as usual. lgcov compared the recorded runs; it judged no KPI that can block.
 
 Statistical verdict: none (no blocking KPI judged)

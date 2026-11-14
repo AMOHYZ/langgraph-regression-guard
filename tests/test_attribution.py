@@ -1,6 +1,7 @@
 """T101a: the attribution benchmark's scoring and report (pure). T100a: real rows, pending
 human review. T100: rows whose labels a human reviewed but that can't run yet."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,14 +9,29 @@ import pytest
 import yaml
 
 from lgcov.attribution import (
+    NEEDS_LIVE,
+    NO_DRIFT_ABOVE_NOISE,
+    NO_FINGERPRINT,
+    NOT_PROBED,
+    ROUTING,
+    UNEXPLAINED,
+    NodeLabels,
+    NoiseCheck,
+    Probe,
     Result,
     Score,
+    classify,
+    drift_exceeds_noise,
+    explain_runs,
     macro,
     micro,
+    noise_check,
     parse_benchmark,
     pending_result,
     render_markdown,
+    results_json,
     score,
+    word_jaccard,
 )
 
 
@@ -207,3 +223,136 @@ def test_pythonpath_must_be_folders_inside_the_side(bad: object) -> None:
     # A folder outside the side would give both sides one copy: what this field exists to stop.
     with pytest.raises(ValueError, match="pythonpath"):
         parse_benchmark("x", {**_ROW, "pythonpath": bad}, Path("."))
+
+
+# T211: drift counts only above the node's own A/A spread: base's samples against each other.
+def test_one_base_sample_has_no_spread_so_any_difference_is_drift() -> None:
+    assert drift_exceeds_noise([{"x": 1}], [{"x": 2}])
+    assert not drift_exceeds_noise([{"x": 1}], [{"x": 1}])
+    assert word_jaccard({"x": "a b"}, {"x": "b a"}) > 0  # unequal is never distance 0
+
+
+def test_head_no_further_from_base_than_base_is_from_itself_is_not_drift() -> None:
+    base = [
+        {"a": "the brief covers cats"},
+        {"a": "the brief covers dogs"},
+        {"a": "a brief on cats"},
+    ]
+    check = noise_check(base, [{"a": "the brief covers birds"}, {"a": "a brief on dogs"}])
+    assert not check.drifted
+    assert (check.k, check.spread > 0, check.min_head_to_base <= check.spread) == (2, True, True)
+    assert check.verdict == NO_DRIFT_ABOVE_NOISE.format(2) == "no drift detected above noise (K=2)"
+
+
+def test_head_outside_the_spread_is_drift_and_one_near_sample_withdraws_it() -> None:
+    base = [{"a": "the brief covers cats"}, {"a": "the brief covers dogs"}]
+    far = {"a": "refund policy: thirty days, receipt required"}
+    assert noise_check(base, [far, far]).verdict == "drift above noise (K=2)"
+    assert not drift_exceeds_noise(base, [far, {"a": "the brief covers cats"}])  # the smallest
+
+
+def test_the_distance_is_a_parameter() -> None:
+    def by_length(a: object, b: object) -> float:
+        return float(abs(len(str(a)) - len(str(b))))
+
+    assert not drift_exceeds_noise(["aa", "aa"], ["cc"], by_length)  # same length: distance 0
+    assert drift_exceeds_noise(["aa", "aa"], ["cc"])
+
+
+def test_a_short_changed_passage_in_a_long_output_registers_only_with_no_spread() -> None:
+    # 100k+ characters. The default distance is over word sets, so one changed sentence is a
+    # small distance: drift for a node that repeats exactly, under the spread of one that doesn't.
+    report = " ".join(f"finding{i} holds." for i in range(9000))
+    changed = report.replace("finding4500 holds.", "finding4500 was withdrawn in 2024.")
+    assert len(report) > 100_000
+    assert 0 < word_jaccard(report, changed) < 0.001
+    assert drift_exceeds_noise([report], [changed])
+    reworded = report.replace("finding7 holds.", "finding7 mostly holds, with two caveats.")
+    assert not drift_exceeds_noise([report, reworded], [changed])
+
+
+def test_classify_names_every_changed_node_that_drifts_on_its_own_input_root() -> None:
+    labels = classify(
+        drifted=["b", "c", "d", "e"],
+        codes=(
+            {"a": "1", "b": "1", "c": "1", "d": "1", "e": "1"},
+            {"a": "1", "b": "2", "c": "2", "d": "2", "e": "1"},
+        ),
+        probes={"b": Probe(True), "c": Probe(True), "d": Probe(False)},
+    )
+    assert (labels.root, labels.propagated, labels.inconclusive) == (("b", "c"), ("d", "e"), {})
+
+
+def test_classify_a_changed_node_with_no_offline_probe_is_inconclusive_not_root() -> None:
+    labels = classify(
+        drifted=["b", "c", "sub"],
+        codes=({"b": "1", "c": "1", "sub": None}, {"b": "2", "c": "2", "sub": None}),
+        probes={"b": Probe(None, NEEDS_LIVE)},
+    )
+    assert labels.root == labels.propagated == ()
+    assert labels.inconclusive == {"b": NEEDS_LIVE, "c": NOT_PROBED, "sub": NO_FINGERPRINT}
+    assert NEEDS_LIVE == "needs live probe; noise threshold pending T211"
+
+
+def test_classify_a_node_only_one_side_ran_is_root() -> None:
+    labels = classify(drifted=["new"], codes=({}, {"new": "1"}), probes={})
+    assert labels.root == ("new",)
+
+
+def test_a_run_that_drifted_with_no_changed_node_still_has_an_inconclusive_node() -> None:
+    # A change outside node code (an edge, a router, a Send) or an edited recording: nothing is
+    # root, so the run's first drifted node is inconclusive and fail-on: root-drift still blocks.
+    labels = NodeLabels(root=("b",), propagated=("c", "w"), inconclusive={})
+    out = explain_runs(labels, first_drifts=["b", "w", None], drifted=[["b", "c"], ["w"], []])
+    assert (out.root, out.propagated, out.inconclusive) == (("b",), ("c",), {"w": UNEXPLAINED})
+
+
+# T175: a router is in no node's fingerprint, so it has one of its own, kept on its source node.
+RAN = [["classify", "lookup", "respond"]]
+UNEXPLAINED_RUN = NodeLabels(root=(), propagated=("lookup", "respond"), inconclusive={})
+
+
+def _routed(labels: NodeLabels, base: str | None, head: str | None) -> NodeLabels:
+    routers = ({"classify": base, "lookup": None}, {"classify": head, "lookup": None})
+    return explain_runs(labels, ["lookup"], [["lookup", "respond"]], routers, RAN)
+
+
+def test_a_changed_router_makes_its_source_node_root() -> None:
+    out = _routed(UNEXPLAINED_RUN, "r1", "r2")
+    assert (out.root, out.routing, out.inconclusive) == (("classify",), {"classify": 1}, {})
+    assert out.propagated == ("lookup", "respond")
+    assert ROUTING.format("classify") == "routing change at classify"
+
+
+@pytest.mark.parametrize(("base", "head"), [("r1", "r1"), (None, "r2"), ("r1", None)])
+def test_an_unchanged_or_unrecorded_router_leaves_the_run_unexplained(
+    base: str | None, head: str | None
+) -> None:
+    # None: a recording from before routers were fingerprinted, or a router with no fingerprint.
+    out = _routed(UNEXPLAINED_RUN, base, head)
+    assert (out.root, out.routing, out.inconclusive) == ((), {}, {"lookup": UNEXPLAINED})
+
+
+def test_a_router_root_joins_the_roots_changed_nodes_gave() -> None:
+    labels = NodeLabels(root=("respond",), propagated=("lookup",), inconclusive={})
+    out = _routed(labels, "r1", "r2")
+    assert (out.root, out.routing) == (("classify", "respond"), {"classify": 1})
+
+
+def test_a_changed_router_is_not_root_of_drift_that_came_before_it() -> None:
+    routers = ({"respond": "r1"}, {"respond": "r2"})
+    out = explain_runs(UNEXPLAINED_RUN, ["lookup"], [["lookup"]], routers, RAN)
+    assert (out.root, out.inconclusive) == ((), {"lookup": UNEXPLAINED})
+
+
+def test_a_noise_check_s_evidence_is_in_the_results_json_and_the_report() -> None:
+    # T211: the numbers behind the verdict, per repeated node, and never the word "cleared".
+    row = replace(_result("aa", set(), set()), noise=(("a", NoiseCheck(3, 0.3, 0.0)),))
+    [saved] = json.loads(results_json([row]))["benchmarks"]
+    verdict = "no drift detected above noise (K=3)"
+    assert saved["noise"] == {
+        "a": {"k": 3, "spread": 0.3, "min_head_to_base": 0.0, "verdict": verdict}
+    }
+    md = render_markdown([row], "lgcov bench", "2026-11-13")
+    assert f"- `aa`: `a`: {verdict}: spread 0.300, nearest head sample 0.000" in md
+    assert "Noise checks" not in render_markdown([_result("x", set(), set())], "lgcov bench", "")

@@ -16,6 +16,7 @@ from lgcov.sampling import (
     render_gate_table,
     usage_tokens,
 )
+from lgcov.stats import required_n
 
 KPI_ = KPI.binary("grounded", "every claim is supported", "Is every claim supported?")
 POLITE = KPI.binary("polite", "the answer is polite", "Is the answer polite?")
@@ -161,6 +162,24 @@ def test_judge_timeouts_and_connection_errors_are_infra_samples() -> None:
     assert stats.outcome == "infra_error"
 
 
+def test_an_infra_sample_keeps_why_the_judge_did_not_run() -> None:
+    # T195: a judge's own message is kept; another error's text isn't, only its type
+    samples = judge_samples(Scripted(["infra", "timeout", "pass"]), {}, {}, 3)
+    assert [s.error for s in samples] == ["jev: 503", "TimeoutError", ""]
+
+
+def test_the_kpi_table_says_why_judgments_did_not_run_most_common_first() -> None:
+    from lgcov.sampling import render_kpi_table
+
+    base, new = _cases(["infra", "infra", "pass"]), _cases(["infra", "timeout", "pass"])
+    stats = kpi_stats(KPI_, 3, base=base, new=new)
+    assert stats.infra_reasons == (("jev: 503", 3), ("TimeoutError", 1))
+    lines = render_kpi_table([stats])
+    at = lines.index("Infra errors, not counted toward k: grounded 4")
+    assert lines[at + 1 :] == ["- grounded: 3 × jev: 503; 1 × TimeoutError"]
+    assert kpi_stats(KPI_, 1, _cases(["pass"]), _cases(["pass"])).infra_reasons == ()
+
+
 def test_a_kpi_with_mostly_infra_samples_shows_judge_unreliable() -> None:
     from lgcov.sampling import render_kpi_table
 
@@ -289,6 +308,24 @@ def test_k_gate_one_blocks_where_k_gate_three_cannot() -> None:
     assert "Holm across the K_gate = 3 blocking KPIs" in "\n".join(render_gate_table(three))
 
 
+def test_n_star_for_a_blocking_kpi_is_sized_at_alpha_over_k_gate() -> None:
+    base, new = _drop(10, 1)  # T215: the 10-case drop above, N* = 71 on its own
+    same = _cases(*[["pass"]] * 10)
+    kpis = [kpi_stats(KPI_, 1, base, new), *(kpi_stats(k, 1, same, same) for k in (POLITE, TONE))]
+    one, three = gate_kpis(kpis, advisory={"polite", "tone"}), gate_kpis(kpis)
+    assert one[0].paired is not None and three[0].paired is not None
+    assert one[0].paired.required_n == 71  # K_gate = 1: alpha as it is
+    assert three[0].paired.required_n == required_n(1.0, 0.9, 0.0, alpha=0.05 / 3)
+    assert (three[0].paired.required_n or 0) > 71
+    assert three[0].paired.mde == one[0].paired.mde  # the MDE column stays at alpha
+    table = "\n".join(render_gate_table(three))
+    assert f"(N*={three[0].paired.required_n})" in table
+    assert "α/K_gate for a blocking KPI" in table and "MDE stays at α" in table
+    # gating again with the other KPIs advisory sizes it at alpha again
+    again = gate_kpis(three, advisory={"polite", "tone"})[0].paired
+    assert again is not None and again.required_n == 71
+
+
 def test_a_blocking_kpi_with_no_paired_case_still_counts_in_k_gate() -> None:
     base, new = _drop(60, 6)
     unpaired = kpi_stats(POLITE, 1, {}, {})  # its node never ran: no case on either side
@@ -345,6 +382,13 @@ def test_a_code_judge_names_the_cases_that_newly_fail_and_only_those() -> None:
     assert kpi_stats(KPI_, 1, base, new, code=True).new_failures == ("new",)
     # A model judge's drop stays the paired test's to weigh.
     assert kpi_stats(KPI_, 1, base, new).new_failures == ()
+
+
+def test_every_judge_names_the_cases_this_pr_scores_lower_and_only_those() -> None:
+    base = {"worse": [_scored(1.0)], "same": [_scored(1.0)], "better": [_scored(0.0)]}
+    new = {"worse": [_scored(0.0)], "same": [_scored(1.0)], "better": [_scored(1.0)]}
+    assert kpi_stats(KPI_, 1, base, new).worse == ("worse",)
+    assert kpi_stats(KPI_, 1, base, new, code=True).worse == ("worse",)
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,6 @@
 """T085: mask volatile fields in node I/O before L1 compares it.
 
-UUIDs and ISO date-times inside strings, values of well-known id keys, and any
+UUIDs, ISO date-times and provider ids (T213) inside strings, values of well-known id keys, and any
 `ignore_paths` (JSON pointers into a node's input/output; `*` matches one key or
 index) are replaced with placeholders. T165: a LangChain message is compared by what it
 says (`lgcov.messages.fields`). T177: `key_view` is what a recorded step's input is matched on;
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 
 from langchain_core.messages import BaseMessage
 
@@ -21,6 +21,36 @@ _UUID = re.compile(r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b")
 # Date plus time (a bare date is usually meaningful, so it is kept).
 _TIMESTAMP = re.compile(
     r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+# T213: how providers start a response, item, call or request id. Such an id can be written into
+# text, as when a message list is turned into a string. Anything else: `ignore_paths`.
+PROVIDER_ID_PREFIXES = (
+    "rs_",
+    "fc_",
+    "resp_",
+    "call_",
+    "chatcmpl-",
+    "msg_",
+    "toolu_",
+    "tooluse_",
+    "req_",
+)
+# A prefix at a word's start, then 20 or more letters and digits with a digit or a capital among
+# them, and no underscore in it or after it: so a snake_case name or a long word is kept.
+_PROVIDER_ID = re.compile(
+    rf"\b(?:{'|'.join(map(re.escape, PROVIDER_ID_PREFIXES))})"
+    r"(?=[a-z]*[0-9A-Z])[A-Za-z0-9]{20,}(?![A-Za-z0-9_])"
+)
+# T213b: keys whose value is a blob a provider makes anew on every call: OpenAI's encrypted
+# reasoning, Anthropic's thinking signature, Gemini's thought signature. Anything else, such as a
+# redacted_thinking block's `data`: `ignore_paths`.
+VOLATILE_TEXT_KEYS = ("encrypted_content", "signature", "thought_signature", "thoughtSignature")
+_BLOB_CHARS = r"[A-Za-z0-9+/=_-]{40,}"  # base64 or base64url, unbroken: no name or sentence
+_BLOB = re.compile(_BLOB_CHARS)
+# In text, as when a message list is turned into a string: the quoted key, a colon, and the blob
+# as the whole quoted value. The quotes may be escaped, as for JSON inside a string.
+_BLOB_IN_TEXT = re.compile(
+    rf"""((\\*["'])(?:{"|".join(VOLATILE_TEXT_KEYS)})\2\s*:\s*(\\*["'])){_BLOB_CHARS}(?=\3)"""
 )
 # Exact names only: business ids such as order_id can be a real regression.
 VOLATILE_ID_KEYS = frozenset(
@@ -33,7 +63,7 @@ _TOOL_CALLS = frozenset({"tool_calls", "invalid_tool_calls"})
 @dataclass(frozen=True)
 class _Mask:
     ids: frozenset[str]  # keys whose values are hidden, at any depth
-    in_text: bool  # hide UUIDs and date-times inside strings
+    in_text: bool  # hide UUIDs, date-times, provider ids and volatile blobs (T213b)
     read: Callable[[BaseMessage], dict[str, object]]  # what counts in a message
 
 
@@ -68,6 +98,8 @@ def _norm(
     in_message = isinstance(value, BaseMessage)
     if isinstance(value, BaseMessage):
         value = mask.read(value)
+    elif is_dataclass(value) and not isinstance(value, type):
+        value = asdict(value)  # as Cassette.body saves it, so a fresh run compares to the recording
     if isinstance(value, dict):
         out: dict[object, object] = {}
         # A LangChain ToolCall in plain state, as in a Send payload: its `id` is a tool_call_id.
@@ -76,9 +108,15 @@ def _norm(
             volatile = (
                 not keep_ids and k in ids and isinstance(v, str | int) and not isinstance(v, bool)
             )
-            if volatile:
+            # T213b: in a block the sibling `type` is in sight, so a plain `signature` is hidden
+            # only in a thinking block: a webhook's or a commit's signature is real data.
+            named = k in VOLATILE_TEXT_KEYS and (
+                k != "signature" or value.get("type") == "thinking"
+            )
+            blob = named and mask.in_text and isinstance(v, str) and _BLOB.fullmatch(v)
+            if volatile or (blob and not keep_ids):
                 counts[0] += 1
-                out[k] = "<id>"
+                out[k] = "<id>" if volatile else "<blob>"
             else:
                 keep = keep_ids or (in_message and k in _TOOL_CALLS)
                 # An `id` in additional_kwargs is a provider's, like the message's own.
@@ -92,8 +130,10 @@ def _norm(
         ]
     if isinstance(value, str) and mask.in_text:
         no_uuid, n_uuid = _UUID.subn("<uuid>", value)
-        masked, n_ts = _TIMESTAMP.subn("<timestamp>", no_uuid)
-        counts[0] += n_uuid + n_ts
+        no_ts, n_ts = _TIMESTAMP.subn("<timestamp>", no_uuid)
+        no_id, n_id = _PROVIDER_ID.subn("<id>", no_ts)
+        masked, n_blob = _BLOB_IN_TEXT.subn(r"\1<blob>", no_id)
+        counts[0] += n_uuid + n_ts + n_id + n_blob
         return masked
     return value
 

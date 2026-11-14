@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import fmean
 from typing import Literal
@@ -216,6 +216,149 @@ def score(found: Collection[str], expected: Collection[str]) -> Score:
     return Score(len(hit), len(set(found) - hit), len(set(expected) - hit))
 
 
+# T162: why a node whose code changed and that drifted is neither root nor propagated.
+NEEDS_LIVE = "needs live probe; noise threshold pending T211"
+NOT_PROBED = "not probed: scored from saved runs"
+NO_FINGERPRINT = "no fingerprint: a subgraph or the like (T193)"
+UNEXPLAINED = (
+    "drifted with no changed node before it: a change outside node code, or an edited recording"
+)
+ROUTING = "routing change at {}"  # T175: why a node whose own output didn't drift is root
+
+
+# T211: what a node under its noise threshold reads as. Never "cleared": a one-number regression
+# in a long report sits inside the spread, and the KPI judge decides that, not this check.
+NO_DRIFT_ABOVE_NOISE = "no drift detected above noise (K={})"
+DRIFT_ABOVE_NOISE = "drift above noise (K={})"
+Distance = Callable[[object, object], float]
+
+
+def _words(value: object) -> frozenset[str]:
+    return frozenset(json.dumps(value, sort_keys=True, default=str).split())
+
+
+def word_jaccard(a: object, b: object) -> float:
+    """T211: 0 for equal outputs, else how little their word sets overlap, up to 1. Never 0 for
+    unequal ones: the extra 1 below counts the difference a word set doesn't show, like order."""
+    if a == b:
+        return 0.0
+    first, second = _words(a), _words(b)
+    return 1 - len(first & second) / (len(first | second) + 1)
+
+
+@dataclass(frozen=True)
+class NoiseCheck:
+    """T211: the evidence behind one node's verdict. `k`: head's samples."""
+
+    k: int
+    spread: float  # the largest distance between two of base's samples: the node's A/A spread
+    min_head_to_base: float
+
+    @property
+    def drifted(self) -> bool:
+        return self.min_head_to_base > self.spread
+
+    @property
+    def verdict(self) -> str:
+        return (DRIFT_ABOVE_NOISE if self.drifted else NO_DRIFT_ABOVE_NOISE).format(self.k)
+
+
+def noise_check(
+    base: Sequence[object], head: Sequence[object], distance: Distance = word_jaccard
+) -> NoiseCheck:
+    """T211: `base`: the node's recorded output and base's code run again on the same input;
+    `head`: head's code on that input. Drift needs head's nearest sample to be further from base
+    than base's samples are from each other, so it misses a shift smaller than the spread. One
+    base sample has no spread: any difference is drift, as for a node that repeats exactly."""
+    spread = max((distance(a, b) for i, a in enumerate(base) for b in base[i + 1 :]), default=0.0)
+    return NoiseCheck(len(head), spread, min(distance(a, b) for a in base for b in head))
+
+
+def drift_exceeds_noise(
+    base: Sequence[object], head: Sequence[object], distance: Distance = word_jaccard
+) -> bool:
+    """T162, T211: do head's samples of a node differ from base's by more than its own noise?"""
+    return noise_check(base, head, distance).drifted
+
+
+@dataclass(frozen=True)
+class Probe:
+    """T162: a node run with head's code on the input base recorded for it. `drifted` is None
+    when it couldn't run offline, and `reason` says why."""
+
+    drifted: bool | None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class NodeLabels:
+    root: tuple[str, ...]
+    propagated: tuple[str, ...]
+    inconclusive: dict[str, str]  # node: why
+    # T175: the roots that are a changed router's source node, with the runs each is root of.
+    routing: dict[str, int] = field(default_factory=dict)
+
+
+def classify(
+    drifted: Collection[str],
+    codes: tuple[Mapping[str, str | None], Mapping[str, str | None]],
+    probes: Mapping[str, Probe],
+) -> NodeLabels:
+    """T162: each drifted node is root when its fingerprint changed (base's code against head's)
+    and it drifts on base's recorded input (`probes`), propagated when it only drifts because its
+    input did. A node only one side ran is root: the PR added or removed it. T212: a comment, a
+    reformat or the node function's own docstring doesn't change a fingerprint."""
+    base, head = codes
+    root: list[str] = []
+    propagated: list[str] = []
+    inconclusive: dict[str, str] = {}
+    for node in sorted(set(drifted)):
+        probe = probes.get(node, Probe(None, NOT_PROBED))
+        if node not in base or node not in head:
+            root.append(node)
+        elif base[node] is None or head[node] is None:
+            inconclusive[node] = NO_FINGERPRINT
+        elif base[node] == head[node] or probe.drifted is False:
+            propagated.append(node)
+        elif probe.drifted:
+            root.append(node)
+        else:
+            inconclusive[node] = probe.reason
+    return NodeLabels(tuple(root), tuple(propagated), inconclusive)
+
+
+def explain_runs(
+    labels: NodeLabels,
+    first_drifts: Sequence[str | None],
+    drifted: Sequence[Collection[str]],
+    routers: tuple[Mapping[str, str | None], Mapping[str, str | None]] = ({}, {}),
+    ran: Sequence[Sequence[str]] = (),
+) -> NodeLabels:
+    """T162: a run that drifted with no root or inconclusive node in it has a cause no node's
+    fingerprint shows: an edge, a router, a Send, or an edited recording. Its first drifted node is
+    inconclusive, so `fail-on: root-drift` still fails on it, as first-drift attribution did.
+
+    T175: unless a router explains it. A node whose router fingerprint changed (`routers`: base's
+    and head's, by source node) is root of each run where a node drifted after it, by base's order
+    (`ran`), beside any root the run already has. A router with no fingerprint on either side, as
+    in a recording from before they were kept, explains nothing. Not checked: that the run took
+    another branch. A router edit that routes as before is root of drift a changed node caused."""
+    base, head = routers
+    edited = {n for n, code in base.items() if code and head.get(n) and head[n] != code}
+    unsure = dict(labels.inconclusive)
+    routing: dict[str, int] = {}
+    for i, (first, nodes) in enumerate(zip(first_drifts, drifted, strict=True)):
+        order = list(ran[i]) if i < len(ran) else []
+        after = {r for r in edited & set(order) if set(nodes) - set(order[: order.index(r) + 1])}
+        for router in after:
+            routing[router] = routing.get(router, 0) + 1
+        if first and not after and not ({*labels.root, *unsure} & set(nodes)):
+            unsure[first] = UNEXPLAINED
+    propagated = tuple(n for n in labels.propagated if n not in unsure)
+    root = tuple(sorted({*labels.root, *routing}))
+    return NodeLabels(root, propagated, unsure, dict(sorted(routing.items())))
+
+
 @dataclass(frozen=True)
 class Result:
     name: str
@@ -230,6 +373,9 @@ class Result:
     notes: str = ""
     error: str = ""  # the benchmark couldn't run: no scores
     status: str = ""  # one of STATUSES: listed, never run or scored
+    first_drift: tuple[str, ...] = ()  # T162: the first node to drift in some run
+    inconclusive: tuple[tuple[str, str], ...] = ()  # T162: (node, why), sorted
+    noise: tuple[tuple[str, NoiseCheck], ...] = ()  # T211: each repeated node's evidence, sorted
 
     @property
     def pending(self) -> bool:
@@ -350,10 +496,21 @@ def render_markdown(results: Sequence[Result], command: str, date: str, source: 
             if r.error:
                 lines.append(f"- `{r.name}`{kinds}: run error: {r.error}")
                 continue
+            unsure = "; ".join(f"`{n}` ({why})" for n, why in r.inconclusive)
             lines.append(
                 f"- `{r.name}`{kinds}: lgcov said root {_nodes(r.found_root)}, expected "
-                f"{_nodes(r.expected_root)}." + (f" {r.notes}" if r.notes else "")
+                f"{_nodes(r.expected_root)}."
+                + (f" Inconclusive: {unsure}." if unsure else "")
+                + (f" {r.notes}" if r.notes else "")
             )
+    if any(r.noise for r in results):  # T211: the evidence, whichever way each check went
+        lines += ["", "## Noise checks", ""]
+        lines += [
+            f"- `{r.name}`: `{n}`: {c.verdict}: spread {c.spread:.3f}, nearest head sample "
+            f"{c.min_head_to_base:.3f}"
+            for r in results
+            for n, c in r.noise
+        ]
     lines += ["", "Reproduce:", "", "```bash", command, "```", ""]
     return "\n".join(lines)
 
@@ -386,6 +543,9 @@ def results_json(results: Sequence[Result]) -> str:
                 "notes": r.notes,
                 "error": r.error,
                 "status": r.status,
+                "first_drift": list(r.first_drift),
+                "inconclusive": dict(r.inconclusive),
+                "noise": {n: {**asdict(c), "verdict": c.verdict} for n, c in r.noise},
             }
             for r in results
         ],

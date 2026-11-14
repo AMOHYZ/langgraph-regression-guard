@@ -1,19 +1,42 @@
+import contextlib
+import dataclasses
 import random
+import socket
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TypedDict, cast
 from unittest.mock import Mock
 from uuid import uuid4
 
 import httpx
 import pytest
-from fixtures.graphs import S, _noop, fan_out_send, linear
+from fixtures.graphs import S, _noop, conditional, fan_out_send, linear
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
 
-from lgcov.cassette import Cassette, record, replay
+from lgcov.attribution import NEEDS_LIVE, Probe
+from lgcov.cassette import (
+    Cassette,
+    ProbeStep,
+    Step,
+    _plain,
+    _router_prints,
+    changed_nodes,
+    judge_probes,
+    judge_repeats,
+    probe_nodes,
+    probe_steps,
+    record,
+    repeat_steps,
+    replay,
+    replay_run,
+    unservable,
+)
+from lgcov.cli import _import_file
+from lgcov.fingerprint import fingerprint
 
 
 def _b_changed(state: S) -> S:
@@ -351,6 +374,16 @@ def test_on_divergence_fail_stops_the_run_and_leaves_the_rest_not_checked() -> N
     assert [d.node for d in r.drifts] == ["a"]  # b and c weren't checked: not drift
 
 
+def test_compared_run_says_what_replay_run_says_from_the_steps_alone() -> None:
+    # T179: so a job that can't run the graph can do this with steps another job reports.
+    from lgcov.cassette import ON_DIVERGENCE, compared_run, replay_run
+
+    cassette = record(_chain(1), {"x": 0})
+    for on_divergence in ON_DIVERGENCE:
+        r = replay_run(_chain(2), cassette, serve=True, on_divergence=on_divergence)
+        assert compared_run(cassette, r.steps, r.calls, r.halt) == r
+
+
 def test_on_divergence_live_runs_the_rest_of_the_run_live() -> None:
     from lgcov.cassette import replay_run
 
@@ -479,3 +512,284 @@ def test_a_node_inside_a_subgraph_that_raises_is_named_subgraph_dot_node() -> No
     with pytest.raises(NodeError) as info:
         replay(g.compile(), Cassette({"x": 1}, []))
     assert (info.value.node, info.value.transport) == ("sub.inner", False)
+
+
+# T162: the probe runs head's node on base's recorded input, with the network blocked.
+def _one_node(node: Callable[[S], S]) -> CompiledStateGraph[S]:
+    def n(state: S) -> S:
+        return node(state)
+
+    builder = StateGraph(S)
+    builder.add_node("n", n)
+    builder.add_edge(START, "n")
+    builder.add_edge("n", END)
+    return builder.compile()
+
+
+def test_probe_runs_a_changed_plain_node_on_base_input_and_says_whether_it_drifts() -> None:
+    base = record(_one_node(lambda s: {"x": s["x"] + 1}), {"x": 1})
+    refactored = _one_node(lambda s: {"x": sum([s["x"], 1])})
+    changed = _one_node(lambda s: {"x": s["x"] + 2})
+    assert probe_nodes(refactored, [base], ["n"]) == {"n": Probe(False)}
+    assert probe_nodes(changed, [base], ["n"]) == {"n": Probe(True)}
+
+
+def test_probe_a_node_that_reaches_for_the_network_needs_a_live_probe() -> None:
+    def calls_out(s: S) -> S:
+        socket.create_connection(("example.invalid", 443), timeout=1)
+        return s
+
+    base = record(_one_node(lambda s: s), {"x": 1})
+    assert probe_nodes(_one_node(calls_out), [base], ["n"]) == {"n": Probe(None, NEEDS_LIVE)}
+
+
+def test_probe_steps_say_what_ran_and_judge_probes_says_what_it_means() -> None:
+    # T162: the job that runs the PR's code reports raw output; the one that decides compares it.
+    base = record(_one_node(lambda s: {"x": s["x"] + 1}), {"x": 1})
+    [ran] = probe_steps(_one_node(lambda s: {"x": s["x"] + 2}), [base], ["n"])
+    assert ran == ProbeStep(0, 0, "n", {"x": 3})
+    assert judge_probes([base], [ran]) == {"n": Probe(True)}
+    assert judge_probes([base], [ProbeStep(0, 0, "n", {"x": 2})]) == {"n": Probe(False)}
+
+
+def test_a_probe_that_reaches_for_the_network_is_recorded_as_raised_not_a_crash() -> None:
+    def swallows(s: S) -> S:
+        with contextlib.suppress(Exception):  # an SDK's retry loop must not catch the refusal
+            socket.create_connection(("127.0.0.1", 9), timeout=0.1)
+        return s
+
+    base = record(_one_node(lambda s: s), {"x": 1})
+    [ran] = probe_steps(_one_node(swallows), [base], ["n"])
+    assert ran == ProbeStep(0, 0, "n", raised=NEEDS_LIVE)
+    assert judge_probes([base], [ran]) == {"n": Probe(None, NEEDS_LIVE)}
+
+
+@pytest.mark.parametrize(
+    "forged", [ProbeStep(0, 1, "n"), ProbeStep(-1, 0, "n"), ProbeStep(0, 0, "m")]
+)
+def test_a_probe_that_matches_no_recorded_step_is_refused(forged: ProbeStep) -> None:
+    base = record(_one_node(lambda s: s), {"x": 1})
+    with pytest.raises(ValueError, match="matches no recorded step"):
+        judge_probes([base], [forged])
+
+
+# T175: a conditional edge's router is in no node's fingerprint, so its source node's steps keep
+# one for it.
+def _branching(threshold: int, ends: dict[Hashable, str] | None = None) -> CompiledStateGraph[S]:
+    def route(state: S) -> str:
+        return "b" if state["x"] > threshold else "c"
+
+    g = StateGraph(S)
+    for name in ("a", "b", "c"):
+        g.add_node(name, lambda s: {"x": s["x"]})
+    g.add_edge(START, "a")
+    g.add_conditional_edges("a", route, ends)
+    return g.compile()
+
+
+def test_a_step_keeps_its_node_s_router_fingerprint_and_other_steps_keep_none() -> None:
+    a, b = record(_branching(0), {"x": 1}).steps
+    assert (a.node, b.node, b.router) == ("a", "b", None)
+    assert a.router is not None and len(a.router) == 16
+    assert record(_branching(0), {"x": 1}).steps[0].router == a.router
+
+
+def test_a_router_edit_or_a_new_path_map_changes_the_router_fingerprint_only() -> None:
+    base = record(_branching(0), {"x": 1}).steps[0]
+    edited = record(_branching(5), {"x": 1}).steps[0]
+    remapped = record(_branching(0, {"b": "c", "c": "b"}), {"x": 1}).steps[0]
+    assert len({base.router, edited.router, remapped.router}) == 3
+    assert base.code == edited.code == remapped.code
+
+
+def test_a_cassette_with_no_router_saves_and_loads_as_it_did_before_routers_were_kept() -> None:
+    old = record(linear(), {"x": 1})
+    assert "router" not in old.to_json()
+    assert Cassette.from_json(old.to_json()) == old
+    routed = record(_branching(0), {"x": 1})
+    assert Cassette.from_json(routed.to_json()) == routed
+
+
+# T175: read before write (step 1 of 2), so the base's lgcov can read what a PR's lgcov records.
+def test_a_step_s_router_fingerprint_survives_the_round_trip() -> None:
+    routed = Cassette({"x": 1}, [Step("a", {"x": 1}, router="r1"), Step("b", {"x": 1})])
+    assert routed.body()["steps"] == [
+        {"node": "a", "output": {"x": 1}, "input": None, "code": None, "router": "r1"},
+        {"node": "b", "output": {"x": 1}, "input": None, "code": None},
+    ]
+    assert Cassette.from_json(routed.to_json()) == routed
+
+
+def test_a_cassette_with_no_router_saves_as_it_did_before_routers_were_kept() -> None:
+    assert "router" not in record(linear(), {"x": 1}).to_json()
+
+
+# T211: repeats run a node live, K times on each input base recorded; `judge_repeats` compares
+# base's samples (the recording and base's repeats) with head's.
+BASE_TEXT = "the order ships on friday"
+HEAD_TEXT = "refunds take ten working days sorry"
+
+
+def _says(text: str) -> CompiledStateGraph[S]:
+    words = iter(("alpha", "beta", "gamma") * 9)  # a model: another word each call
+    return _one_node(lambda s: {"route": f"{text} {next(words)}"})
+
+
+def test_repeat_steps_runs_a_node_k_times_on_each_recorded_input_with_the_network_open() -> None:
+    def looks_up(s: S) -> S:
+        socket.getaddrinfo("localhost", 80)  # the offline probe would refuse this
+        return {"x": s["x"] + 1}
+
+    base = record(_one_node(looks_up), {"x": 1})
+    ran = repeat_steps(_one_node(looks_up), [base], ["n"], 2)
+    assert ran == (ProbeStep(0, 0, "n", {"x": 2}), ProbeStep(0, 0, "n", {"x": 2}))
+
+
+def test_judge_repeats_names_no_drift_when_head_s_samples_sit_inside_base_s_spread() -> None:
+    graph = _says(BASE_TEXT)
+    base = record(graph, {"x": 1})
+    again = repeat_steps(graph, [base], ["n"], 3)
+    [check] = judge_repeats(
+        [base], again, repeat_steps(_says(BASE_TEXT), [base], ["n"], 3)
+    ).values()
+    assert (check.k, check.min_head_to_base, check.drifted) == (3, 0.0, False)
+    assert check.spread > 0
+    assert check.verdict == "no drift detected above noise (K=3)"
+
+
+def test_judge_repeats_names_drift_when_head_s_samples_sit_outside_it() -> None:
+    graph = _says(BASE_TEXT)
+    base = record(graph, {"x": 1})
+    again = repeat_steps(graph, [base], ["n"], 3)
+    found = judge_repeats([base], again, repeat_steps(_says(HEAD_TEXT), [base], ["n"], 3))
+    assert found["n"].drifted and found["n"].verdict == "drift above noise (K=3)"
+
+
+def test_judge_repeats_leaves_out_a_node_whose_repeat_raised() -> None:
+    def breaks(s: S) -> S:
+        raise RuntimeError("no key")
+
+    base = record(_one_node(lambda s: s), {"x": 1})
+    ran = repeat_steps(_one_node(breaks), [base], ["n"], 1)
+    assert ran == (ProbeStep(0, 0, "n", raised="raised RuntimeError on base's input"),)
+    assert judge_repeats([base], ran, ran) == {}
+
+
+# T212: a recording made before fingerprints ignored comments holds the old scheme's values. A
+# node whose old-scheme fingerprint still matches is byte-identical, so it is unchanged.
+def _recorded_before_t212(graph: CompiledStateGraph[S], run: Cassette) -> Cassette:
+    routers = _router_prints(graph, raw=True)
+    steps = [
+        dataclasses.replace(
+            s,
+            code=fingerprint(_plain(graph.nodes[s.node].bound), raw=True),
+            router=routers.get(s.node),
+        )
+        for s in run.steps
+    ]
+    return Cassette(run.inputs, steps)
+
+
+def test_a_new_recording_holds_the_new_scheme_s_fingerprints() -> None:
+    run = record(linear(), {"x": 1})
+    assert {s.code for s in run.steps} == {fingerprint(_noop)} != {fingerprint(_noop, raw=True)}
+
+
+def test_a_recording_from_before_t212_still_serves_its_unchanged_nodes() -> None:
+    graph = conditional()
+    old = _recorded_before_t212(graph, record(graph, {"x": 1, "route": "tools"}))
+    assert old != record(graph, {"x": 1, "route": "tools"})  # the two schemes do differ
+    assert unservable(graph, [old]) == 0 and changed_nodes(graph, [old]) == set()
+    done = replay_run(graph, old, (), serve=True)
+    assert {c.how for c in done.calls} == {"served"} and not done.drifts
+    # What ran is written in the recording's scheme, so later comparisons are plain equality.
+    assert [(s.code, s.router) for s in done.steps] == [(s.code, s.router) for s in old.steps]
+
+
+def test_a_recording_from_before_t212_still_sees_an_edit() -> None:
+    old = _recorded_before_t212(linear(), record(linear(), {"x": 1}))
+    assert changed_nodes(_linear_changed(), [old]) == {"b"}
+    done = replay_run(_linear_changed(), old, (), serve=True)
+    assert [c.how for c in done.calls] == ["served", "live"]
+    assert done.steps[1].code == fingerprint(_b_changed)  # a changed node: the new scheme
+
+
+def test_a_recording_made_to_compare_with_an_older_one_uses_its_fingerprints() -> None:
+    # As the synthetic suite does: the PR side is recorded afresh and compared with a baseline.
+    old = _recorded_before_t212(linear(), record(linear(), {"x": 1}))
+    assert record(linear(), {"x": 1}, like=[old]) == old
+    edited = record(_linear_changed(), {"x": 1}, like=[old])
+    assert [s.code for s in edited.steps] == [old.steps[0].code, fingerprint(_b_changed)]
+
+
+def test_a_node_only_another_run_recorded_gets_that_recording_s_scheme() -> None:
+    # The PR's run reaches a node this run's recording never did: it must not read as changed.
+    graph = conditional()
+    tools, answer = (
+        _recorded_before_t212(graph, record(graph, {"x": 1, "route": r})) for r in ("tools", "")
+    )
+    codes = {s.node: s.code for s in (*tools.steps, *answer.steps)}
+    rerouted = Cassette({"x": 1, "route": "tools"}, answer.steps)  # as if the route had flipped
+    for serve in (True, False):
+        done = replay_run(graph, rerouted, (), serve=serve, baseline=[tools, answer])
+        assert {s.node: s.code for s in done.steps}.items() <= codes.items()
+
+
+# T212: a node function's own docstring doesn't count, unless a ToolNode exposes it as a tool.
+_DOC_GRAPH = '''\
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
+
+
+class S(TypedDict, total=False):
+    x: int
+
+
+def plain(state: S) -> S:
+    """Add one to x."""
+    return {"x": state["x"] + 1}
+
+
+def shared(state: S) -> S:
+    """Add two to x."""
+    return {"x": state["x"] + 2}
+
+
+g = StateGraph(S)
+g.add_node("plain", plain)
+g.add_node("shared", shared)
+g.add_node("tools", ToolNode([shared]))
+g.add_edge(START, "plain")
+g.add_edge("plain", "shared")
+g.add_edge("shared", END)
+g.add_edge("tools", END)  # never reached: the test is who holds `shared`
+graph = g.compile()
+'''
+
+
+def _doc_graph(path: Path, source: str) -> CompiledStateGraph[S]:
+    path.write_text(source, encoding="utf-8")
+    graph: CompiledStateGraph[S] = _import_file(str(path)).graph
+    return graph
+
+
+def test_a_reformat_and_a_node_docstring_edit_leave_every_step_served(tmp_path: Path) -> None:
+    base = record(_doc_graph(tmp_path / "base.py", _DOC_GRAPH), {"x": 1})
+    edited = _DOC_GRAPH.replace("Add one to x.", "Increment x.\n\n    Twice as long.")
+    edited = edited.replace(
+        '{"x": state["x"] + 1}', "{\n        'x': (state['x'] + 1),  # one\n    }"
+    )
+    assert edited.count("Add") == 1 and "# one" in edited
+    head = _doc_graph(tmp_path / "head.py", edited)
+    assert changed_nodes(head, [base]) == set() and unservable(head, [base]) == 0
+    done = replay_run(head, base, (), serve=True)
+    assert [c.how for c in done.calls] == ["served", "served"] and not done.drifts
+
+
+def test_a_docstring_edit_counts_for_a_node_function_a_toolnode_exposes(tmp_path: Path) -> None:
+    # ToolNode builds the tool's description from the docstring: a model can see it.
+    base = record(_doc_graph(tmp_path / "base.py", _DOC_GRAPH), {"x": 1})
+    head = _doc_graph(tmp_path / "head.py", _DOC_GRAPH.replace("Add two to x.", "Double x."))
+    assert changed_nodes(head, [base]) == {"shared"}

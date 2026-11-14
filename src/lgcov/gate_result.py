@@ -3,8 +3,8 @@ files the gate read (pure). `lgcov ci --result-out` writes it, and `lgcov verify
 before the PR comment is posted.
 
 The binding catches a result that was edited, is stale or came from other policy. It is not a
-signature: every value in it is public, so while the PR's code shares the job it can write a
-matching file. docs/trust-boundary.md says what closes that (T179).
+signature: every value in it is public, so in one job the PR's code can write a matching file. With
+two (the Action's `phase`) that code never runs where this is written: docs/trust-boundary.md.
 """
 
 from __future__ import annotations

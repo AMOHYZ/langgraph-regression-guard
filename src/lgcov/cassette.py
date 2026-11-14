@@ -1,19 +1,21 @@
 import asyncio
 import atexit
+import hashlib
 import inspect
 import json
+import socket
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Container, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Collection, Container, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from contextvars import copy_context
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial, wraps
 from statistics import fmean
 from types import CodeType, FunctionType
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NoReturn, TypedDict
 
 import httpx
 from langgraph.errors import GraphBubbleUp
@@ -21,6 +23,14 @@ from langgraph.graph import START
 from langgraph.pregel import Pregel
 from langgraph.types import Command, Send
 
+from lgcov.attribution import (
+    NEEDS_LIVE,
+    NO_FINGERPRINT,
+    NoiseCheck,
+    Probe,
+    drift_exceeds_noise,
+    noise_check,
+)
 from lgcov.fingerprint import fingerprint
 from lgcov.messages import decode, encode
 from lgcov.normalize import key_view, normalize
@@ -40,6 +50,10 @@ class Step:
     # node, "arg": payload} for a Send. None for any other return, and in cassettes recorded
     # before this was kept.
     goto: list[Any] | None = None
+    # T175: fingerprint of the routers on this node's conditional edges and their path maps,
+    # which `code` doesn't cover. None for a node with no such edge or a router with no
+    # fingerprint, and in cassettes recorded before this was kept.
+    router: str | None = None
 
 
 @dataclass
@@ -49,11 +63,12 @@ class Cassette:
 
     def body(self) -> dict[str, Any]:
         """What's saved. A step with no goto has no such key, so a cassette with no Command in
-        it saves byte for byte as it did before goto was kept."""
+        it saves byte for byte as it did before goto was kept. T175: the same for router."""
         body = asdict(self)
         for step in body["steps"]:
-            if step["goto"] is None:
-                del step["goto"]
+            for key in ("goto", "router"):
+                if step[key] is None:
+                    del step[key]
         return body
 
     def to_json(self) -> str:
@@ -86,15 +101,19 @@ class Drift:
     actual: list[str] | None
 
 
-def record(graph: Any, inputs: dict[str, Any]) -> Cassette:
+def record(graph: Any, inputs: dict[str, Any], like: Sequence[Cassette] = ()) -> Cassette:
     """Run the graph once and save every node's output, in order, with the input and
     code fingerprint `replay` needs to serve it later.
 
     graph is typed Any on purpose: LangGraph's generic types change between
     versions and would break mypy --strict on upgrades. A Protocol can replace
     it later.
+
+    T212: `like` is an older baseline this recording will be compared with. A node whose code is
+    what `like` recorded gets `like`'s fingerprint for it, whichever scheme that used (`_codes`).
     """
-    return Cassette(inputs=inputs, steps=_run(graph, inputs, (), ())[0])
+    steps = _run(graph, inputs, (), (), like=[s for r in like for s in r.steps])[0]
+    return Cassette(inputs=inputs, steps=steps)
 
 
 def _key(value: Any, ignore_paths: Sequence[str], mask_volatile: bool) -> str | None:
@@ -214,14 +233,65 @@ def _plain(bound: Any) -> FunctionType | None:
     return fn if isinstance(fn, FunctionType) and not inspect.isasyncgenfunction(fn) else None
 
 
-def _codes(graph: Any) -> dict[str, str | None]:
-    # The plain-function nodes replay wraps, by name; subgraphs and the like run untouched.
+def _tool_codes(graph: Any) -> set[CodeType]:
+    """T212: the functions a ToolNode in this graph, or in a subgraph, exposes as tools. A tool's
+    description comes from its docstring, so a model can see it. Not seen: a function a node
+    passes to `bind_tools` itself."""
+    found: set[CodeType] = set()
+    for spec in getattr(graph, "nodes", {}).values():
+        bound = getattr(spec, "bound", None)
+        by_name = getattr(bound, "tools_by_name", None)
+        for tool in by_name.values() if isinstance(by_name, Mapping) else ():
+            for fn in (getattr(tool, "func", None), getattr(tool, "coroutine", None)):
+                found |= {fn.__code__} if isinstance(fn, FunctionType) else set()
+        found |= _tool_codes(bound) if isinstance(bound, Pregel) else set()
+    return found
+
+
+def _codes(graph: Any, recorded: Collection[Step] = ()) -> dict[str, str | None]:
+    """The plain-function nodes replay wraps, by name; subgraphs and the like run untouched.
+
+    T212: `recorded` may hold fingerprints in the scheme from before T212, where a function was
+    its raw lines. A node whose old-scheme fingerprint is the recorded one is byte-identical to
+    what was recorded, so it is unchanged, and its fingerprint here is that value: everything
+    downstream compares fingerprints as plain text."""
+    held = {(s.node, s.code) for s in recorded}
+    tools = _tool_codes(graph)
     codes: dict[str, str | None] = {}
     for name, spec in getattr(graph, "nodes", {}).items():
         fn = _plain(spec.bound)
         if name != START and fn is not None:
-            codes[name] = fingerprint(fn)
+            codes[name] = fingerprint(fn, node=fn.__code__ not in tools)
+            if (name, codes[name]) not in held and (name, old := fingerprint(fn, raw=True)) in held:
+                codes[name] = old
     return codes
+
+
+def _router_prints(
+    graph: Any, raw: bool = False, recorded: Collection[Step] = ()
+) -> dict[str, str | None]:
+    """T175: by source node, one fingerprint for its conditional edges: each router's code and
+    path map. None when a router has no fingerprint. A subgraph's own routers aren't here (T193).
+    T212: `raw` and `recorded` as for a node's fingerprint (`_codes`)."""
+    if recorded:
+        new, old = _router_prints(graph), _router_prints(graph, raw=True)
+        held = {(s.node, s.router) for s in recorded}
+        return {
+            n: old[n] if (n, p) not in held and (n, old[n]) in held else p for n, p in new.items()
+        }
+    prints: dict[str, str | None] = {}
+    branches = getattr(getattr(graph, "builder", None), "branches", None) or {}
+    for source, per_source in branches.items():
+        parts: list[str] = []
+        for name, branch in sorted(per_source.items()):
+            path = getattr(branch, "path", None)
+            code = fingerprint(getattr(path, "func", None) or getattr(path, "afunc", None), raw)
+            ends = sorted(map(repr, (getattr(branch, "ends", None) or {}).items()))
+            parts += [] if code is None else [f"{name}:{code}:{ends}"]
+        whole = len(parts) == len(per_source)
+        text = "\n".join(parts).encode()
+        prints[source] = hashlib.sha256(text).hexdigest()[:16] if whole else None
+    return prints
 
 
 def _only_async(runnable: Any) -> bool:
@@ -402,7 +472,7 @@ def _returned(step: Step) -> Any:
 def unservable(graph: Any, cassettes: Sequence[Cassette]) -> int:
     """T089: recorded steps replay can't serve, since their node's code changed or they
     have no input or fingerprint: the live calls a budget projects from."""
-    codes = _codes(graph)
+    codes = _codes(graph, [s for c in cassettes for s in c.steps])
     return sum(
         1
         for c in cassettes
@@ -419,6 +489,7 @@ def _run(
     on_divergence: OnDivergence = "flag",
     budget: Budget | None = None,
     mask_volatile: bool = False,
+    like: Sequence[Step] = (),
 ) -> tuple[list[Step], list[Call], Halt | None]:
     """Stream the graph once; return its steps with each node's input and fingerprint, how
     each call ran, and where the run stopped, if it stopped early.
@@ -437,6 +508,9 @@ def _run(
 
     T152: a node's retry policy and error handler work as they do outside lgcov. Every attempt
     that raised is in the `Call`s, and a retry can't get a call past a halt.
+
+    T212: `like` is the recording this run will be compared with, all of its runs: it decides
+    which scheme each node's fingerprint is written in (`_codes`), served or not.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     unused = [(s, _key(s.input, ignore_paths, mask_volatile)) for s in served if s.code is not None]
@@ -532,7 +606,7 @@ def _run(
 
     original = getattr(graph, "nodes", {})  # an object with only .stream() runs as it is
     nodes = dict(original)
-    for name, code in _codes(graph).items():
+    for name, code in _codes(graph, [*served, *like]).items():
         nodes[name] = _around(
             original[name], partial(wrap, name, code=code), partial(awrap, name, code=code)
         )
@@ -540,6 +614,7 @@ def _run(
         if isinstance(getattr(spec, "bound", None), Pregel):
             nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{name}.", failed)})
     routers = _routers(graph)
+    routed = _router_prints(graph, recorded=[*served, *like])
     runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
 
@@ -552,10 +627,10 @@ def _run(
                 )
                 call = None if i is None else calls.pop(i)
             if call is None:
-                steps.append(Step(node, update))
+                steps.append(Step(node, update, router=routed.get(node)))
                 continue
             goto = _goto_saved(call[2].goto) if isinstance(call[2], Command) else None
-            steps.append(Step(node, update, call[1], call[3], goto))
+            steps.append(Step(node, update, call[1], call[3], goto, routed.get(node)))
 
     async def drain() -> None:
         try:
@@ -598,7 +673,7 @@ def _compared(step: Step, ignore_paths: Sequence[str], routed: Container[str]) -
 
 
 def _by_node(
-    steps: list[Step], ignore_paths: Sequence[str] = (), routed: Container[str] = ()
+    steps: Sequence[Step], ignore_paths: Sequence[str] = (), routed: Container[str] = ()
 ) -> dict[str, list[str]]:
     # sorted per node so parallel Send workers compare stably
     out: dict[str, list[str]] = {}
@@ -661,12 +736,28 @@ def replay_run(
     on_divergence: OnDivergence = "flag",
     budget: Budget | None = None,
     mask_volatile: bool = False,
+    baseline: Sequence[Cassette] = (),
 ) -> Replay:
-    """`replay_steps` under a divergence policy and a budget, with how each call ran."""
+    """`replay_steps` under a divergence policy and a budget, with how each call ran. T212:
+    `baseline` is every run recorded with `cassette`: a node this run didn't record, but another
+    did, gets its fingerprint in that recording's scheme."""
     served = cassette.steps if serve else ()
+    like = [s for r in (cassette, *baseline) for s in r.steps]
     fresh, calls, halt = _run(
-        graph, cassette.inputs, served, ignore_paths, on_divergence, budget, mask_volatile
+        graph, cassette.inputs, served, ignore_paths, on_divergence, budget, mask_volatile, like
     )
+    return compared_run(cassette, fresh, calls, halt, ignore_paths)
+
+
+def compared_run(
+    cassette: Cassette,
+    fresh: Sequence[Step],
+    calls: Sequence[Call],
+    halt: Halt | None,
+    ignore_paths: Sequence[str] = (),
+) -> Replay:
+    """T179: one run's steps against its cassette. It only reads data, so the job that decides
+    can do this with steps another job reports, without the graph."""
     recorded = cassette.steps
     not_checked: tuple[str, ...] = ()
     if halt is not None:  # compare only what the run reached: each node's first k steps
@@ -688,6 +779,175 @@ def replay_run(
         if expected.get(n) != actual.get(n)
     )
     return Replay(drifts, tuple(fresh), tuple(calls), halt, not_checked)
+
+
+class _Refused(BaseException):
+    # T162: the probe tried the network. Not an Exception, so an SDK's retry loop can't catch it
+    # and sleep before trying again.
+    pass
+
+
+@contextmanager
+def _offline(reached: list[str]) -> Iterator[None]:
+    # T162: every way out to the network refuses, and says it was tried.
+    def refuse(*args: object, **kwargs: object) -> NoReturn:
+        reached.append(repr(args[-1])[:80] if args else "")
+        raise _Refused("lgcov's probe runs offline (T162)")
+
+    saved = [
+        (socket, "getaddrinfo", socket.getaddrinfo),
+        (socket.socket, "connect", socket.socket.connect),
+        (socket.socket, "connect_ex", socket.socket.connect_ex),
+    ]
+    for owner, name, _ in saved:
+        setattr(owner, name, refuse)
+    try:
+        yield
+    finally:
+        for owner, name, original in saved:
+            setattr(owner, name, original)
+
+
+@dataclass(frozen=True)
+class ProbeStep:
+    """T162: one changed node run with this code on the input base recorded at `runs[run].steps
+    [step]`: what it returned, or why it didn't. It says what ran, not what that means, so the job
+    that runs a PR's code can hand it over: `judge_probes` compares."""
+
+    run: int
+    step: int
+    node: str
+    output: Any = None
+    goto: list[Any] | None = None
+    raised: str = ""  # why it couldn't run offline; "" when it returned
+
+
+def _probe_step(
+    i: int, j: int, step: Step, fn: FunctionType | None, live: bool = False
+) -> ProbeStep:
+    if fn is None:
+        return ProbeStep(i, j, step.node, raised=NO_FINGERPRINT)
+    reached: list[str] = []
+    out: Any = None
+    try:
+        with nullcontext() if live else _offline(reached):  # T211: a repeat runs live
+            config: dict[str, object] = {"config": {"configurable": {}}}  # what a node can ask for
+            asks = "config" in inspect.signature(fn).parameters
+            out = fn(deepcopy(step.input), **(config if asks else {}))
+            if inspect.iscoroutine(out):
+                out = asyncio.run(out)
+    except _Refused:
+        pass  # `reached` says so
+    except Exception as exc:  # user node code can raise anything
+        if not reached:
+            return ProbeStep(i, j, step.node, raised=f"raised {type(exc).__name__} on base's input")
+    if reached:  # even if the node caught the refusal and went on
+        return ProbeStep(i, j, step.node, raised=NEEDS_LIVE)
+    goto = _goto_saved(out.goto) if isinstance(out, Command) else None
+    return ProbeStep(i, j, step.node, _streamed(out), goto)
+
+
+def changed_nodes(graph: Any, runs: Sequence[Cassette]) -> set[str]:
+    """T162: the recorded nodes whose fingerprint differs in this graph."""
+    codes = _codes(graph, [s for r in runs for s in r.steps])
+    return {
+        s.node
+        for r in runs
+        for s in r.steps
+        if s.code is not None and codes.get(s.node) not in (None, s.code)
+    }
+
+
+def probe_steps(
+    graph: Any, runs: Sequence[Cassette], nodes: Container[str]
+) -> tuple[ProbeStep, ...]:
+    """T162: run each of `nodes` with this graph's code on every input base recorded for it, with
+    the network blocked. A node that reaches for the network would need a live call, and one live
+    sample can't be told from noise (T211), so its probe is `raised`, never a crash."""
+    fns = {name: _plain(spec.bound) for name, spec in getattr(graph, "nodes", {}).items()}
+    return tuple(
+        _probe_step(i, j, s, fns.get(s.node))
+        for i, run in enumerate(runs)
+        for j, s in enumerate(run.steps)
+        if s.node in nodes
+    )
+
+
+def _merged(old: Probe | None, new: Probe) -> Probe:
+    # A node drifts if any of its probes does; it can't be cleared if any couldn't run.
+    if old is None or new.drifted or (old.drifted is False and new.drifted is None):
+        return new
+    return old
+
+
+def judge_probes(
+    runs: Sequence[Cassette], probes: Sequence[ProbeStep], ignore_paths: Sequence[str] = ()
+) -> dict[str, Probe]:
+    """T162: each probed node: does it drift on base's recorded input (`drift_exceeds_noise`), as
+    replay compares it? Pure. ValueError for a probe that matches no recorded step."""
+    found: dict[str, Probe] = {}
+    for p in probes:
+        steps = runs[p.run].steps if 0 <= p.run < len(runs) else []
+        recorded = steps[p.step] if 0 <= p.step < len(steps) else None
+        if recorded is None or recorded.node != p.node:
+            raise ValueError(f"a probe of `{p.node}` matches no recorded step")
+        if p.raised:
+            probe = Probe(None, p.raised)
+        else:
+            routed = {p.node} if recorded.goto is not None else set()
+            fresh = _compared(Step(p.node, p.output, goto=p.goto), ignore_paths, routed)
+            was = _compared(recorded, ignore_paths, routed)
+            probe = Probe(drift_exceeds_noise([was], [fresh]))
+        found[p.node] = _merged(found.get(p.node), probe)
+    return found
+
+
+def probe_nodes(
+    graph: Any, runs: Sequence[Cassette], nodes: Container[str], ignore_paths: Sequence[str] = ()
+) -> dict[str, Probe]:
+    """T162: `probe_steps` and `judge_probes` in one process, as `lgcov bench` uses them."""
+    return judge_probes(runs, probe_steps(graph, runs, nodes), ignore_paths)
+
+
+def repeat_steps(
+    graph: Any, runs: Sequence[Cassette], nodes: Container[str], k: int
+) -> tuple[ProbeStep, ...]:
+    """T211: `probe_steps` with the network open, `k` times per recorded input: this graph's
+    samples of each of `nodes`. Each is a real call, so a model node costs `k` calls per input."""
+    fns = {name: _plain(spec.bound) for name, spec in getattr(graph, "nodes", {}).items()}
+    return tuple(
+        _probe_step(i, j, s, fns.get(s.node), live=True)
+        for i, run in enumerate(runs)
+        for j, s in enumerate(run.steps)
+        if s.node in nodes
+        for _ in range(k)
+    )
+
+
+def judge_repeats(
+    runs: Sequence[Cassette],
+    base: Sequence[ProbeStep],
+    head: Sequence[ProbeStep],
+    ignore_paths: Sequence[str] = (),
+) -> dict[str, NoiseCheck]:
+    """T211: each repeated node's `noise_check`: the recorded output and `base`'s repeats against
+    `head`'s, per recorded input, compared as replay compares them. A node with several inputs
+    keeps the check furthest above its spread. One whose repeat raised on either side has no
+    check, so its label stays as it was. Pure."""
+    failed = {p.node for p in (*base, *head) if p.raised}
+    found: dict[str, NoiseCheck] = {}
+    for i, j, node in sorted({(p.run, p.step, p.node) for p in head if p.node not in failed}):
+        recorded = runs[i].steps[j]
+        routed = {node} if recorded.goto is not None else set()
+        samples = [
+            [_compared(Step(node, p.output, goto=p.goto), ignore_paths, routed) for p in side]
+            for side in ([p for p in ps if (p.run, p.step) == (i, j)] for ps in (base, head))
+        ]
+        check = noise_check([_compared(recorded, ignore_paths, routed), *samples[0]], samples[1])
+        old = found.get(node)
+        if old is None or check.min_head_to_base - check.spread > old.min_head_to_base - old.spread:
+            found[node] = check
+    return found
 
 
 def accept_nodes(

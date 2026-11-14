@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.messages import (
@@ -75,6 +76,60 @@ def plain(value: Any) -> Any:
     if isinstance(value, list):
         return [plain(v) for v in value]
     return value
+
+
+def _asked(message: dict[object, object]) -> list[object] | None:
+    """The tool calls in an AI message saved as a dict: plain, as `message_to_dict` writes it,
+    or in LangChain's `lc` constructor form. None: not an AI message."""
+    lc_id = message.get("id")
+    if message.get("type") in ("ai", "AIMessageChunk"):
+        data = message.get("data")
+        body = data if isinstance(data, dict) else message
+    elif message.get("type") == "constructor" and isinstance(lc_id, list):
+        if lc_id[-1:] not in (["AIMessage"], ["AIMessageChunk"]):
+            return None
+        kwargs = message.get("kwargs")
+        body = kwargs if isinstance(kwargs, dict) else {}
+    else:
+        return None
+    calls = body.get("tool_calls")
+    return calls if isinstance(calls, list) else []
+
+
+def _calls(value: object) -> list[tuple[str, object, object]]:
+    """Each tool call an AI message in `value` asks for, in order, as (name, id, args)."""
+    if isinstance(value, BaseMessage):
+        m = message_chunk_to_message(value)
+        asked: list[object] = list(m.tool_calls) if isinstance(m, AIMessage) else []
+    elif isinstance(value, dict):
+        found = _asked(value)
+        if found is None:
+            return [c for v in value.values() for c in _calls(v)]
+        asked = found
+    elif isinstance(value, (list, tuple)):
+        return [c for v in value for c in _calls(v)]
+    else:
+        return []
+    return [
+        (c["name"], c.get("id"), c.get("args"))
+        for c in asked
+        if isinstance(c, dict) and isinstance(c.get("name"), str)
+    ]
+
+
+def run_tools(outputs: Sequence[object]) -> list[str]:
+    """T181: the tools a run called, in order, from its steps' outputs. A call counts once by its
+    id, since a node can return messages an earlier one did; one with no id, once per step, name
+    and args."""
+    seen: set[object] = set()
+    tools = []
+    for i, output in enumerate(outputs):
+        for name, call_id, args in _calls(output):
+            key = call_id or (i, name, json.dumps(args, sort_keys=True, default=str))
+            if key not in seen:
+                seen.add(key)
+                tools.append(name)
+    return tools
 
 
 def encode(value: object) -> object:

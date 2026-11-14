@@ -1,5 +1,7 @@
 """Graph snapshots of compiled LangGraph graphs (T050 adapter, T051 JSON round-trip).
 
+node_tools (T207) reads which tools each node exposes; it is kept out of GraphSnapshot.
+
 A GraphSnapshot is the stable, comparable shape of a graph: node ids plus edges
 (source, target, conditional). It is what graph_diff compares and what the PR
 report renders.
@@ -8,6 +10,7 @@ report renders.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -85,3 +88,26 @@ def snapshot_from_compiled(compiled: _CompiledGraph) -> GraphSnapshot:
     nodes = frozenset(str(node_id) for node_id in graph.nodes)
     edges = frozenset(Edge(str(e.source), str(e.target), bool(e.conditional)) for e in graph.edges)
     return GraphSnapshot(nodes=nodes, edges=edges)
+
+
+# ---- T207: tools exposed by each node ---------------------------------------
+
+
+# Any: a drawable graph node, untyped like get_graph() above.
+def _tool_names(node: Any) -> tuple[str, ...]:
+    # langgraph >= 1.2.20 writes metadata["__tools"]; the dunder key may be private, so it is
+    # only a hint behind a type check. tools_by_name (ToolNode) works on older versions too.
+    hint = (getattr(node, "metadata", None) or {}).get("__tools")
+    if isinstance(hint, list) and hint and all(isinstance(n, str) for n in hint):
+        return tuple(sorted(hint))
+    by_name = getattr(getattr(node, "data", None), "tools_by_name", None)
+    if isinstance(by_name, Mapping) and by_name:
+        return tuple(sorted(str(n) for n in by_name))
+    return ()
+
+
+def node_tools(compiled: _CompiledGraph) -> dict[str, tuple[str, ...]]:
+    """Map each node that exposes tools (a ToolNode) to its sorted tool names."""
+    graph = compiled.get_graph()
+    found = {str(node_id): _tool_names(node) for node_id, node in graph.nodes.items()}
+    return {node_id: names for node_id, names in found.items() if names}

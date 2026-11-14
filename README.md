@@ -1,9 +1,9 @@
 # langgraph-regression-guard
 
-Catch silent regressions in LangGraph agents on every PR. lgcov tells you which LangGraph
-node a PR actually changed and which ones only inherited the damage, gates each KPI in your
-taxonomy with a paired test, and lets a judge block only once it has earned that against
-human labels. A GitHub Action; first report in 2 minutes.
+Catch silent regressions in LangGraph agents on every PR. lgcov replays your agent, re-runs
+only the nodes a PR can reach, and shows which node's output changed first and which changed
+after it. Each KPI in your taxonomy gets a paired test, and a judge can block only once it
+has earned that against human labels. A GitHub Action; first report in 2 minutes.
 
 [![CI](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AMOHYZ/langgraph-regression-guard/actions/workflows/ci.yml)
 
@@ -22,8 +22,9 @@ Three layers, one per level of confidence:
 
 - **L1 — Cassettes.** Record each node's input and output once. On every PR,
   nodes the change left alone are served from the recording and the rest re-run
-  and are compared with it. The diff tells you whether a change breaks a node at
-  its root or only propagates from upstream. [Known limits](#known-replay-limits).
+  and are compared with it. The diff shows which node's output changed first and
+  which changed after it; on nodes that call a live model, that can be noise, not
+  the PR. [Known limits](#known-replay-limits).
 - **L2 — Judge gate.** Typed LLM judges and deterministic code checks score
   KPIs, each verdict with a confidence, and a paired test per KPI decides SHIP,
   BLOCK or INCONCLUSIVE: an unclear or low-confidence result goes to a human
@@ -44,7 +45,7 @@ nothing else should come from there):
 
 ```bash
 pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
-pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.1.0
+pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.2.0
 ```
 
 Or from GitHub, as the quickstart does. Once on PyPI: `pip install lgcov`.
@@ -76,9 +77,9 @@ Minutes to first report: 2 (clean venv, steps below pasted as-is; measured 2026-
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install "git+https://github.com/AMOHYZ/langgraph-regression-guard"
-# Or 0.1.0 from TestPyPI; dependencies from PyPI, since anyone can upload to TestPyPI:
+# Or 0.2.0 from TestPyPI; dependencies from PyPI, since anyone can upload to TestPyPI:
 #   pip install "langgraph>=1.2.16" "httpx>=0.28.1" "pyyaml>=6.0.3"
-#   pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.1.0
+#   pip install --no-deps -i https://test.pypi.org/simple/ lgcov==0.2.0
 lgcov --version
 
 # 1. A graph to guard: the demo agent (or point graph_entrypoint at your own).
@@ -130,11 +131,29 @@ its recorded output without running it, when two things match the recording:
   leaves in, including an `id` in plain state or a UUID or date-time in text. A change only to
   a masked value still matches, so that node can be served from the cassette. If your state
   gets a new id or time on every run, `mask_volatile_in_key: true` masks `id` values, UUIDs and
-  date-times too, and `ignore_paths` drops a single field.
-- **Its code fingerprint**: the node function's source, defaults and closure
+  date-times too, and `ignore_paths` drops a single field. The same goes for a provider's id
+  inside text (`rs_`, `fc_`, `resp_`, `call_`, `chatcmpl-`, `msg_`, `toolu_`, `tooluse_` or
+  `req_`, then 20 or more letters and digits): the comparison masks it, but the key leaves it
+  by default, so a node whose input text carries one misses the cassette and runs live unless
+  `mask_volatile_in_key` is on. An id with any other prefix goes through `ignore_paths`.
+  A provider's per-call blob is handled the same way: the value of `encrypted_content`,
+  `signature`, `thought_signature` or `thoughtSignature`, when it is 40 or more base64
+  characters with no space. In a structured block, a plain `signature` is masked only when the
+  same dict has `type: thinking`. In text turned into a string there is no sibling to check, so
+  the 40-character rule is the only guard there. A `redacted_thinking` block's `data`, and a
+  blob under any other key, go through `ignore_paths`.
+- **Its code fingerprint**: the node function's code, defaults and closure
   values, plus the values of the module-level names it uses, following the
   functions, classes and modules of your project the same way. Library code
   counts by name, and other objects (a chat model client, say) by their repr.
+  Code counts as its syntax tree, so a comment, whitespace, line wrapping or quote
+  style doesn't change it.
+- **A node function's own docstring doesn't count,** unless something could read it: the
+  function has a decorator, a `ToolNode` in the graph exposes it as a tool, its code or project
+  code it reaches names `__doc__` or `getdoc`, or the docstring shares a line with code. The
+  docstrings of helpers, nested functions, classes and routers always count. **Limit:** lgcov
+  doesn't see a node function that is also passed to `bind_tools`, where the docstring is the
+  tool's description. After editing one, pass `--live`.
 
 Everything else runs live: changed nodes, nodes that are not plain functions
 (subgraphs, `ToolNode`) and every node of an older cassette with no recorded
@@ -169,7 +188,10 @@ on base, replays head, and scores lgcov's labels against hand-written ones, prec
 recall / F1, micro and macro ([docs/benchmark.md](docs/benchmark.md)). Each side runs in its
 own process with its own imports, and a bench file can add `pythonpath: [src]` for a src
 layout. `--keep-runs DIR` saves each side's runs as they finish, so a crash can't lose a paid
-recording. For now its rows are
+recording. `--live` runs every head node instead of serving the unchanged ones, so a row
+with base as head measures a live model's own variation. `--noise-repeats K` runs a changed
+model node K more times on each side and names it root only above base's own spread; below
+it the node reads `no drift detected above noise (K=n)`, which doesn't clear it. For now its rows are
 three demo fixtures in `tests/fixtures/bench/`; a pilot on one real PR has its own section
 in [docs/benchmark.md](docs/benchmark.md#real-prs). A miss on a
 hard case (Send fan-out, subgraph, loop) is listed as a known gap, never hidden. The
@@ -184,6 +206,9 @@ KPI that should catch it and its root and propagated labels, are in
 
 - **The key:** it comes from `LANGSMITH_API_KEY`.
 - **Region or self-hosting:** set `LANGSMITH_ENDPOINT` for an EU or self-hosted LangSmith.
+- **An org-scoped key** (one that works across workspaces) also needs
+  `LANGSMITH_WORKSPACE_ID`, the workspace's id. Without it LangSmith answers 403. The PR
+  report's experiment link reads the same three variables.
 
 With the key set:
 
@@ -211,8 +236,9 @@ langsmith:          # lgcov.yaml
   the commit lgcov tested or the PR's head commit. LangSmith's `evaluate()` records that
   field. If no experiment ran on either commit, the report says nothing.
 - **The key.** Put `LANGSMITH_API_KEY` in the job's `env:` from a secret.
-  - ⚠️ That job runs the PR's code, which can read the key. Until the job split, only do
-    this if PR authors are trusted: no fork PRs, no outside contributors.
+  - ⚠️ With one job, that job runs the PR's code, which can read the key. Only do this if PR
+    authors are trusted: no fork PRs, no outside contributors. With
+    [two jobs](#two-jobs-so-the-prs-code-cant-touch-the-verdict), it goes in the job that decides.
   - Without it, the report says so in one line. Fork PRs get no secrets, so they always
     hit this case.
   - A LangSmith outage is a ⚠️ line.
@@ -241,7 +267,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: AMOHYZ/langgraph-regression-guard@v0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
         with:
           fail-on: root-drift  # root-drift | any-drift | never
 ```
@@ -254,9 +280,14 @@ jobs:
   comment is posted, `lgcov verify-result` checks the result against the commits and that
   policy. On a mismatch no verdict is posted and the run exits 2. What this does and doesn't
   stop: [docs/trust-boundary.md](docs/trust-boundary.md).
-- `root-drift` and `any-drift` fail the same PRs for now: until replay classifies
-  drift by the node inputs it records, the first node to drift in each run counts
-  as root.
+- A node is root when its own code changed and it still drifts when run again, offline, on the
+  input the cassette recorded for it. `root-drift` also fails on the nodes lgcov can't clear: a
+  changed node that reaches for the network (a model call can't be told from noise yet) and drift
+  no changed node explains. So `root-drift` and `any-drift` still fail nearly the same PRs.
+- A node whose conditional edge's router changed is root as well, when a node drifts after it:
+  its row reads `root (routing change at classify)`. A baseline recorded before this holds no
+  router fingerprint, so re-record it to get this label. Until then the first drifted node is
+  inconclusive, as before. lgcov doesn't check that the route itself changed.
 - The report includes coverage of the replayed runs, e.g. `Coverage: Nodes 75% (−25% vs
   main) · Edges 60% (±0)`, and lists nodes main reached that this PR doesn't. Pushes to
   `main` upload it as the `lgcov-coverage` artifact; until one exists, PRs show "no
@@ -273,6 +304,11 @@ jobs:
 - A node's retry policy and error handler work as they do outside lgcov. Each attempt that
   raised counts as a live call and the report names the node, because what the attempt did
   before raising, like a write, still happened.
+- Under its heading, the report sums up the run in one line, e.g.
+  "1 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `classify`": the runs where
+  a node drifted, the runs a KPI's judge scored lower than on the base (each KPI's count in
+  brackets, or "no KPI judged"), and the first touched run's root node, with "+N more" when other
+  runs have another.
 - The report ends with where the time went, e.g. `⏱ 42 s · agent 31 s (3 live / 1 served)
   · judges 9 s (12 calls, 1.4k tokens) · budget 90 s`.
 - Two tiers. `pr` (the default) serves unchanged nodes, judges each case once, skips
@@ -285,16 +321,17 @@ jobs:
     schedule:
       - cron: "0 3 * * *"  # the nightly tier, on main
   # ...the same job as above, with:
-        - uses: AMOHYZ/langgraph-regression-guard@v0
+        - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
           with:
             tier: ${{ github.event_name == 'schedule' && 'nightly' || 'pr' }}
   ```
 - With `taxonomy:`, the run also gates the taxonomy's KPIs on the replayed outputs (see
   [The gate](#the-gate-ship-block-or-inconclusive)) and adds the table to the report, at
   most 200 model judge calls per run. `judge: jev` KPIs read `JEV_API_URL` and
-  `JEV_API_KEY`: set them in the job's `env:` from secrets. ⚠️ That job runs the PR's code,
-  which can read them. Until the job split, only do this if PR authors are trusted: no
-  fork PRs, no outside contributors.
+  `JEV_API_KEY`: set them in the job's `env:` from secrets. ⚠️ With one job, that job runs
+  the PR's code, which can read them. Only do this if PR authors are trusted: no fork PRs, no
+  outside contributors. With [two jobs](#two-jobs-so-the-prs-code-cant-touch-the-verdict), they
+  go in the job that decides.
 - Outcomes and exit codes are in the table below.
 - The run locks the commits it compares. It records the base checkout's HEAD and the PR's
   at the start, and the report prints both:
@@ -309,10 +346,73 @@ jobs:
 - Inputs, all optional and falling back to `lgcov.yaml`: `graph-entrypoint`,
   `cassette-dir`, `taxonomy` (turns on the KPI gate; `taxonomy_path` isn't read here),
   `fail-on`, `fail-on-inconclusive`, `on-divergence`, `budget-seconds`, `tier`,
-  `python-version`, `github-token`, `live`, `mode`, `approved-by`, `ci-status`. Outputs:
-  `report-path`, `root-drift-count`, `propagated-drift-count`, `verdict` (`pass`, `fail`,
-  `needs_human` or `error`).
+  `python-version`, `github-token`, `live`, `mode`, `approved-by`, `ci-status`, `phase`. Outputs:
+  `report-path`, `root-drift-count` (inconclusive nodes included), `propagated-drift-count`,
+  `inconclusive-count`, `first-drift` (each run's first node to drift), `verdict` (`pass`, `fail`,
+  `needs_human`, `error` or `advisory`).
 - Runs on Linux and macOS runners.
+
+### Two jobs, so the PR's code can't touch the verdict
+
+The workflow above runs the PR's code in the job that posts the verdict, so that code can read any
+key in the job and interfere with the result. The `phase` input splits it in two:
+
+```yaml
+name: lgcov
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  lgcov-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
+        with:
+          phase: candidate  # runs the PR's code and decides nothing
+  lgcov:
+    needs: lgcov-candidate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    env:
+      JEV_API_URL: ${{ secrets.JEV_API_URL }}
+      JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}  # empty on a push: that commit
+      - uses: AMOHYZ/langgraph-regression-guard@v0.2.0
+        with:
+          phase: evaluate  # decides from what the other job uploaded; installs no project
+```
+
+- **Require the `lgcov` check.** The candidate job passes whatever it finds.
+- **Keep `if: ${{ !cancelled() }}`.** GitHub counts a skipped required check as passing, so without
+  it, a PR whose code kills the candidate job would pass.
+- **Give both jobs the same inputs.** A different `tier` gives no verdict, and so does a
+  candidate job checked out at another commit: use a plain `actions/checkout` there.
+- **Keys.** The judge keys and `LANGSMITH_API_KEY` go in the job that decides. A changed node that
+  calls a model needs its key in the candidate job, where the PR's code can read it. That is your
+  call, for trusted authors only. With no key the node raises, which reads as an agent failure and
+  exits 1, as on a fork PR.
+- **Other setup.** Steps your project needs before it runs, like a database, go in the candidate job.
+- **The Action's version.** It has to be one with `phase`. An older one warns about the unknown input
+  and runs the whole gate in each job, so the job on the base would pass without looking at the PR.
+- **The artifact.** `lgcov-candidate` holds each run's live outputs for a day, and anyone who can
+  read the repo's Actions can download it. Treat those outputs as you do a committed cassette.
+- **What this can't stop.** The candidate job's upload is the PR's code's word for what it did, so
+  code written to attack the gate can still report a clean run. A same-repo author can also edit the
+  workflow itself. [docs/trust-boundary.md](docs/trust-boundary.md) has the full list.
 
 ### Outcomes
 
@@ -325,7 +425,7 @@ the reviewer's next step and the exit code, including what `mode`, `approved-by`
 | PASS / SHIP | 0 | No drift that `fail-on` cares about, and every blocking KPI, if there is one, is SHIP. |
 | AGENT_FAIL / BLOCK | 1 | Drift that `fail-on` cares about, a blocking KPI is BLOCK, a blocking code check newly fails (even if a re-baseline in the PR hides it), node coverage under `thresholds.min_node_coverage`, or a node in the PR's graph raised; the report names the node (a router by its function name, a node inside subgraph `sub` as `sub.inner`). A node that raises is AGENT_FAIL even with `fail-on: never`: `fail-on` governs drift only. |
 | INCONCLUSIVE | 0, or 1 with the switch | A blocking KPI is neither SHIP nor BLOCK (the KPI table shows the cases it still needs), its judge abstained, or replay left nodes not checked: a divergence with `on-divergence: fail`, or a budget hit. Shown as "⚠️ No decision: needs_human". GitHub's green tick on exit 0 is not a pass, so the comment says that and the Action adds a warning. `fail-on-inconclusive: true` (or `gate.inconclusive_blocks: true`) makes it exit 1. |
-| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, a blocking KPI left with no valid judgment on a side, or the base or candidate commit moved during the run (then no verdict at all, even a BLOCK). Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
+| INFRA_ERROR | 2 | Install, graph import, a missing or broken cassette, network trouble (`TimeoutError`, `ConnectionError`, `httpx.TransportError`) in a judge or a node, a blocking KPI left with no valid judgment on a side, or the base or candidate commit moved during the run (then no verdict at all, even a BLOCK), or a candidate job that left no result the job deciding can use. Reported as "⚠️ Harness error, not a regression", naming the node when it came from one. |
 
 A regression found in the same run wins over a judge's infra error: exit 1. An infra error
 wins over INCONCLUSIVE: exit 2. With `mode: advisory`, every exit 1 becomes 0, and an infra
@@ -365,6 +465,9 @@ fresh replay, and gates each KPI with a paired test (below):
 lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml --samples 3
 ```
 
+- `--from-runs DIR` judges the `base.json` and `head.json` that `lgcov bench --keep-runs`
+  saved in DIR. Nothing is replayed and no graph is loaded, so the agent makes no call; a
+  model judge still makes its own.
 - pass@k: at least one of a case's k samples passes; pass^k: all of them do. A case is
   flaky when it's pass@k but not pass^k. Flakiness is shown as ⚠️ and never changes a
   verdict; an infra error doesn't count toward k and is never a fail.
@@ -430,6 +533,8 @@ How it's computed:
   α = 0.05 and power 0.8, detecting a true 0.05 drop takes 765 (`required_n`, which sizes
   N*); showing the PR is at most 0.05 worse, when it isn't worse at all, takes 704
   (`ni_required_n`). 765 is a detection number, not a non-inferiority or harm one.
+- A blocking KPI's N* is sized at α/K_gate, the strictest level Holm tests at, so with 3
+  blocking KPIs the 765 becomes 1021. An advisory KPI's N* and every MDE stay at α.
 - ρ, the correlation of base and PR outcomes per case, comes from their 2×2 table of
   pass/fail (`rho_from_2x2`), never from two baseline runs. It is undefined when a side
   never varies, and then it drops out of σ_d.
@@ -511,6 +616,9 @@ elsewhere):
 - Blocking takes at least 16 human-failed and 16 human-passed cases with no disagreement:
   at 16/16 the Wilson lower bound is 0.806. In practice, start as Hamel Husain recommends,
   with about 100 diverse traces ([AI Evals FAQ](https://hamel.dev/blog/posts/evals-faq/)).
+- `jev_timeout_s:` in `lgcov.yaml` is how many seconds a Jev judge waits for each of its two
+  attempts (default 10). Raise it when a case is long, such as a whole report with its notes:
+  an attempt that times out is retried once, and the service may charge for both.
 - `jev_model:` in `lgcov.yaml` pins the model Jev judges call (default `jev-latest`), and
   bands.json records the one the labels came from. When they differ, the Jev judges' bands
   drop to flag, with a warning, until `lgcov calibrate` runs again.
@@ -557,6 +665,14 @@ uv run python -m lgcov.docs_lint      # docs/banned-phrases.txt and the tagline;
 ## Roadmap
 
 - Sequential stopping (mSPRT) for the KPI gate.
+- Three case pools, dev, gate and audit, with exposure flowing one way only: what the gate
+  and audit pools contain never reaches whoever writes the PR.
+- Eval pools as an input alongside the baseline cassettes.
+- An adoption path for each change: eligible → human approval → baseline update → merge →
+  deploy.
+
+More planned work is in [the one-pager](docs/guard-one-pager.md#planned-not-on-main-yet)
+and [Why lgcov](docs/why-us.md).
 
 ## License
 

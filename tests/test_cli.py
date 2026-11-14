@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -11,10 +12,16 @@ from unittest.mock import Mock
 import pytest
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
-from lgcov.cassette import replay_run
-from lgcov.cli import main
+from examples.synthetic_agents import AGENTS
+from lgcov.cassette import _codes, _router_prints, replay_run
+from lgcov.cli import _import_file, _l2_judge, _lgcov_root, _load_graph, main
+from lgcov.fingerprint import fingerprint
+from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, NodeState, Verdict
 from lgcov.slices import Group
+from lgcov.synthetic import Case, every_case
+from lgcov.synthetic_score import METHODS, rates, votes_for
+from lgcov.taxonomy import load_taxonomy
 
 
 def test_cli_prints_added_and_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -202,6 +209,9 @@ LGCOV_COMMANDS = (
     "taxonomy draft",
     "taxonomy approve",
     "import langsmith",
+    "round init",
+    "round lock",
+    "round check",
     "round new",
     "guard",
     "bench",
@@ -466,6 +476,193 @@ def test_cli_replay_sees_edit_with_same_size_and_mtime(
     assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
 
 
+# A graph file stays in sys.modules: Python, pydantic and LangGraph look a class's module up there.
+_FUTURE = "from __future__ import annotations\n"
+_TYPED_DICT_STATE = "class State(TypedDict):\n    messages: Annotated[list, add_messages]\n"
+
+
+def _one_node(defs: str, answer: str, future: str = _FUTURE) -> str:
+    return f"""{future}from dataclasses import dataclass
+from typing import Annotated, Generic, Literal, Optional, TypedDict, TypeVar
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.graph.message import add_messages
+from pydantic import BaseModel
+State = MessagesState
+{defs}
+def node(state: State) -> State:
+    return {{"messages": [{{"role": "assistant", "content": {answer}}}]}}
+graph = StateGraph(State).add_node(node).add_edge(START, "node").compile()
+"""
+
+
+_GENERIC = 'T = TypeVar("T")\nclass B(BaseModel, Generic[T]):\n    v: T\nC = B[int]\n'
+_NEEDS_ITS_MODULE = {
+    "dataclass": _one_node('@dataclass\nclass C:\n    text: str = "ok"\n', "C().text"),
+    "pydantic_generic": _one_node(_GENERIC, "str(C(v=1).v)", future=""),
+    "typed_dict_state": _one_node(_TYPED_DICT_STATE, '"ok"'),
+    # This one fails inside the node, so being registered while it loads isn't enough.
+    "pydantic_model": _one_node(
+        'class C(BaseModel):\n    text: Optional[str] = "ok"\n', "C().text"
+    ),
+}
+_CLASSES = 'class R(BaseModel):\n    text: str = "old"\nclass C:\n    reply = R\n'
+_USES_CLASSES = _one_node(_CLASSES, "C.reply().text", future="")
+
+
+def _one_node_project(folder: Path, source: str) -> Path:
+    (folder / "graph.py").write_text(source, encoding="utf-8")
+    (folder / "inputs.json").write_text('[{"messages": [["user", "hi"]]}]', encoding="utf-8")
+    cfg = folder / "lgcov.yaml"
+    entry = f"graph_entrypoint: {folder / 'graph.py'}:graph\n"
+    cfg.write_text(f"{entry}cassette_dir: {folder / 'cassettes'}\n", encoding="utf-8")
+    return cfg
+
+
+@pytest.mark.parametrize("source", _NEEDS_ITS_MODULE.values(), ids=_NEEDS_ITS_MODULE)
+def test_cli_runs_a_graph_file_that_needs_its_module(tmp_path: Path, source: str) -> None:
+    cfg = _one_node_project(tmp_path, source)
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    assert main(["replay", "--live", "--config", str(cfg)]) == 0
+
+
+# The state itself, and a ToolNode tool's arguments, as dataclasses whose hints are strings.
+_FUTURE_GRAPHS = Path(__file__).parent / "fixtures" / "future_annotations.py"
+_FUTURE_ANSWERS = {
+    "dataclass_state": "dataclass state ok",
+    "typed_dict_state": "typed dict state ok",
+    # ToolNode turns a tool's error into its answer, so a crash would still record: check it ran.
+    "tool_node": "Riyadh: sunny for 2 days",
+}
+
+
+@pytest.mark.parametrize(("attr", "answer"), _FUTURE_ANSWERS.items(), ids=_FUTURE_ANSWERS)
+def test_cli_records_future_annotations_with_dataclasses(
+    tmp_path: Path, attr: str, answer: str
+) -> None:
+    source = _FUTURE_GRAPHS.read_text(encoding="utf-8") + f"graph = {attr}\n"
+    cfg = _one_node_project(tmp_path, source)
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    assert answer in (tmp_path / "cassettes" / "baseline.json").read_text(encoding="utf-8")
+    assert main(["replay", "--live", "--config", str(cfg)]) == 0
+
+
+_DATACLASS_IN_STATE = """import operator
+from dataclasses import dataclass, field
+from typing import Annotated
+from langgraph.graph import START, StateGraph
+@dataclass
+class Note:
+    text: str
+@dataclass
+class State:
+    q: str = ""
+    notes: Annotated[list[Note], operator.add] = field(default_factory=list)
+def a(state: State) -> dict[str, object]:
+    return {"notes": [Note(state.q)]}
+def b(state: State) -> dict[str, object]:
+    return {"notes": [Note(state.notes[0].text + "!")]}
+graph = StateGraph(State).add_node(a).add_node(b).add_edge(START, "a").add_edge("a", "b").compile()
+"""
+
+
+def test_cli_replays_a_dataclass_value_in_the_state(tmp_path: Path) -> None:
+    # The cassette saves Note as {"text": ...}; the fresh run's Note must compare equal to it.
+    cfg = _one_node_project(tmp_path, _DATACLASS_IN_STATE)
+    (tmp_path / "inputs.json").write_text('[{"q": "hi"}]', encoding="utf-8")
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    assert main(["replay", "--live", "--config", str(cfg)]) == 0
+    assert main(["replay", "--config", str(cfg)]) == 0
+
+
+def test_cli_ci_runs_head_against_head_after_loading_a_base_of_the_same_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ci loads head, then the base's graph.py, then runs head. pydantic looks `Side` up in
+    # sys.modules at its first use, so it could find the base's and reject "head".
+    reply = 'class R(BaseModel):\n    side: Side\nSide = Literal["head"]\n'
+    source = _one_node(_TYPED_DICT_STATE + reply, 'R(side="head").side')
+    monkeypatch.chdir(tmp_path)
+    cfg = _one_node_project(tmp_path, source)
+    assert main(["record", "--config", str(cfg), "--inputs", "inputs.json"]) == 0
+    (tmp_path / "base").mkdir()
+    base = source.replace('Literal["head"]', 'Literal["base"]')
+    (tmp_path / "base" / "graph.py").write_text(base, encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--base-dir", "base", "--live")
+    assert code == 0
+    assert "No graph changes." in report  # the base needs its module too, to load at all
+
+
+def test_load_graph_leaves_a_package_named_like_the_file_importable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # src/agent/agent.py: registered as `agent`, the file would hide the package it imports,
+    # and left out, its classes would be looked up in that package, where `Annotated` isn't.
+    package = tmp_path / "acme_agent"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "state.py").write_text('TEXT = "ok"\n', encoding="utf-8")
+    source = _one_node(_TYPED_DICT_STATE, "TEXT").replace(
+        "from dataclasses", "from acme_agent.state import TEXT\nfrom dataclasses"
+    )
+    (package / "acme_agent.py").write_text(source, encoding="utf-8")
+    monkeypatch.syspath_prepend(tmp_path)
+    assert _load_graph(f"{package / 'acme_agent.py'}:graph") is not None
+    assert sys.modules["acme_agent"].__file__ == str(package / "__init__.py")
+
+
+def test_load_graph_leaves_a_real_module_named_like_the_file_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "json", json)  # put back after the test, whatever happens
+    path = tmp_path / "json.py"  # a class here counted as the stdlib's, so an edit went unseen
+    path.write_text(_USES_CLASSES, encoding="utf-8")
+    old = _codes(_load_graph(f"{path}:graph"))
+    assert sys.modules["json"] is json
+    path.write_text(_USES_CLASSES.replace('"old"', '"new"'), encoding="utf-8")
+    assert _codes(_load_graph(f"{path}:graph")) != old
+
+
+def test_load_graph_gives_a_node_the_input_its_annotation_names(tmp_path: Path) -> None:
+    # LangGraph narrows a node's input from its annotation, and quietly gives up if it can't
+    # resolve it. Left out of sys.modules, the node saw the whole state, unlike outside lgcov.
+    defs = (
+        "class State(TypedDict):\n    messages: list\n    secret: str\n"
+        "class Asked(TypedDict):\n    secret: Optional[str]\n"
+    )
+    source = _one_node(defs, '",".join(sorted(state))').replace("state: State", "state: Asked")
+    path = tmp_path / "graph.py"
+    path.write_text(source, encoding="utf-8")
+    done = _load_graph(f"{path}:graph").invoke({"messages": [], "secret": "s"})
+    assert done["messages"][0]["content"] == "secret"
+
+
+def test_load_graph_keeps_a_free_stem_and_the_fingerprint_from_before_it_was_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # fingerprint.py asks sys.modules, which now has the file. Its classes still count by what's
+    # in them, so a cassette recorded before it was registered still matches, and edits count.
+    import importlib.util
+
+    from lgcov.fingerprint import fingerprint
+
+    monkeypatch.delitem(sys.modules, "graph", raising=False)
+    path, other = tmp_path / "graph.py", tmp_path / "other" / "graph.py"
+    path.write_text(_USES_CLASSES, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("graph", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    recorded = fingerprint(module.node)
+    monkeypatch.syspath_prepend(tmp_path)  # the file finds itself, which hides nothing
+    assert _codes(_load_graph(f"{path}:graph"))["node"] == recorded is not None
+    assert sys.modules["graph"].__file__ == str(path)
+    # A later file by that name takes it: the earlier one was lgcov's own.
+    other.parent.mkdir()
+    other.write_text(_USES_CLASSES.replace('"old"', '"new"'), encoding="utf-8")
+    assert _codes(_load_graph(f"{other}:graph"))["node"] != recorded
+    assert sys.modules["graph"].__file__ == str(other)
+
+
 # T085: ignore_paths in lgcov.yaml reach `lgcov replay`.
 def test_cli_replay_applies_ignore_paths_from_config(tmp_path: Path) -> None:
     graph = tmp_path / "graph.py"
@@ -535,7 +732,7 @@ def test_cli_replay_serves_unchanged_nodes_unless_live(
     assert "| `a` | root | 2/2 |" in capsys.readouterr().out.splitlines()
 
 
-def test_cli_replay_still_reports_root_and_downstream_drift(
+def test_cli_replay_still_reports_root_and_propagated_drift(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # b's code is unchanged but it reads a's output, so it re-runs once a changes.
@@ -554,7 +751,7 @@ def test_cli_replay_still_reports_root_and_downstream_drift(
     assert main(["replay", "--config", str(cfg)]) == 1
     lines = capsys.readouterr().out.splitlines()
     assert "| `a` | root | 1/1 |" in lines
-    assert "| `b` | downstream | 1/1 |" in lines
+    assert "| `b` | propagated | 1/1 |" in lines
 
 
 def test_cli_replay_reads_a_baseline_recorded_before_node_inputs(
@@ -729,6 +926,8 @@ def test_cli_ci_reports_root_drift_and_sets_outputs(
     assert "fail-on: `root-drift`" in report
     assert outputs == {
         "exit-code": "1",
+        "first-drift": "respond",  # T162
+        "inconclusive-count": "0",
         "propagated-drift-count": "0",
         "report-path": str(tmp_path / "out" / "report.md"),
         "root-drift-count": "1",
@@ -829,7 +1028,82 @@ def test_cli_ci_serves_unchanged_nodes_unless_live(
     # ...and --live re-runs every node, which catches the edit.
     code, report, _ = _run_ci(tmp_path, "--live")
     assert code == 1
-    assert "| `lookup_order` | root | 1/2 |" in report
+    # T162: its code didn't change, so it isn't root; nothing explains the drift, so it blocks.
+    assert "| `lookup_order` | inconclusive (drifted with no changed node before it:" in report
+
+
+# T175: the PR changes one condition in the router: nothing in a node's code, so no node's
+# fingerprint moves, and every run takes the other branch.
+ROUTER_EDIT = ('if state["needs_tool"] else', 'if not state["needs_tool"] else')
+
+
+def test_cli_ci_names_the_routing_node_root_when_the_pr_edits_its_router(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    assert demo.count(ROUTER_EDIT[0]) == 1
+    _ci_project(tmp_path, monkeypatch, demo.replace(*ROUTER_EDIT))
+    code, report, outputs = _run_ci(tmp_path)
+    assert code == 1
+    assert "| `classify` | root (routing change at classify) | 2/2 |" in report
+    assert "| `lookup_order` | propagated | 2/2 |" in report
+    assert "| `respond` | propagated | 2/2 |" in report
+    assert "inconclusive" not in report.split("### Cassette replay")[1].split("###")[0]
+    assert "Unchanged: `classify`" not in report
+    assert outputs["inconclusive-count"] == "0"
+
+
+def test_cli_ci_on_a_baseline_from_before_routers_were_kept_stays_inconclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace(*ROUTER_EDIT))
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    old = json.loads(baseline.read_text(encoding="utf-8"))
+    assert [s.pop("router", None) for r in old["runs"] for s in r["steps"]].count(None) == 3
+    baseline.write_text(json.dumps(old), encoding="utf-8")  # as recorded before T175
+    code, report, _ = _run_ci(tmp_path)
+    assert code == 1
+    assert "| `lookup_order` | inconclusive (drifted with no changed node before it:" in report
+    assert "routing change" not in report
+
+
+# T212: a baseline recorded before fingerprints ignored comments holds the old scheme's values.
+def _baseline_from_before_t212(tmp_path: Path) -> None:
+    graph = _load_graph(f"{DEMO_GRAPH}:graph")
+    routers = _router_prints(graph, raw=True)
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    old = json.loads(baseline.read_text(encoding="utf-8"))
+    for step in (s for r in old["runs"] for s in r["steps"]):
+        node = getattr(_import_file(str(DEMO_GRAPH)), step["node"])
+        step["code"], step["router"] = fingerprint(node, raw=True), routers.get(step["node"])
+        assert step["code"] != _codes(graph)[step["node"]]
+    baseline.write_text(json.dumps(old), encoding="utf-8")
+
+
+@pytest.mark.parametrize("flags", [[], ["--live"]])
+def test_cli_ci_on_a_baseline_from_before_t212_sees_no_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str]
+) -> None:
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
+    _baseline_from_before_t212(tmp_path)
+    code, report, outputs = _run_ci(tmp_path, *flags)
+    assert code == 0 and "0 of 2 runs touched" in report
+    assert (outputs["root-drift-count"], outputs["inconclusive-count"]) == ("0", "0")
+
+
+def test_cli_ci_on_a_baseline_from_before_t212_names_only_what_the_pr_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The flipped router sends the second run to a node only the first run recorded. That node's
+    # code is as recorded, so it must not read as changed: the router's source node is the root.
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo.replace(*ROUTER_EDIT))
+    _baseline_from_before_t212(tmp_path)
+    code, report, _ = _run_ci(tmp_path)
+    assert code == 1
+    assert "root node: `classify`" in report
+    assert "root drift: 1 · propagated drift: 2" in report  # lookup_order is not a second root
 
 
 # T083: `lgcov coverage` from the recorded runs (nothing re-runs), with trend vs main.
@@ -1048,6 +1322,66 @@ def test_cli_judge_refuses_more_model_calls_than_max_calls(
     err = capsys.readouterr().err
     assert "12 model judge calls" in err
     assert "--max-calls 5" in err
+
+
+# T195: `lgcov judge --from-runs` judges the pair `lgcov bench --keep-runs` saved. Nothing is
+# replayed, so no graph is loaded and the agent makes no call.
+SAVED_PAIR = FIXTURES / "bench_runs" / "open_deep_research-163"
+SAVED_TAXONOMY = """\
+version: 1
+system: open_deep_research
+failure_modes:
+  - id: unsupported_claim
+    description: The report says something its notes don't back.
+kpis:
+  - name: report_claims_supported
+    failure_mode: unsupported_claim
+    node: final_report_generation
+    judge: fake
+    description: The 2nd report judged fails; with k=1 that is head's.
+    rubric: Is every claim in the report backed by the notes?
+    check: {fail_every: "2"}
+"""
+
+
+def _saved_args(tmp_path: Path, runs: Path = SAVED_PAIR) -> list[str]:
+    taxonomy = tmp_path / "taxonomy.yaml"
+    taxonomy.write_text(SAVED_TAXONOMY, encoding="utf-8")
+    bands = str(tmp_path / "bands.json")
+    return ["judge", "--from-runs", str(runs), "--taxonomy", str(taxonomy), "--bands", bands]
+
+
+def test_cli_judge_from_runs_judges_the_saved_pair_without_a_graph(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_graph(target: str) -> object:
+        raise AssertionError(f"--from-runs loaded a graph: {target}")
+
+    monkeypatch.setattr("lgcov.cli._load_graph", no_graph)
+    assert main(_saved_args(tmp_path)) == 0  # no --graph, no cassette dir
+    out = capsys.readouterr().out
+    assert "Planned: 2 judge calls, 2 to model judges (--max-calls 200)" in out
+    assert "| report_claims_supported (advisory) | 1 | 100% | 0% |" in out
+
+
+def test_cli_judge_from_runs_refuses_live_and_a_folder_without_the_pair(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([*_saved_args(tmp_path), "--live"]) == 2
+    assert "--from-runs runs nothing" in capsys.readouterr().err
+    assert main(_saved_args(tmp_path, tmp_path / "empty")) == 2
+    assert "base.json" in capsys.readouterr().err
+
+
+def test_cli_judge_from_runs_refuses_sides_with_different_run_counts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for name, runs in (("base.json", 1), ("head.json", 0)):
+        saved = json.loads((SAVED_PAIR / name).read_text(encoding="utf-8"))
+        saved["runs"] = saved["runs"][:runs]
+        (tmp_path / name).write_text(json.dumps(saved), encoding="utf-8")
+    assert main(_saved_args(tmp_path, tmp_path)) == 2
+    assert "1 runs on base, 0 on head" in capsys.readouterr().err
 
 
 def test_cli_judge_needs_a_taxonomy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1311,6 +1645,162 @@ def test_cli_ci_a_check_that_already_failed_on_the_base_is_not_a_new_failure(
     code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--live")
     assert (code, outputs["verdict"]) == (0, "needs_human")  # 2 cases can't SHIP
     assert "code check failed" not in report and "new failure" not in report
+
+
+# T181: tool checks see the tools a run called, read from the AI messages it recorded.
+TOOL_TAXONOMY = """\
+version: 1
+system: demo_agent
+failure_modes:
+  - id: wrong_tool
+    description: An order question stops calling the order lookup, or calls a tool it must not.
+kpis:
+  - name: looks_up_the_order
+    failure_mode: wrong_tool
+    node: lookup_order
+    judge: code
+    description: Every order question calls the lookup_order tool.
+    rubric: Did the run call lookup_order?
+    check: {type: tool_called, tool: lookup_order}
+  - name: never_refunds
+    failure_mode: wrong_tool
+    node: lookup_order
+    judge: code
+    description: No run calls the refund_order tool.
+    rubric: Did the run call refund_order?
+    check: {type: tool_not_called, tool: refund_order}
+"""
+WHOLE_RUN = "node scope not applied to tool checks yet (whole-run)"
+
+
+def _calling_tools(for_999: tuple[str, ...] = ("lookup_order",)) -> str:
+    """The demo with lookup_order asking for its tool in an AIMessage, as a model would, and
+    for the tools in `for_999` instead when the question has 999 in it."""
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    src = (
+        demo.replace(
+            "from typing import Literal, TypedDict\n",
+            "from typing import Annotated, Literal, TypedDict\n\n"
+            "from langchain_core.messages import AIMessage, AnyMessage\n"
+            "from langgraph.graph.message import add_messages\n",
+        )
+        .replace(
+            "    answer: str\n",
+            "    answer: str\n    messages: Annotated[list[AnyMessage], add_messages]\n",
+        )
+        .replace(
+            '    return {"tool_result": "order #42: shipped"}',
+            f'    tools = {list(for_999)!r} if "999" in state["question"] else ["lookup_order"]\n'
+            '    calls = [{"name": t, "args": {}, "id": f"call_{t}"} for t in tools]\n'
+            '    asked = AIMessage("", id="ai-1", tool_calls=calls)\n'
+            '    return {"tool_result": "order #42: shipped", "messages": [asked]}',
+        )
+    )
+    assert "add_messages]" in src and "asked = AIMessage" in src and "Annotated, " in src
+    return src
+
+
+def _tool_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two order questions really recorded on the tool-calling demo, gated on tool checks."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "graph.py").write_text(_calling_tools(), encoding="utf-8")
+    (tmp_path / "taxonomy.yaml").write_text(TOOL_TAXONOMY, encoding="utf-8")
+    (tmp_path / "lgcov.yaml").write_text(
+        "graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n", encoding="utf-8"
+    )
+    questions = ["Where is my order 1?", "Where is my order 999?"]
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text(json.dumps([{"question": q} for q in questions]), encoding="utf-8")
+    assert main(["record", "--inputs", str(inputs)]) == 0
+
+
+def test_cli_ci_a_forbidden_tool_call_fails_its_code_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tool_project(tmp_path, monkeypatch)
+    forbidden = _calling_tools(("lookup_order", "refund_order"))
+    (tmp_path / "graph.py").write_text(forbidden, encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert report.startswith("<!-- lgcov-report -->\n## 🔴 lgcov: code check failed\n")
+    assert (
+        "`never_refunds` passed on the base and fails here on 1 of 2 cases (`run-1/lookup_order`)."
+    ) in report
+    assert "looks_up_the_order" not in report.split("passed on the base")[0]
+    assert WHOLE_RUN in report
+
+
+def test_cli_ci_lookup_order_calling_its_tool_passes_tool_called(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tool_project(tmp_path, monkeypatch)
+    code, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert code == 0 and "code check failed" not in report and "new failure" not in report
+    # It passes on the base: so a PR that stops calling the tool is a new failure.
+    (tmp_path / "graph.py").write_text(_calling_tools(for_999=()), encoding="utf-8")
+    code, report, outputs = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--fail-on", "never")
+    assert (code, outputs["verdict"]) == (1, "fail")
+    assert (
+        "`looks_up_the_order` passed on the base and fails here on 1 of 2 cases "
+        "(`run-1/lookup_order`)."
+    ) in report
+
+
+def test_cli_judge_exits_1_on_a_forbidden_tool_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tool_project(tmp_path, monkeypatch)
+    forbidden = _calling_tools(("lookup_order", "refund_order"))
+    (tmp_path / "graph.py").write_text(forbidden, encoding="utf-8")
+    capsys.readouterr()
+    args = ["judge", "--taxonomy", "taxonomy.yaml", "--bands", str(tmp_path / "bands.json")]
+    assert main(args) == 1
+    out = capsys.readouterr().out
+    assert "| 🔴 new failure: never_refunds on 1 of 2 cases: `run-1/lookup_order` |" in out
+    assert WHOLE_RUN in out
+
+
+# T199: the tally line under the comment's heading. PR 7, the demo PR, makes this change.
+PR_7 = ("a concise support", "a friendly, detailed support")
+
+
+def test_cli_ci_tally_line_for_the_demo_prompt_tweak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo)
+    _, report, _ = _run_ci(tmp_path)
+    assert report.splitlines()[3] == "0 of 2 runs touched · no KPI judged · root node: none"
+    tweaked = demo.replace(*PR_7)
+    assert tweaked != demo
+    (tmp_path / "graph.py").write_text(tweaked, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path)
+    assert report.splitlines()[1:4] == [
+        "## 🔴 lgcov: drift",
+        "",
+        "2 of 2 runs touched · no KPI judged · root node: `respond`",
+    ]
+    # With the demo's taxonomy: neither KPI reads the answer, so the prompt tweak can't lower one.
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", DEMO_TAXONOMY)
+    assert report.splitlines()[3] == "2 of 2 runs touched · 0 worse · root node: `respond`"
+
+
+def test_cli_ci_tally_line_counts_kpi_drops_and_names_the_first_runs_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _order_lookup_project(tmp_path, monkeypatch, ["Where is my order 1?", "Where is my order 999?"])
+    skipping = _skipping_the_lookup_for("999")
+    (tmp_path / "graph.py").write_text(skipping, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    want = "1 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `classify`"
+    assert report.splitlines()[3] == want
+    tweaked = skipping.replace(*PR_7)
+    assert tweaked != skipping
+    (tmp_path / "graph.py").write_text(tweaked, encoding="utf-8")
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml")
+    # Run 1's root comes first; the drift table's sorted list would put `classify` first.
+    want = "2 of 2 runs touched · 1 worse (`order_lookup_runs` 1) · root node: `respond` +1 more"
+    assert report.splitlines()[3] == want
 
 
 @pytest.mark.parametrize(
@@ -2017,16 +2507,27 @@ def test_cli_bench_reports_the_subgraph_miss_as_a_known_gap(tmp_path: Path) -> N
     code, results, md = _bench(tmp_path, str(BENCH))
     assert code == 0  # a report, not a gate
     rows = _rows(results)
-    assert sorted(rows) == ["linear", "send_fanout", "subgraph"]
+    assert sorted(rows) == ["linear", "multi_root", "send_fanout", "subgraph"]
     assert (rows["send_fanout"]["found_root"], rows["send_fanout"]["found_propagated"]) == (
         ["worker_b"],
         ["reducer"],
     )
-    # Drift inside a subgraph is still blamed on `sub`, not `sub.inner`: T109 names crashes only.
-    assert (rows["subgraph"]["found_root"], rows["subgraph"]["expected_root"]) == (
+    # Drift inside a subgraph: `sub` drifts first, but has no fingerprint, so T162 can't call it
+    # root; `sub.inner` isn't recorded (T193).
+    assert (rows["subgraph"]["first_drift"], rows["subgraph"]["expected_root"]) == (
         ["sub"],
         ["sub.inner"],
     )
+    assert (rows["subgraph"]["found_root"], rows["subgraph"]["inconclusive"]) == (
+        [],
+        {"sub": "no fingerprint: a subgraph or the like (T193)"},
+    )
+    # T162: both nodes whose own code changed are root, not just the first to drift.
+    assert (rows["multi_root"]["found_root"], rows["multi_root"]["found_propagated"]) == (
+        ["b", "c"],
+        ["d", "e"],
+    )
+    assert rows["multi_root"]["first_drift"] == ["b"]
     assert "❌ known gap (subgraph)" in md and "## Known gaps" in md
 
 
@@ -2137,6 +2638,50 @@ def test_cli_bench_lists_the_163_row_as_labels_reviewed(tmp_path: Path) -> None:
     assert "| open_deep_research-163 | — | — | — |" in md and "📝 labels reviewed, not run |" in md
 
 
+# T162: the #163 runs stage 1 kept, hashed so they compare as replay does without the model's text
+# (tests/fixtures/bench_runs/README.md). Scoring them costs nothing.
+SAVED_RUNS = FIXTURES / "bench_runs"
+
+
+def test_cli_bench_from_runs_scores_the_saved_163_runs_without_recording(tmp_path: Path) -> None:
+    rows = Path(__file__).resolve().parents[1] / "docs" / "benchmark"
+    code, results, md = _bench(tmp_path, str(rows), "--from-runs", str(SAVED_RUNS))
+    assert code == 0
+    row = _rows(results)["open_deep_research-163"]
+    assert (row["status"], row["error"]) == ("", "")
+    # T162: first-drift attribution said root `write_research_brief` (1 of 6). Saved runs can't
+    # be probed, and a probe of a model node would need a live call (T211), so the nodes whose
+    # code changed are INCONCLUSIVE, not root. `research_supervisor` is a subgraph with no
+    # fingerprint, and the other five roots are its inner nodes, which aren't recorded (T193).
+    assert (row["found_root"], row["first_drift"]) == ([], ["write_research_brief"])
+    assert row["inconclusive"] == {
+        "final_report_generation": "not probed: scored from saved runs",
+        "research_supervisor": "no fingerprint: a subgraph or the like (T193)",
+        "write_research_brief": "not probed: scored from saved runs",
+    }
+    assert row["root"] == {"tp": 0, "fp": 0, "fn": 6, "precision": 0.0, "recall": 0.0, "f1": 0.0}
+    assert "--from-runs" in md
+
+
+def test_cli_bench_from_runs_a_missing_run_is_an_error_row(tmp_path: Path) -> None:
+    rows = Path(__file__).resolve().parents[1] / "docs" / "benchmark"
+    code, results, _ = _bench(tmp_path, str(rows), "--from-runs", str(tmp_path / "none"))
+    assert code == 0
+    row = _rows(results)["open_deep_research-163"]
+    assert "base.json" in str(row["error"])
+
+
+@pytest.mark.parametrize(
+    "other", [["--live"], ["--keep-runs", "kept"], ["--synthetic"], ["--noise-repeats", "3"]]
+)
+def test_cli_bench_from_runs_refuses_what_would_run_the_agent(
+    tmp_path: Path, other: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(["bench", "--from-runs", str(SAVED_RUNS), *other])
+    assert code == 2
+    assert "--from-runs" in capsys.readouterr().err
+
+
 # T106: `lgcov taxonomy draft` proposes, `lgcov taxonomy approve` is the human's yes.
 def _draft_args(tmp_path: Path) -> list[str]:
     from fixtures.drafting import TEAM
@@ -2202,6 +2747,15 @@ def test_cli_taxonomy_draft_takes_its_client_from_a_file(tmp_path: Path) -> None
     ]
     assert main(["taxonomy", "draft", *args]) == 0
     assert "id: skipped_lookup" in out.read_text(encoding="utf-8")
+
+
+def test_cli_taxonomy_draft_loads_a_client_that_needs_its_module(tmp_path: Path) -> None:
+    client = CLIENT.replace("class Client:", '@dataclass\nclass Client:\n    name: str = "x"\n')
+    (tmp_path / "client.py").write_text(
+        f"{_FUTURE}from dataclasses import dataclass\n{client}", encoding="utf-8"
+    )
+    args = [*_draft_args(tmp_path), "--out", str(tmp_path / "draft.yaml")]
+    assert main(["taxonomy", "draft", *args, "--client", f"{tmp_path / 'client.py'}:Client"]) == 0
 
 
 def test_cli_taxonomy_draft_needs_a_client(
@@ -2459,3 +3013,133 @@ def test_cli_ci_makes_no_langsmith_call_with_link_false(
     section = "{dataset: support-qa, link: false}"
     code, report = _ci_langsmith(tmp_path, monkeypatch, fake, section=section, key=False)
     assert (code, fake.calls) == (0, []) and "LangSmith" not in report
+
+
+def test_bench_synthetic_writes_its_section_and_keeps_the_rest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    md, results = tmp_path / "benchmark.md", tmp_path / "results.json"
+    md.write_text("# B\n\n## Real PRs\n\nby hand\n", encoding="utf-8")
+    code = main(["bench", "--synthetic", "--out", str(md), "--json", str(results)])
+    assert code == 0
+    doc = md.read_text(encoding="utf-8")
+    assert doc.index("## Synthetic") < doc.index("## Real PRs") and "by hand" in doc
+    raw = json.loads(results.read_text(encoding="utf-8"))
+    assert raw["cases"] >= 50
+    assert raw["all_edits"][0]["method"] == "lgcov root"
+    assert "## Synthetic" in capsys.readouterr().out
+
+
+def test_bench_synthetic_scores_lgcovs_real_root_not_the_first_divergence(tmp_path: Path) -> None:
+    results = tmp_path / "results.json"
+    main(["bench", "--synthetic", "--out", str(tmp_path / "b.md"), "--json", str(results)])
+    raw = json.loads(results.read_text(encoding="utf-8"))
+    roots = {row["method"]: row["cases"] for row in raw["all_edits"]}
+    assert roots["lgcov root"]["recall"]["of"] == roots["first divergence"]["recall"]["of"] == 31
+
+
+@pytest.mark.parametrize("extra", [["--only", "x"], ["--keep-runs", "x"], ["--live"], ["some/dir"]])
+def test_bench_synthetic_refuses_what_only_the_fixture_bench_takes(
+    extra: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["bench", "--synthetic", *extra]) == 2
+    assert "--synthetic" in capsys.readouterr().err
+
+
+def test_bench_synthetic_outside_a_checkout_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("lgcov.cli._synthetic_agents", Mock(side_effect=ModuleNotFoundError("x")))
+    assert main(["bench", "--synthetic", "--out", str(tmp_path / "b.md")]) == 2
+    assert "repo checkout" in capsys.readouterr().err
+
+
+def test_bench_without_synthetic_keeps_its_default_results_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["bench", str(BENCH), "--only", "linear", "--out", "b.md"]) == 0
+    assert (tmp_path / "docs" / "benchmark-results.json").exists()
+
+
+def test_bench_names_a_changed_router_s_source_node_root(tmp_path: Path) -> None:
+    # T175: scored from saved runs, as `lgcov bench --from-runs` does. No node's code changed.
+    from lgcov.attribution import parse_benchmark
+    from lgcov.cassette import Cassette, Step, runs_to_json
+    from lgcov.cli import _bench_saved
+
+    raw = {"graph": "g.py:graph", "base_patch": "b.py", "head_patch": "h.py", "cases": [{}]}
+    expected = {"root": ["classify"], "propagated": ["respond"]}
+    bench = parse_benchmark("routed", {**raw, "expected": expected}, tmp_path)
+    (tmp_path / "routed").mkdir()
+    for name, router, answer in (("base.json", "r1", "a"), ("head.json", "r2", "b")):
+        steps = [Step("classify", 1, {}, "c1", router=router), Step("respond", answer, {}, "c2")]
+        (tmp_path / "routed" / name).write_text(runs_to_json([Cassette({}, steps)]), "utf-8")
+    row = _bench_saved(bench, tmp_path)
+    assert (row.error, row.inconclusive) == ("", ())
+    assert (row.found_root, row.found_propagated) == (("classify",), ("respond",))
+
+
+def _real_suite() -> list[Case]:
+    return [case for agent in AGENTS for case in every_case(agent)]
+
+
+def test_on_single_node_edits_the_first_divergence_ties_lgcovs_root_on_every_score() -> None:
+    cases = [c for c in _real_suite() if c.truth.edit_kind == "node_body"]
+    assert rates([votes_for(_lgcov_root, c) for c in cases]) == rates(
+        [votes_for(METHODS["first divergence"], c) for c in cases]
+    )
+
+
+def test_on_a_conditional_edge_edit_lgcovs_root_is_the_edge_s_source_node() -> None:
+    # T175: `classify` for a router edit, `plan` for a dropped Send. Its output didn't change, so
+    # the first divergence is a node downstream and never the edited one.
+    edge = [c for c in _real_suite() if c.truth.edit_kind == "conditional_edge"]
+    changed = [c for c in edge if c.truth.activated]
+    assert {c.operator for c in changed} == {"router_flip", "send_fan_out_drop"}
+    assert all(_lgcov_root(c) == {c.truth.edited_node} for c in changed)
+    assert not any(c.truth.edited_node in METHODS["first divergence"](c) for c in changed)
+    assert all(_lgcov_root(c) == set() for c in edge if not c.truth.activated)
+
+
+def test_on_the_real_suite_the_diff_matches_or_beats_lgcov_on_recall_and_coverage() -> None:
+    single = [c for c in _real_suite() if c.truth.edit_kind == "node_body"]
+    ours = rates([votes_for(_lgcov_root, c) for c in single])
+    diff = rates([votes_for(METHODS["edited node from the diff"], c) for c in single])
+    for mine, theirs in ((ours.recall, diff.recall), (ours.coverage, diff.coverage)):
+        assert mine.value is not None and theirs.value is not None and mine.value <= theirs.value
+
+
+def test_every_single_node_miss_lgcov_makes_is_parent_only_naming_of_a_subgraph() -> None:
+    misses = [
+        (c.truth.edited_node, _lgcov_root(c))
+        for c in _real_suite()
+        if c.truth.edit_kind == "node_body"
+        and c.truth.activated
+        and c.truth.edited_node not in _lgcov_root(c)
+    ]
+    assert misses and all(found == ("sub.inner", {"sub"}) for found in misses)
+
+
+def test_docs_benchmark_md_holds_the_current_synthetic_section(tmp_path: Path) -> None:
+    fresh = tmp_path / "b.md"
+    assert main(["bench", "--synthetic", "--out", str(fresh), "--json", str(tmp_path / "r")]) == 0
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "benchmark.md").read_text("utf-8")
+    undated = re.compile(r"^Run \d{4}-\d\d-\d\d:", re.MULTILINE)
+    assert undated.sub("Run:", fresh.read_text("utf-8")).strip() in undated.sub("Run:", doc)
+
+
+def test_a_jev_judge_takes_its_model_and_timeout_from_lgcov_yaml() -> None:
+    # T195: jev_timeout_s reaches the judge `lgcov judge` and `lgcov ci` build
+    spec = next(
+        s
+        for s in load_taxonomy(
+            str(Path(__file__).resolve().parents[1] / "docs" / "taxonomy.yaml")
+        ).kpi_specs
+        if s.judge == "jev"
+    )
+    judge = _l2_judge(spec, "gpt-6-luna", 120.0)
+    assert isinstance(judge, JevJudge)
+    assert (judge.model, judge.timeout_s) == ("gpt-6-luna", 120.0)
+    default = _l2_judge(spec)
+    assert isinstance(default, JevJudge) and default.timeout_s == 10.0

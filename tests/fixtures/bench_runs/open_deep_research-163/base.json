@@ -1,0 +1,39 @@
+{
+ "runs": [
+  {
+   "inputs": {},
+   "steps": [
+    {
+     "code": "b03c978230b1bc28",
+     "goto": [
+      "900cf1c9e130ae39"
+     ],
+     "input": "0b327486d5735428",
+     "node": "clarify_with_user",
+     "output": "74234e98afe7498f"
+    },
+    {
+     "code": "c445a0b02125eda7",
+     "goto": [
+      "ce0ff4250408ba1c"
+     ],
+     "input": "0b327486d5735428",
+     "node": "write_research_brief",
+     "output": "9b2f4cc0bb951d39"
+    },
+    {
+     "code": null,
+     "input": "74234e98afe7498f",
+     "node": "research_supervisor",
+     "output": "60005e729523e128"
+    },
+    {
+     "code": "faea5ef7a2a9056c",
+     "input": "b335f5b4898afcbf",
+     "node": "final_report_generation",
+     "output": "31c33ed1575dbf4b"
+    }
+   ]
+  }
+ ]
+}
