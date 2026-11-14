@@ -1,6 +1,6 @@
 # Attribution benchmark
 
-**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. Re-scored offline with the multi-root rule (T162), the pilot's saved runs name no root: see [Multi-root re-score](#multi-root-re-score-t162). On 72 synthetic cases from 24 edits, lgcov's root misses 3 of 31 regressed cases (1 of 12 by edit) and flags all 24 harmless ones, as do both node-naming baselines.
+**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. Re-scored offline with the multi-root rule (T162), the pilot's saved runs name no root: see [Multi-root re-score](#multi-root-re-score-t162). On 72 synthetic cases from 24 edits, the labels `lgcov ci` ships miss 3 of 31 regressed cases (1 of 12 by edit) and name a root on 21 of 24 harmless ones; both node-naming baselines flag all 24. Counted per node, root precision is 0.47 (28 of 60), below the 0.57 (28 of 49) by case: on all 11 router and fan-out cases lgcov names a second root, a node only one side ran.
 
 ## What was measured
 
@@ -11,8 +11,9 @@ Each kind of evidence has its own section, and their numbers never combine: demo
 ## Limitations
 
 - **One real PR (n=1).** Both runs are the same PR and question, so they aren't two data points.
-- **The edited-node baseline beats lgcov on single-node edits,** on recall, 1.00 (20 of 20) against 0.85 (17 of 20), and on coverage, 1.00 (44 of 44) against 0.86 (38 of 44). lgcov is ahead only on case-level precision, 0.39 against 0.35: see [Synthetic](#synthetic).
-- **No harmless-edit discrimination yet.** lgcov and both node-naming baselines flag 24 of 24 harmless synthetic cases; negative controls (T123) and non-pinnable edits (T182) are the next tests.
+- **The edited-node baseline beats lgcov on single-node edits,** on recall, 1.00 (20 of 20) against 0.85 (17 of 20), and on coverage, 1.00 (44 of 44) against 0.86 (38 of 44). lgcov is ahead only on case-level precision, 0.45 against 0.35: see [Synthetic](#synthetic).
+- **A router or fan-out edit gets a second root.** On all 11 such synthetic cases lgcov names the routing node and also a node only base or only the PR ran, so 11 of the 60 nodes it names root (0.18) are that kind, and exact match on all edits is 0.55 (17 of 31) against 0.85 (17 of 20) on single-node edits. Reported, not fixed: see [Per node](#per-node).
+- **No harmless-edit discrimination yet.** lgcov names a root on 21 of 24 harmless synthetic cases and leaves the other 3 inconclusive, and both node-naming baselines flag 24 of 24; negative controls (T123) and non-pinnable edits (T182) are the next tests.
 - **Synthetic cases come from our own generator,** so they share its assumptions about what an edit looks like; real PRs (T171) are the check.
 - **Usage counts are pending.** Request, token and error counts for the `gpt-6-luna` runs and the pilot still have to come from the usage page: see [Cost per run](#cost-per-run).
 - **lgcov's root label has no noise threshold.** Base run against itself gave the same root and propagated labels as both #163 runs, so #163's 1 of 1 can't be told apart from model noise, and real-PR root precision doesn't test the kill criterion yet: see [A/A noise floor](#aa-noise-floor).
