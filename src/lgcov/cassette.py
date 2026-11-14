@@ -781,6 +781,31 @@ def compared_run(
     return Replay(drifts, tuple(fresh), tuple(calls), halt, not_checked)
 
 
+def same_input(
+    cassette: Cassette, fresh: Sequence[Step], ignore_paths: Sequence[str] = ()
+) -> set[str]:
+    """T230: the nodes this run gave the same input as its recording did, compared as outputs
+    are: masked, and in any order across a node's steps. A node with a step whose input wasn't
+    kept, or isn't JSON, is left out: nothing is known about it."""
+
+    def inputs(steps: Sequence[Step]) -> dict[str, list[str] | None]:
+        out: dict[str, list[str] | None] = {}
+        for s in steps:
+            held = out.setdefault(s.node, [])
+            try:
+                text = json.dumps(normalize(s.input, ignore_paths), sort_keys=True)
+            except (TypeError, ValueError):
+                text = None
+            if s.input is None or text is None or held is None:
+                out[s.node] = None
+            else:
+                held.append(text)
+        return {n: v and sorted(v) for n, v in out.items()}
+
+    base, head = inputs(cassette.steps), inputs(fresh)
+    return {n for n, v in base.items() if v is not None and head.get(n) == v}
+
+
 class _Refused(BaseException):
     # T162: the probe tried the network. Not an Exception, so an SDK's retry loop can't catch it
     # and sleep before trying again.

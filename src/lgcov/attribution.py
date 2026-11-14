@@ -221,7 +221,8 @@ NEEDS_LIVE = "needs live probe; noise threshold pending T211"
 NOT_PROBED = "not probed: scored from saved runs"
 NO_FINGERPRINT = "no fingerprint: a subgraph or the like (T193)"
 UNEXPLAINED = (
-    "drifted with no changed node before it: a change outside node code, or an edited recording"
+    "drifted with no changed node before it: a change outside node code, an edited recording, "
+    "or a live call's variation"
 )
 ROUTING = "routing change at {}"  # T175: why a node whose own output didn't drift is root
 
@@ -333,16 +334,24 @@ def explain_runs(
     drifted: Sequence[Collection[str]],
     routers: tuple[Mapping[str, str | None], Mapping[str, str | None]] = ({}, {}),
     ran: Sequence[Sequence[str]] = (),
+    same_input: Sequence[Collection[str]] = (),
 ) -> NodeLabels:
-    """T162: a run that drifted with no root or inconclusive node in it has a cause no node's
-    fingerprint shows: an edge, a router, a Send, or an edited recording. Its first drifted node is
-    inconclusive, so `fail-on: root-drift` still fails on it, as first-drift attribution did.
+    """T162: a run whose first drifted node is neither root nor inconclusive has a cause no node's
+    fingerprint shows: an edge, a router, a Send, an edited recording, or a live call's variation.
+    That node is inconclusive, so `fail-on: root-drift` still fails on it, as first-drift
+    attribution did. T230: a root or inconclusive node after it explains nothing about it.
+
+    T230: propagated means the node's input differed. A node labelled propagated that drifted in a
+    run where both sides gave it the same input (`same_input`, by run) is inconclusive too,
+    wherever it ran: in a parallel branch it can come after an unrelated root. Empty when the
+    inputs aren't known, which leaves the first-drift rule.
 
     T175: unless a router explains it. A node whose router fingerprint changed (`routers`: base's
     and head's, by source node) is root of each run where a node drifted after it, by base's order
     (`ran`), beside any root the run already has. A router with no fingerprint on either side, as
-    in a recording from before they were kept, explains nothing. Not checked: that the run took
-    another branch. A router edit that routes as before is root of drift a changed node caused."""
+    in a recording from before they were kept, explains nothing. A router that ran after the
+    run's first drifted node doesn't explain that node. Not checked: that the run took another
+    branch. A router edit that routes as before is root of drift a changed node caused."""
     base, head = routers
     edited = {n for n, code in base.items() if code and head.get(n) and head[n] != code}
     unsure = dict(labels.inconclusive)
@@ -352,8 +361,12 @@ def explain_runs(
         after = {r for r in edited & set(order) if set(nodes) - set(order[: order.index(r) + 1])}
         for router in after:
             routing[router] = routing.get(router, 0) + 1
-        if first and not after and not ({*labels.root, *unsure} & set(nodes)):
+        reached = order[: order.index(first) + 1] if first in order else order
+        if first and not after & set(reached) and first not in {*labels.root, *unsure}:
             unsure[first] = UNEXPLAINED
+        same = set(same_input[i]) if i < len(same_input) else set()
+        for node in same & set(nodes) & set(labels.propagated):
+            unsure[node] = UNEXPLAINED
     propagated = tuple(n for n in labels.propagated if n not in unsure)
     root = tuple(sorted({*labels.root, *routing}))
     return NodeLabels(root, propagated, unsure, dict(sorted(routing.items())))

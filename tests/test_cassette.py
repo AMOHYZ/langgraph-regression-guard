@@ -1,12 +1,13 @@
 import contextlib
 import dataclasses
+import operator
 import random
 import socket
 import time
 from collections.abc import Callable, Hashable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Annotated, TypedDict, cast
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from lgcov.cassette import (
     _plain,
     _router_prints,
     changed_nodes,
+    compared_run,
     judge_probes,
     judge_repeats,
     probe_nodes,
@@ -33,6 +35,7 @@ from lgcov.cassette import (
     repeat_steps,
     replay,
     replay_run,
+    same_input,
     unservable,
 )
 from lgcov.cli import _import_file
@@ -793,3 +796,44 @@ def test_a_docstring_edit_counts_for_a_node_function_a_toolnode_exposes(tmp_path
     base = record(_doc_graph(tmp_path / "base.py", _DOC_GRAPH), {"x": 1})
     head = _doc_graph(tmp_path / "head.py", _DOC_GRAPH.replace("Add two to x.", "Double x."))
     assert changed_nodes(head, [base]) == {"shared"}
+
+
+# T230: which nodes got the same input on both sides, so drift there isn't propagated.
+class _Seen(TypedDict, total=False):
+    x: int
+    seen: Annotated[list[int], operator.add]
+
+
+def _branches(b_adds: int, c_adds: int) -> CompiledStateGraph[_Seen]:
+    def a(state: _Seen) -> _Seen:
+        return {"x": state["x"]}
+
+    def b(state: _Seen) -> _Seen:
+        return {"seen": [state["x"] + b_adds]}
+
+    def c(state: _Seen) -> _Seen:
+        return {"seen": [state["x"] * 10 + c_adds]}
+
+    def d(state: _Seen) -> _Seen:
+        return {"x": sum(state["seen"])}
+
+    g = StateGraph(_Seen)
+    g.add_node("a", a)
+    g.add_node("b", b)
+    g.add_node("c", c)
+    g.add_node("d", d)
+    g.add_edge(START, "a")
+    for branch in ("b", "c"):
+        g.add_edge("a", branch)
+        g.add_edge(branch, "d")
+    g.add_edge("d", END)
+    return g.compile()
+
+
+def test_same_input_names_the_nodes_both_sides_gave_the_same_input() -> None:
+    base, head = record(_branches(0, 0), {"x": 1}), record(_branches(1, 1), {"x": 1})
+    assert {d.node for d in compared_run(base, head.steps, (), None).drifts} == {"b", "c", "d"}
+    assert same_input(base, head.steps) == {"a", "b", "c"}  # d's differs: it saw b's and c's
+    assert same_input(base, base.steps) == {"a", "b", "c", "d"}
+    blank = [dataclasses.replace(s, input=None) for s in head.steps]
+    assert same_input(base, blank) == set()  # an old recording: nothing is known
