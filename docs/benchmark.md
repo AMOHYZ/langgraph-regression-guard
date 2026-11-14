@@ -123,7 +123,7 @@ Each question re-run with no edit. These runs aren't in the case count.
 
 ### Noise rule
 
-The noise rule (`drift_exceeds_noise`), on the seeded-noise agent at K=3: the recording and 3 repeats on base, 3 samples on head. `lgcov bench --noise-repeats` runs these repeats on an agent, but not on a real one yet, and the gate still compares one sample. It names drift only when head's nearest sample is further from base than base's samples are from each other, so it misses a shift smaller than the spread. Below the threshold a node reads `no drift detected above noise (K=3)`: not cleared, since a small regression can sit inside the spread and the KPI judge decides that. The noise here is ours (1 answer in 5 is cut short), so these rates say how the rule behaves, not what a real model would give.
+The noise rule (`drift_exceeds_noise`), on the seeded-noise agent at K=3: the recording and 3 repeats on base, 3 samples on head. `lgcov bench --noise-repeats` runs these repeats on an agent, on a real one once so far, with no change and no false alarm, and the gate still compares one sample. It names drift only when head's nearest sample is further from base than base's samples are from each other, so it misses a shift smaller than the spread. Below the threshold a node reads `no drift detected above noise (K=3)`: not cleared, since a small regression can sit inside the spread and the KPI judge decides that. The noise here is ours (1 answer in 5 is cut short), so these rates say how the rule behaves, not what a real model would give.
 
 | Agent | Arm | Head's edit | Runs | Named drift | Reads as |
 |---|---|---|---|---|---|

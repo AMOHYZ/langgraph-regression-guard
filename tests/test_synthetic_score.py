@@ -217,6 +217,9 @@ def test_the_noise_rule_table_states_false_alarms_and_misses_and_never_says_clea
     )
     assert "| 0.34 (68 of 200) | caught; missed 0.66 (132 of 200) |" in section
     assert "`no drift detected above noise (K=3)`: not cleared" in section
+    # T232: it has run on a real model once, with no change. One run is not a rate.
+    assert "but not on a real one yet" not in section
+    assert "on a real one once so far, with no change and no false alarm" in section
     assert json.loads(report_json(report))["noise_rule"][1]["flagged"] == 68
     assert "### Noise rule" not in render_section(_report())  # nothing measured: no table
 
