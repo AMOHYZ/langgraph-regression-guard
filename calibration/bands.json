@@ -2,6 +2,8 @@
   "jev_model": null,
   "judges": {
     "answer_states_order_status": {
+      "agreed_failures": 18,
+      "agreed_passes": 19,
       "band": "flag",
       "brier": 0.0675,
       "kappa": [
