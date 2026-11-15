@@ -122,10 +122,9 @@ T182 found gaps that a schema change can name but not always close.
 - **An input that isn't JSON gets no key** (`_key` returns None). That node keeps no input or
   code, so it is never served, and its drift reads "no fingerprint: a subgraph or the like
   (T193)", which names the wrong cause. At `0173e8a` a pydantic state was such an input (check 7).
-  A fix, `1b0e45c` on the branch `fix/pydantic-state-key`, keys it by its fields, as a TypedDict
-  state is keyed, and rebuilds the class for the probe. An input that holds another pydantic
-  object, such as a `Document`, still gets no key. That was run with the fix, in a TypedDict state
-  and in a pydantic one.
+  Since #156 a pydantic state is keyed by its fields, as a TypedDict state is, and the probe
+  rebuilds the class. An input that holds another pydantic object, such as a `Document`, still
+  gets no key. That was run with #156's code, in a TypedDict state and in a pydantic one.
 
 ## 3. Six questions
 
