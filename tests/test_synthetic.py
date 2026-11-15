@@ -6,14 +6,25 @@ from collections import Counter
 from dataclasses import replace
 from functools import cache
 from pathlib import Path
-from types import ModuleType
+from types import FunctionType, ModuleType
+from typing import Any
 
 import pytest
 import yaml
+from langgraph.pregel import Pregel
 
 from examples.demo_agent.graph import graph as demo_graph
 from examples.demo_agent.mutations import MUTATIONS, NOT_ON_DEMO, build, outcome_ok
-from examples.synthetic_agents import AGENTS, DEMO, FANOUT, fanout, subgraph
+from examples.synthetic_agents import (
+    AGENTS,
+    DEMO,
+    FANOUT,
+    SHARED_AGENTS,
+    SUPPORT,
+    fanout,
+    subgraph,
+    support,
+)
 from lgcov.cassette import Cassette, Step, record, replay_run, runs_from_json
 from lgcov.snapshot import snapshot_from_compiled
 from lgcov.synthetic import (
@@ -21,11 +32,14 @@ from lgcov.synthetic import (
     Case,
     Label,
     Mutation,
+    SharedCase,
     aa_arms,
     every_case,
+    every_shared_case,
     generate,
     noise_rule_rates,
     same_run,
+    shared_case,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -409,3 +423,144 @@ def test_the_noise_rule_is_measured_with_no_change_and_at_two_shift_sizes() -> N
     assert noise_rule_rates(FANOUT) == ()  # no noisy model
     flagged = {arm: r.flagged for arm, r in rates.items()}
     assert flagged == {"no change": 1, "small shift": 68, "large shift": 112}  # of 200 each
+
+
+# T182: edits the diff can't pin to one node, on the demo-shaped support agent. A case's truth
+# comes from outcome checks and single-node runs, never from fingerprints.
+STATUS = "Order status?"
+
+
+def test_a_shared_helper_edit_is_rooted_where_its_single_node_runs_say() -> None:
+    edit = next(e for e in support.EDITS["shared_helper"] if "keeps" in e.variant)
+    base = record(support.graph, {"question": STATUS})
+    case = shared_case("shared_helper", edit, base, support.outcome_ok)
+    assert case.truth.touched == {"classify", "respond"}
+    assert case.truth.label == "regressed"
+    # Only classify's change fails the outcome check: "Order" no longer reads as an order.
+    assert case.truth.regression_roots == {"classify"}
+    # respond's own output moves too, harmlessly: a drift root, not a regression root.
+    assert case.truth.drift_roots == {"classify", "respond"}
+
+
+# The agent, the class, a word from the edit, the question, its label, its regression roots and
+# its drift roots: what the outcome check and the single-node runs said, pinned.
+C, L, R, AR = "classify", "lookup_order", "respond", "answer.respond"
+SHARED_TABLE: list[tuple[str, str, str, str, Label, tuple[str, ...], tuple[str, ...]]] = [
+    ("support", "shared_helper", "case", ORDER, "benign", (), (R,)),
+    ("support", "shared_helper", "case", STATUS, "regressed", (C,), (C, R)),
+    ("support", "shared_helper", "case", HOURS, "benign", (), (R,)),
+    ("support", "shared_helper", "customer asks", ORDER, "regressed", (R,), (R,)),
+    ("support", "shared_helper", "customer asks", STATUS, "benign", (), (R,)),
+    ("support", "shared_helper", "customer asks", HOURS, "benign", (), (R,)),
+    ("support", "shared_helper", "squeezes", ORDER, "inert", (), ()),
+    ("support", "shared_helper", "squeezes", STATUS, "inert", (), ()),
+    ("support", "shared_helper", "squeezes", HOURS, "inert", (), ()),
+    ("support", "shared_model_swap", "5 char", ORDER, "regressed", (C, R), (C, R)),
+    ("support", "shared_model_swap", "5 char", STATUS, "regressed", (C, R), (C, R)),
+    ("support", "shared_model_swap", "5 char", HOURS, "benign", (), (R,)),
+    ("support", "shared_model_swap", "80 char", ORDER, "benign", (), (R,)),
+    ("support", "shared_model_swap", "80 char", STATUS, "benign", (), (R,)),
+    ("support", "shared_model_swap", "80 char", HOURS, "benign", (), (R,)),
+    ("support", "shared_config", "to 12", ORDER, "regressed", (L,), (L, R)),
+    ("support", "shared_config", "to 12", STATUS, "regressed", (L,), (L, R)),
+    ("support", "shared_config", "to 12", HOURS, "benign", (), (R,)),
+    ("support", "shared_config", "to 30", ORDER, "inert", (), ()),
+    ("support", "shared_config", "to 30", STATUS, "inert", (), ()),
+    ("support", "shared_config", "to 30", HOURS, "inert", (), ()),
+    ("support-nested", "shared_helper", "case", ORDER, "benign", (), (AR,)),
+    ("support-nested", "shared_helper", "case", STATUS, "regressed", (C,), (C, AR)),
+    ("support-nested", "shared_helper", "case", HOURS, "benign", (), (AR,)),
+    ("support-nested", "shared_helper", "customer asks", ORDER, "regressed", (AR,), (AR,)),
+    ("support-nested", "shared_helper", "customer asks", STATUS, "benign", (), (AR,)),
+    ("support-nested", "shared_helper", "customer asks", HOURS, "benign", (), (AR,)),
+    ("support-client", "shared_model_swap", "fake-5", ORDER, "regressed", (C, R), (C, R)),
+    ("support-client", "shared_model_swap", "fake-5", STATUS, "regressed", (C, R), (C, R)),
+    ("support-client", "shared_model_swap", "fake-5", HOURS, "benign", (), (R,)),
+]
+
+
+@cache
+def _shared() -> tuple[SharedCase, ...]:
+    return tuple(case for agent in SHARED_AGENTS for case in every_shared_case(agent))
+
+
+def test_every_shared_case_gets_the_truth_its_runs_give() -> None:
+    edits = {case.edit for case in _shared()}
+
+    def variant(agent: str, operator: str, word: str) -> str:
+        (found,) = [v for a, o, v in edits if (a, o) == (agent, operator) and word in v]
+        return found
+
+    expected = {
+        (agent, operator, variant(agent, operator, word), question): (
+            label,
+            frozenset(r),
+            frozenset(d),
+        )
+        for agent, operator, word, question, label, r, d in SHARED_TABLE
+    }
+    found = {
+        (*case.edit, case.base.inputs["question"]): (
+            case.truth.label,
+            case.truth.regression_roots,
+            case.truth.drift_roots,
+        )
+        for case in _shared()
+    }
+    assert found == expected
+    assert not any(case.truth.joint for case in _shared())
+
+
+def _functions(graph: Any) -> dict[str, FunctionType]:
+    """Each plain-function node, by the name the bench gives it: <node>.<inner> in a subgraph.
+    Any: as in lgcov.cassette.record."""
+    found: dict[str, FunctionType] = {}
+    for name, spec in graph.nodes.items():
+        if isinstance(spec.bound, Pregel):
+            found |= {f"{name}.{inner}": fn for inner, fn in _functions(spec.bound).items()}
+        elif isinstance(getattr(spec.bound, "func", None), FunctionType):
+            found[name] = spec.bound.func
+    return found
+
+
+def test_an_edit_touches_the_nodes_whose_code_names_what_it_changes_and_no_other() -> None:
+    for agent in SHARED_AGENTS:
+        base = _functions(agent.graph)
+        for edit in (edit for edits in agent.edits.values() for edit in edits):
+            ours = _functions(edit.graph)
+            changed = {node for node, fn in ours.items() if fn is not base[node]}
+            names = {
+                name
+                for node in changed
+                for name, value in ours[node].__globals__.items()
+                if base[node].__globals__.get(name) is not value
+            }
+            readers = {node for node, fn in base.items() if names & set(fn.__code__.co_names)}
+            assert names and changed == readers == edit.touched, edit.variant
+            for node, alone in edit.alone.items():  # the edit in that node only
+                assert {n for n, fn in _functions(alone).items() if fn is not base[n]} == {node}
+
+
+def test_the_three_builds_answer_alike_and_pass_their_outcome_check() -> None:
+    for question in SUPPORT.questions:
+        runs = [record(agent.graph, {"question": question}) for agent in SHARED_AGENTS]
+        assert all(support.outcome_ok(run) for run in runs)
+        assert len({run.steps[-1].output["answer"] for run in runs}) == 1
+
+
+def test_a_shared_case_needs_a_passing_base_and_one_build_per_touched_node() -> None:
+    edit = support.EDITS["shared_helper"][0]
+    failing = record(support.graph, {"question": "Where is my order number 42 right now?"})
+    with pytest.raises(ValueError, match="fails the outcome check"):
+        shared_case("shared_helper", edit, failing, support.outcome_ok)
+    with pytest.raises(ValueError, match="one single-node build"):
+        replace(edit, alone={"classify": edit.alone["classify"]})
+
+
+def test_generating_every_shared_case_opens_no_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a T182 case tried to reach the network")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    for agent in SHARED_AGENTS:
+        every_shared_case(agent)

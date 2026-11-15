@@ -222,3 +222,101 @@ def noise_rule_rates(agent: Agent, k: int = 3, runs: int = 200) -> tuple[NoiseRa
             flagged += drift_exceeds_noise(base, heads)
         rates.append(NoiseRate(arm, what, k, runs, flagged))
     return tuple(rates)
+
+
+@dataclass(frozen=True)
+class SharedEdit:
+    """T182: an edit to code 2+ nodes reach (a helper, a model name, a config default), so the
+    diff names no single node."""
+
+    touched: frozenset[str]  # every node whose code reaches the edit: what the diff can name
+    variant: str  # what the edit does, for a reader
+    graph: Any  # the agent with the edit everywhere it reaches. Any: as in Mutation
+    alone: Mapping[str, Any]  # each touched node: the agent with the edit in that node only
+
+    def __post_init__(self) -> None:
+        if set(self.alone) != self.touched:
+            raise ValueError("an edit needs one single-node build for each node it touches")
+
+
+@dataclass(frozen=True)
+class SharedTruth:
+    """T182: read from outcome checks and single-node runs, never from fingerprints."""
+
+    touched: frozenset[str]
+    activated: bool  # the PR run went differently
+    regressed: bool  # the PR run fails the outcome check, which base passes
+    # A touched node where the edit, applied at that node only and with every other node as on
+    # base, makes the run fail the outcome check. Empty unless the case regressed.
+    regression_roots: frozenset[str]
+    # A touched node whose own output changes when the edit is applied at that node only, with
+    # every other node as on base.
+    drift_roots: frozenset[str]
+    joint: bool = False  # regressed, though no node fails alone: its drift roots stand in
+
+    @property
+    def label(self) -> Label:
+        return "regressed" if self.regressed else "benign" if self.activated else "inert"
+
+
+@dataclass(frozen=True)
+class SharedCase:
+    operator: str
+    variant: str
+    base: Cassette
+    pr: Cassette
+    truth: SharedTruth
+    graph: Any  # the edited agent, as in Case
+    agent: str = ""
+
+    @property
+    def edit(self) -> tuple[str, str, str]:
+        return (self.agent, self.operator, self.variant)
+
+
+@dataclass(frozen=True)
+class SharedAgent:
+    """T182: an agent and its edits the diff can't pin to one node. Apart from `Agent`, so T121's
+    suite, its A/A arms and its counts stay as they are."""
+
+    name: str
+    graph: Any  # as in Mutation
+    questions: tuple[str, ...]
+    edits: Mapping[str, tuple[SharedEdit, ...]]
+    outcome_ok: Callable[[Cassette], bool]
+
+
+def shared_case(
+    operator: str, edit: SharedEdit, base: Cassette, outcome_ok: Callable[[Cassette], bool]
+) -> SharedCase:
+    """T182: the PR run of base's input, and one more run per touched node with the edit in that
+    node only. With deterministic nodes, such a run changes exactly when that node's own output
+    does: every node before it ran as on base."""
+    if not outcome_ok(base):
+        raise ValueError("the recorded run fails the outcome check")
+    pr = record(edit.graph, base.inputs, like=[base])
+    alone = {node: record(graph, base.inputs, like=[base]) for node, graph in edit.alone.items()}
+    drift = frozenset(node for node, run in alone.items() if not same_run(run, base))
+    failed = frozenset(node for node, run in alone.items() if not outcome_ok(run))
+    regressed = not outcome_ok(pr)
+    joint = regressed and not failed
+    truth = SharedTruth(
+        edit.touched,
+        activated=not same_run(pr, base),
+        regressed=regressed,
+        regression_roots=(drift if joint else failed) if regressed else frozenset(),
+        drift_roots=drift,
+        joint=joint,
+    )
+    return SharedCase(operator, edit.variant, base, pr, truth, edit.graph)
+
+
+def every_shared_case(agent: SharedAgent) -> tuple[SharedCase, ...]:
+    """T182: each edit on each question, once, as `every_case` runs T121's edits."""
+    bases = [record(agent.graph, {"question": question}) for question in agent.questions]
+    return tuple(
+        replace(shared_case(operator, edit, base, agent.outcome_ok), agent=agent.name)
+        for operator, edits in agent.edits.items()
+        for edit in edits
+        for base in bases
+    )
