@@ -3,13 +3,14 @@ anything in it, so it says what ran, never what that means, and one that isn't e
 is refused."""
 
 import json
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from lgcov.attribution import NEEDS_LIVE
 from lgcov.candidate import CandidateRun, FreshRun, candidate_to_json, parse_candidate
-from lgcov.cassette import Call, Halt, ProbeStep, Step
+from lgcov.cassette import Call, Halt, ProbeStep, Step, runs_from_json
 from lgcov.snapshot import Edge, GraphSnapshot
 
 HEAD = GraphSnapshot(frozenset({"a", "b"}), frozenset({Edge("a", "b")}))
@@ -101,6 +102,28 @@ def _with_run(**changes: object) -> dict[str, object]:
 
 GOOD_CALL = {"node": "a", "how": "live", "seconds": 0.5, "rebind_skipped": False, "raised": False}
 GOOD_PROBE = {"run": 0, "step": 0, "node": "a", "output": None, "goto": None, "raised": ""}
+# T193, PR 1 part 2: read candidate schema 3 before anything writes it, as schema 2 was (#114
+# before #113). Its steps are units, here the schema-2 recording fixture's. A probe names its unit
+# by its position down the tree, and a router's probe carries `routed`. Head's parts and its
+# repeats come along. Nothing acts on them yet.
+RECORDING_2 = (Path(__file__).parent / "fixtures" / "schema2_recording.json").read_text("utf-8")
+PROBE_3 = {"run": 0, "unit": [1, 0], "node": "search", "output": 1, "goto": None, "raised": ""}
+ROUTER_PROBE = {**PROBE_3, "unit": [0], "node": "plan", "output": None, "routed": ["tools"]}
+SCHEMA_3 = {
+    **BODY,
+    "schema": 3,
+    "runs": [{"steps": json.loads(RECORDING_2)["runs"][0]["steps"], "calls": [], "halt": None}],
+    "probes": [PROBE_3, ROUTER_PROBE],
+    "parts": {"plan": "a1", "prompt": None},
+    "repeats": [{**PROBE_3, "unit": [0], "node": "plan", "output": {"x": 2}}],
+}
+
+
+def _with_unit(**changes: object) -> dict[str, object]:
+    step = {"node": "a", "output": 1, **changes}
+    return {**SCHEMA_3, "runs": [{"steps": [step], "calls": [], "halt": None}]}
+
+
 REFUSED = {
     "a list": [],
     "empty": {},
@@ -147,6 +170,20 @@ REFUSED = {
     "a message with no content": _with_run(
         steps=[{"node": "a", "output": {"langchain_message": {"type": "ai", "data": 1}}}]
     ),
+    "schema 3's fields in schema 2": {**BODY, "parts": {}},
+    "a schema 3 probe by step index": {**SCHEMA_3, "probes": [GOOD_PROBE]},
+    "a schema 3 probe at no position": {**SCHEMA_3, "probes": [{**PROBE_3, "unit": []}]},
+    "a position that isn't numbers": {**SCHEMA_3, "probes": [{**PROBE_3, "unit": ["1"]}]},
+    "routes that aren't a list": {**SCHEMA_3, "probes": [{**ROUTER_PROBE, "routed": "tools"}]},
+    "repeats that aren't probes": {**SCHEMA_3, "repeats": [1]},
+    "parts that aren't fingerprints": {**SCHEMA_3, "parts": {"plan": 1}},
+    "a unit of no known kind": _with_unit(kind="model"),
+    "units that aren't a list": _with_unit(units={}),
+    "a unit inside with an extra field": _with_unit(units=[{"node": "b", "output": 1, "x": 1}]),
+    "a status that isn't text": _with_unit(status=1),
+    "a call id that isn't text": _with_unit(call_id=1),
+    "a unit's parts that aren't names": _with_unit(parts=[1]),
+    "a sample with no output": _with_unit(samples=[{"goto": None}]),
 }
 
 
@@ -167,3 +204,31 @@ def test_a_file_from_another_lgcov_version_says_so() -> None:
         ValueError, match="^candidate file schema 1, evaluator needs 2: run the same"
     ):
         parse_candidate(json.dumps({**BODY, "schema": 1}))
+
+
+def test_a_schema_3_file_with_every_field_loads() -> None:
+    run = parse_candidate(json.dumps(SCHEMA_3))
+    assert run.fresh[0].steps == tuple(runs_from_json(RECORDING_2)[0].steps)  # read as recorded
+    search, plan = run.probes
+    assert (search.step, search.inner, search.node, search.routed) == (1, [0], "search", None)
+    assert (plan.step, plan.inner, plan.output, plan.routed) == (0, None, None, ["tools"])
+    assert run.parts == {"plan": "a1", "prompt": None}
+    assert run.repeats == (ProbeStep(0, 0, "plan", {"x": 2}),)
+
+
+def test_a_unit_s_status_may_be_any_text() -> None:
+    # T248 hasn't settled its values.
+    run = parse_candidate(json.dumps(_with_unit(status="a value T248 never named")))
+    assert run.fresh[0].steps[0].status == "a value T248 never named"
+
+
+def test_a_file_from_a_newer_lgcov_is_refused_by_its_number() -> None:
+    with pytest.raises(ValueError, match="^candidate file schema 4; this lgcov reads 2 and 3$"):
+        parse_candidate(json.dumps({**BODY, "schema": 4}))
+
+
+def test_this_lgcov_still_writes_schema_2_with_probes_by_step_index() -> None:
+    body = json.loads(candidate_to_json(RUN))
+    assert body["schema"] == 2
+    by_index = {"run", "step", "node", "output", "goto", "raised"}
+    assert all(set(p) == by_index for p in body["probes"])

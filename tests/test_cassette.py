@@ -639,6 +639,13 @@ def test_a_probe_that_matches_no_recorded_step_is_refused(forged: ProbeStep) -> 
         judge_probes([base], [forged])
 
 
+def test_judge_probes_leaves_a_probe_inside_a_step_or_of_a_router_to_a_later_lgcov() -> None:
+    # T193, T221: candidate schema 3 can hold either. No label reads one yet, so neither decides.
+    base = record(_one_node(lambda s: s), {"x": 1})
+    inner, router = ProbeStep(0, 0, "inner", 1, inner=[0]), ProbeStep(0, 0, "n", routed=["b"])
+    assert judge_probes([base], [inner, router]) == {}
+
+
 # T175: a conditional edge's router is in no node's fingerprint, so its source node's steps keep
 # one for it.
 def _branching(threshold: int, ends: dict[Hashable, str] | None = None) -> CompiledStateGraph[S]:
