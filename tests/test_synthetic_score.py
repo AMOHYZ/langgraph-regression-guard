@@ -1,13 +1,24 @@
 """T121: scoring the synthetic suite: pure rates on small hand-made votes, then the real suite."""
 
 import json
+import re
 from collections.abc import Set
 from dataclasses import replace
 from functools import cache
 
 from examples.synthetic_agents import AGENTS, DEMO, FANOUT
 from lgcov.cassette import Cassette, Step, record
-from lgcov.synthetic import Case, GroundTruth, NoiseRate, aa_arms, every_case, generate
+from lgcov.synthetic import (
+    Case,
+    GroundTruth,
+    Label,
+    NoiseRate,
+    SharedCase,
+    SharedTruth,
+    aa_arms,
+    every_case,
+    generate,
+)
 from lgcov.synthetic_score import (
     METHODS,
     Found,
@@ -23,6 +34,8 @@ from lgcov.synthetic_score import (
     render_section,
     replace_section,
     report_json,
+    set_score,
+    shared_report,
     votes_for,
 )
 
@@ -312,3 +325,86 @@ def test_the_section_scores_the_shipped_labels_first_and_the_older_rule_beside_t
 
 def test_a_report_without_shipped_labels_has_no_per_node_table() -> None:
     assert _report().per_node == () and "### Per node" not in render_section(_report())
+
+
+# T182: edits the diff can't pin to one node, scored against two truths. The doc carries the
+# definitions word for word.
+REGRESSION_ROOT = (
+    "**Regression root:** a touched node where the edit, applied at that node only and with every "
+    "other node as on base, makes the run fail the outcome check."
+)
+DRIFT_ROOT = (
+    "**Drift root:** a touched node whose own output changes when the edit is applied at that "
+    "node only, with every other node as on base."
+)
+CLAIMS_DRIFT = (
+    "lgcov's root label claims drift, not harm, since this run has no judges. So a harmless change "
+    'lgcov names, like respond\'s on "Order status?", is a correct root under drift roots and a '
+    "false root under regression roots."
+)
+
+
+def _shared(
+    label: Label, regression: Set[str] = frozenset(), drift: Set[str] = frozenset()
+) -> SharedCase:
+    base = Cassette({"question": "q"}, [Step("a", 1)])
+    pr = Cassette({"question": "q"}, [Step("a", 1 if label == "inert" else 2)])
+    touched = frozenset({"classify", "respond", "answer.respond"})
+    regressed, activated = label == "regressed", label != "inert"
+    truth = SharedTruth(touched, activated, regressed, frozenset(regression), frozenset(drift))
+    return SharedCase("shared_helper", "edit", base, pr, truth, None, "support")
+
+
+def _shared_found() -> list[tuple[SharedCase, Found]]:
+    return [
+        # respond's change is harmless: a drift root, and not a regression root
+        (
+            _shared("regressed", {"classify"}, {"classify", "respond"}),
+            _found({"classify", "respond"}),
+        ),
+        (_shared("benign", drift={"respond"}), _found({"respond"})),
+        (_shared("regressed", {"answer.respond"}, {"answer.respond"}), _found(set(), {"answer"})),
+        (_shared("inert"), _found(set())),
+    ]
+
+
+def test_a_set_score_counts_each_named_node_against_either_truth() -> None:
+    harm = set_score(_shared_found(), "regression")
+    assert (harm.precision, harm.recall, harm.exact) == (Rate(1, 3), Rate(1, 2), Rate(0, 2))
+    assert (harm.false_flag, harm.inconclusive) == (Rate(1, 1), 1)
+    drift = set_score(_shared_found(), "drift")
+    assert (drift.precision, drift.recall, drift.exact) == (Rate(3, 3), Rate(3, 4), Rate(2, 3))
+    assert (drift.false_flag, drift.inconclusive) == (None, 1)
+
+
+def _with_shared() -> Report:
+    changed = {("support", "shared_helper", "edit"): frozenset({"classify"})}
+    return replace(_report(), shared=shared_report(_shared_found(), changed))
+
+
+def test_the_t182_table_states_both_truths_word_for_word_with_counts() -> None:
+    section = render_section(_with_shared())
+    table = section[section.index("### Edits the diff can't pin to one node") :]
+    assert REGRESSION_ROOT in table and DRIFT_ROOT in table and CLAIMS_DRIFT in table
+    assert "#### Against regression roots" in table and "#### Against drift roots" in table
+    assert "| Shared helper (support) | lgcov root | 0.33 (1 of 3) | 0.50 (1 of 2) |" in table
+    assert "undefined here" in table and "all touched nodes" in table
+    assert "[Limitations](#limitations)" in table  # the own-generator limit, which stays
+    assert not re.findall(r"\b(beats?|wins?|won)\b|95%|Wilson", table)
+
+
+def test_the_json_holds_the_t182_rows_and_every_case() -> None:
+    raw = json.loads(report_json(_with_shared()))["shared"]
+    assert (raw["cases"], raw["edits"]) == (4, 1)
+    assert raw["labels"] == {"regressed": 2, "benign": 1, "inert": 1}
+    row = next(r for r in raw["rows"] if (r["edits"], r["method"]) == ("All", "lgcov root"))
+    assert row["drift"]["precision"]["hits"] == 3 and row["regression"]["false_flag"]["of"] == 1
+    assert row["fingerprint_saw"] == {"hits": 1, "of": 3, "value": 1 / 3}
+    assert len(raw["per_case"]) == 4
+    assert raw["per_case"][0]["drift_roots"] == ["classify", "respond"]
+    assert raw["per_case"][2]["lgcov_inconclusive"] == ["answer"]
+
+
+def test_a_report_without_t182_cases_has_no_t182_table() -> None:
+    assert "### Edits the diff can't pin" not in render_section(_report())
+    assert json.loads(report_json(_report()))["shared"] is None

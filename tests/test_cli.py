@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Callable
+from dataclasses import replace
 from importlib.metadata import EntryPoint
 from pathlib import Path
 from unittest.mock import Mock
@@ -12,9 +13,18 @@ from unittest.mock import Mock
 import pytest
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
-from examples.synthetic_agents import AGENTS
+from examples.synthetic_agents import AGENTS, SUPPORT, SUPPORT_CLIENT, SUPPORT_NESTED
 from lgcov.attribution import UNEXPLAINED, Benchmark, NodeLabels, NoiseCheck
-from lgcov.cassette import Cassette, Step, _codes, _router_prints, compared_run, replay_run
+from lgcov.cassette import (
+    Cassette,
+    Step,
+    _codes,
+    _router_prints,
+    changed_nodes,
+    compared_run,
+    record,
+    replay_run,
+)
 from lgcov.cli import (
     _import_file,
     _l2_judge,
@@ -22,14 +32,15 @@ from lgcov.cli import (
     _lgcov_root,
     _load_graph,
     _node_labels,
+    _shipped,
     main,
 )
 from lgcov.fingerprint import fingerprint
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, NodeState, Verdict
 from lgcov.slices import Group
-from lgcov.synthetic import Case, every_case
-from lgcov.synthetic_score import METHODS, rates, votes_for
+from lgcov.synthetic import Case, SharedAgent, SharedCase, every_case, shared_case
+from lgcov.synthetic_score import METHODS, Found, rates, votes_for
 from lgcov.taxonomy import load_taxonomy
 
 
@@ -3448,3 +3459,41 @@ def test_bench_synthetic_names_no_root_just_because_one_side_ran_it(tmp_path: Pa
     every = json.loads(results.read_text(encoding="utf-8"))["per_node"][0]
     assert every["one_sided"]["hits"] == 0
     assert every["exact"] == every["recall"]  # each case names its one root, or none
+
+
+# T182: what `lgcov ci` ships on edits the diff can't pin to one node.
+def _shared_case(agent: SharedAgent, word: str, question: str) -> SharedCase:
+    (operator, edit), *_ = [
+        (op, e) for op, edits in agent.edits.items() for e in edits if word in e.variant
+    ]
+    base = record(agent.graph, {"question": question})
+    return replace(shared_case(operator, edit, base, agent.outcome_ok), agent=agent.name)
+
+
+def test_ci_names_no_root_inside_a_subgraph_and_t193_should_change_that() -> None:
+    # T220's gap, offline: the helper edit changes respond's answer, but there respond runs inside
+    # the subgraph `answer`, which has no fingerprint. T193 should make this `answer.respond`
+    # root, as on the flat build. Today's behaviour, pinned on purpose: not an xfail.
+    nested = _shared_case(SUPPORT_NESTED, "customer asks", "Where is my order?")
+    assert nested.truth.regression_roots == {"answer.respond"}
+    found = _shipped(nested, set(SUPPORT_NESTED.graph.nodes))
+    assert found == Found(frozenset(), frozenset({"answer"}))
+    flat = _shared_case(SUPPORT, "customer asks", "Where is my order?")
+    assert _shipped(flat, set(SUPPORT.graph.nodes)).root == {"respond"}
+
+
+def test_ci_sees_no_model_swap_inside_a_plain_client_object() -> None:
+    # A module-level object counts by its class and its repr, and this client's repr hides its
+    # model: no fingerprint changes, every node is served from the recording, no drift is seen.
+    case = _shared_case(SUPPORT_CLIENT, "fake-5", "Where is my order?")
+    assert case.truth.label == "regressed"
+    assert changed_nodes(case.graph, [case.base]) == set()
+    assert _shipped(case, set(SUPPORT_CLIENT.graph.nodes)) == Found(frozenset())
+
+
+def test_bench_synthetic_writes_the_t182_table(tmp_path: Path) -> None:
+    results = tmp_path / "results.json"
+    main(["bench", "--synthetic", "--out", str(tmp_path / "b.md"), "--json", str(results)])
+    shared = json.loads(results.read_text(encoding="utf-8"))["shared"]
+    assert (shared["cases"], shared["edits"], len(shared["per_case"])) == (30, 10, 30)
+    assert "### Edits the diff can't pin to one node" in (tmp_path / "b.md").read_text("utf-8")

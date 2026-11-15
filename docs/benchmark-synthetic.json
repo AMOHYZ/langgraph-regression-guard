@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-14",
+  "date": "2026-11-15",
   "cases": 72,
   "edits": 24,
   "agents": 3,
@@ -626,5 +626,1661 @@
         "value": 0.0
       }
     }
-  ]
+  ],
+  "shared": {
+    "cases": 30,
+    "edits": 10,
+    "builds": 3,
+    "labels": {
+      "benign": 14,
+      "regressed": 10,
+      "inert": 6
+    },
+    "rows": [
+      {
+        "edits": "Shared helper (support)",
+        "method": "lgcov root",
+        "regression": {
+          "precision": {
+            "hits": 2,
+            "of": 7,
+            "value": 0.2857142857142857
+          },
+          "recall": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 1,
+            "of": 2,
+            "value": 0.5
+          },
+          "false_flag": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 7,
+            "of": 7,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 7,
+            "of": 7,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 6,
+            "of": 6,
+            "value": 1.0
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": {
+          "hits": 6,
+          "of": 6,
+          "value": 1.0
+        }
+      },
+      {
+        "edits": "Shared helper (support)",
+        "method": "edited node from the diff: all touched nodes",
+        "regression": {
+          "precision": {
+            "hits": 2,
+            "of": 18,
+            "value": 0.1111111111111111
+          },
+          "recall": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 0,
+            "of": 2,
+            "value": 0.0
+          },
+          "false_flag": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 7,
+            "of": 18,
+            "value": 0.3888888888888889
+          },
+          "recall": {
+            "hits": 7,
+            "of": 7,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 1,
+            "of": 6,
+            "value": 0.16666666666666666
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "Shared helper (support)",
+        "method": "first divergence",
+        "regression": {
+          "precision": {
+            "hits": 2,
+            "of": 6,
+            "value": 0.3333333333333333
+          },
+          "recall": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "false_flag": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 6,
+            "of": 6,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 6,
+            "of": 7,
+            "value": 0.8571428571428571
+          },
+          "exact": {
+            "hits": 5,
+            "of": 6,
+            "value": 0.8333333333333334
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "Shared helper (support-nested)",
+        "method": "lgcov root",
+        "regression": {
+          "precision": {
+            "hits": 1,
+            "of": 1,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 1,
+            "of": 2,
+            "value": 0.5
+          },
+          "exact": {
+            "hits": 1,
+            "of": 2,
+            "value": 0.5
+          },
+          "false_flag": {
+            "hits": 0,
+            "of": 4,
+            "value": 0.0
+          },
+          "inconclusive": 5
+        },
+        "drift": {
+          "precision": {
+            "hits": 1,
+            "of": 1,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 1,
+            "of": 7,
+            "value": 0.14285714285714285
+          },
+          "exact": {
+            "hits": 0,
+            "of": 6,
+            "value": 0.0
+          },
+          "false_flag": null,
+          "inconclusive": 5
+        },
+        "fingerprint_saw": {
+          "hits": 2,
+          "of": 4,
+          "value": 0.5
+        }
+      },
+      {
+        "edits": "Shared helper (support-nested)",
+        "method": "edited node from the diff: all touched nodes",
+        "regression": {
+          "precision": {
+            "hits": 2,
+            "of": 12,
+            "value": 0.16666666666666666
+          },
+          "recall": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 0,
+            "of": 2,
+            "value": 0.0
+          },
+          "false_flag": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 7,
+            "of": 12,
+            "value": 0.5833333333333334
+          },
+          "recall": {
+            "hits": 7,
+            "of": 7,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 1,
+            "of": 6,
+            "value": 0.16666666666666666
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "Shared helper (support-nested)",
+        "method": "first divergence",
+        "regression": {
+          "precision": {
+            "hits": 1,
+            "of": 6,
+            "value": 0.16666666666666666
+          },
+          "recall": {
+            "hits": 1,
+            "of": 2,
+            "value": 0.5
+          },
+          "exact": {
+            "hits": 1,
+            "of": 2,
+            "value": 0.5
+          },
+          "false_flag": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 1,
+            "of": 6,
+            "value": 0.16666666666666666
+          },
+          "recall": {
+            "hits": 1,
+            "of": 7,
+            "value": 0.14285714285714285
+          },
+          "exact": {
+            "hits": 0,
+            "of": 6,
+            "value": 0.0
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "Model swap (support)",
+        "method": "lgcov root",
+        "regression": {
+          "precision": {
+            "hits": 4,
+            "of": 8,
+            "value": 0.5
+          },
+          "recall": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "false_flag": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 8,
+            "of": 8,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 8,
+            "of": 8,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 6,
+            "of": 6,
+            "value": 1.0
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": {
+          "hits": 4,
+          "of": 4,
+          "value": 1.0
+        }
+      },
+      {
+        "edits": "Model swap (support)",
+        "method": "edited node from the diff: all touched nodes",
+        "regression": {
+          "precision": {
+            "hits": 4,
+            "of": 12,
+            "value": 0.3333333333333333
+          },
+          "recall": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "false_flag": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 8,
+            "of": 12,
+            "value": 0.6666666666666666
+          },
+          "recall": {
+            "hits": 8,
+            "of": 8,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 2,
+            "of": 6,
+            "value": 0.3333333333333333
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "Model swap (support)",
+        "method": "first divergence",
+        "regression": {
+          "precision": {
+            "hits": 2,
+            "of": 6,
+            "value": 0.3333333333333333
+          },
+          "recall": {
+            "hits": 2,
+            "of": 4,
+            "value": 0.5
+          },
+          "exact": {
+            "hits": 0,
+            "of": 2,
+            "value": 0.0
+          },
+          "false_flag": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 6,
+            "of": 6,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 6,
+            "of": 8,
+            "value": 0.75
+          },
+          "exact": {
+            "hits": 4,
+            "of": 6,
+            "value": 0.6666666666666666
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "Model swap (support-client)",
+        "method": "lgcov root",
+        "regression": {
+          "precision": {
+            "hits": 0,
+            "of": 0,
+            "value": null
+          },
+          "recall": {
+            "hits": 0,
+            "of": 4,
+            "value": 0.0
+          },
+          "exact": {
+            "hits": 0,
+            "of": 2,
+            "value": 0.0
+          },
+          "false_flag": {
+            "hits": 0,
+            "of": 1,
+            "value": 0.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 0,
+            "of": 0,
+            "value": null
+          },
+          "recall": {
+            "hits": 0,
+            "of": 5,
+            "value": 0.0
+          },
+          "exact": {
+            "hits": 0,
+            "of": 3,
+            "value": 0.0
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": {
+          "hits": 0,
+          "of": 2,
+          "value": 0.0
+        }
+      },
+      {
+        "edits": "Model swap (support-client)",
+        "method": "edited node from the diff: all touched nodes",
+        "regression": {
+          "precision": {
+            "hits": 4,
+            "of": 6,
+            "value": 0.6666666666666666
+          },
+          "recall": {
+            "hits": 4,
+            "of": 4,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "false_flag": {
+            "hits": 1,
+            "of": 1,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 5,
+            "of": 6,
+            "value": 0.8333333333333334
+          },
+          "recall": {
+            "hits": 5,
+            "of": 5,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 2,
+            "of": 3,
+            "value": 0.6666666666666666
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "Model swap (support-client)",
+        "method": "first divergence",
+        "regression": {
+          "precision": {
+            "hits": 2,
+            "of": 3,
+            "value": 0.6666666666666666
+          },
+          "recall": {
+            "hits": 2,
+            "of": 4,
+            "value": 0.5
+          },
+          "exact": {
+            "hits": 0,
+            "of": 2,
+            "value": 0.0
+          },
+          "false_flag": {
+            "hits": 1,
+            "of": 1,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 3,
+            "of": 3,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 3,
+            "of": 5,
+            "value": 0.6
+          },
+          "exact": {
+            "hits": 1,
+            "of": 3,
+            "value": 0.3333333333333333
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "Shared config (support)",
+        "method": "lgcov root",
+        "regression": {
+          "precision": {
+            "hits": 2,
+            "of": 5,
+            "value": 0.4
+          },
+          "recall": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 0,
+            "of": 2,
+            "value": 0.0
+          },
+          "false_flag": {
+            "hits": 1,
+            "of": 1,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 5,
+            "of": 5,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 5,
+            "of": 5,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 3,
+            "of": 3,
+            "value": 1.0
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": {
+          "hits": 4,
+          "of": 4,
+          "value": 1.0
+        }
+      },
+      {
+        "edits": "Shared config (support)",
+        "method": "edited node from the diff: all touched nodes",
+        "regression": {
+          "precision": {
+            "hits": 2,
+            "of": 12,
+            "value": 0.16666666666666666
+          },
+          "recall": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 0,
+            "of": 2,
+            "value": 0.0
+          },
+          "false_flag": {
+            "hits": 1,
+            "of": 1,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 5,
+            "of": 12,
+            "value": 0.4166666666666667
+          },
+          "recall": {
+            "hits": 5,
+            "of": 5,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 2,
+            "of": 3,
+            "value": 0.6666666666666666
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "Shared config (support)",
+        "method": "first divergence",
+        "regression": {
+          "precision": {
+            "hits": 2,
+            "of": 3,
+            "value": 0.6666666666666666
+          },
+          "recall": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 2,
+            "of": 2,
+            "value": 1.0
+          },
+          "false_flag": {
+            "hits": 1,
+            "of": 1,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 3,
+            "of": 3,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 3,
+            "of": 5,
+            "value": 0.6
+          },
+          "exact": {
+            "hits": 1,
+            "of": 3,
+            "value": 0.3333333333333333
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "All",
+        "method": "lgcov root",
+        "regression": {
+          "precision": {
+            "hits": 9,
+            "of": 21,
+            "value": 0.42857142857142855
+          },
+          "recall": {
+            "hits": 9,
+            "of": 14,
+            "value": 0.6428571428571429
+          },
+          "exact": {
+            "hits": 4,
+            "of": 10,
+            "value": 0.4
+          },
+          "false_flag": {
+            "hits": 9,
+            "of": 14,
+            "value": 0.6428571428571429
+          },
+          "inconclusive": 5
+        },
+        "drift": {
+          "precision": {
+            "hits": 21,
+            "of": 21,
+            "value": 1.0
+          },
+          "recall": {
+            "hits": 21,
+            "of": 32,
+            "value": 0.65625
+          },
+          "exact": {
+            "hits": 15,
+            "of": 24,
+            "value": 0.625
+          },
+          "false_flag": null,
+          "inconclusive": 5
+        },
+        "fingerprint_saw": {
+          "hits": 16,
+          "of": 20,
+          "value": 0.8
+        }
+      },
+      {
+        "edits": "All",
+        "method": "edited node from the diff: all touched nodes",
+        "regression": {
+          "precision": {
+            "hits": 14,
+            "of": 60,
+            "value": 0.23333333333333334
+          },
+          "recall": {
+            "hits": 14,
+            "of": 14,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 4,
+            "of": 10,
+            "value": 0.4
+          },
+          "false_flag": {
+            "hits": 14,
+            "of": 14,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 32,
+            "of": 60,
+            "value": 0.5333333333333333
+          },
+          "recall": {
+            "hits": 32,
+            "of": 32,
+            "value": 1.0
+          },
+          "exact": {
+            "hits": 8,
+            "of": 24,
+            "value": 0.3333333333333333
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      },
+      {
+        "edits": "All",
+        "method": "first divergence",
+        "regression": {
+          "precision": {
+            "hits": 9,
+            "of": 24,
+            "value": 0.375
+          },
+          "recall": {
+            "hits": 9,
+            "of": 14,
+            "value": 0.6428571428571429
+          },
+          "exact": {
+            "hits": 5,
+            "of": 10,
+            "value": 0.5
+          },
+          "false_flag": {
+            "hits": 14,
+            "of": 14,
+            "value": 1.0
+          },
+          "inconclusive": 0
+        },
+        "drift": {
+          "precision": {
+            "hits": 19,
+            "of": 24,
+            "value": 0.7916666666666666
+          },
+          "recall": {
+            "hits": 19,
+            "of": 32,
+            "value": 0.59375
+          },
+          "exact": {
+            "hits": 11,
+            "of": 24,
+            "value": 0.4583333333333333
+          },
+          "false_flag": null,
+          "inconclusive": 0
+        },
+        "fingerprint_saw": null
+      }
+    ],
+    "end_to_end_caught": {
+      "hits": 10,
+      "of": 10,
+      "value": 1.0
+    },
+    "end_to_end_false": {
+      "hits": 14,
+      "of": 14,
+      "value": 1.0
+    },
+    "per_case": [
+      {
+        "agent": "support",
+        "operator": "shared_helper",
+        "edit": "clean keeps the question's case",
+        "question": "Where is my order?",
+        "label": "benign",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_helper",
+        "edit": "clean keeps the question's case",
+        "question": "Order status?",
+        "label": "regressed",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [
+          "classify"
+        ],
+        "drift_roots": [
+          "classify",
+          "respond"
+        ],
+        "lgcov_root": [
+          "classify",
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "classify"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_helper",
+        "edit": "clean keeps the question's case",
+        "question": "What are your hours?",
+        "label": "benign",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_helper",
+        "edit": "clean puts \"customer asks: \" first",
+        "question": "Where is my order?",
+        "label": "regressed",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [
+          "respond"
+        ],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_helper",
+        "edit": "clean puts \"customer asks: \" first",
+        "question": "Order status?",
+        "label": "benign",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_helper",
+        "edit": "clean puts \"customer asks: \" first",
+        "question": "What are your hours?",
+        "label": "benign",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_helper",
+        "edit": "clean also squeezes repeated spaces",
+        "question": "Where is my order?",
+        "label": "inert",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [],
+        "first_divergence": [],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_helper",
+        "edit": "clean also squeezes repeated spaces",
+        "question": "Order status?",
+        "label": "inert",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [],
+        "first_divergence": [],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_helper",
+        "edit": "clean also squeezes repeated spaces",
+        "question": "What are your hours?",
+        "label": "inert",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [],
+        "first_divergence": [],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_model_swap",
+        "edit": "the model keeps 5 characters, not 40",
+        "question": "Where is my order?",
+        "label": "regressed",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [
+          "classify",
+          "respond"
+        ],
+        "drift_roots": [
+          "classify",
+          "respond"
+        ],
+        "lgcov_root": [
+          "classify",
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "classify"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_model_swap",
+        "edit": "the model keeps 5 characters, not 40",
+        "question": "Order status?",
+        "label": "regressed",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [
+          "classify",
+          "respond"
+        ],
+        "drift_roots": [
+          "classify",
+          "respond"
+        ],
+        "lgcov_root": [
+          "classify",
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "classify"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_model_swap",
+        "edit": "the model keeps 5 characters, not 40",
+        "question": "What are your hours?",
+        "label": "benign",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_model_swap",
+        "edit": "the model keeps 80 characters, not 40",
+        "question": "Where is my order?",
+        "label": "benign",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_model_swap",
+        "edit": "the model keeps 80 characters, not 40",
+        "question": "Order status?",
+        "label": "benign",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_model_swap",
+        "edit": "the model keeps 80 characters, not 40",
+        "question": "What are your hours?",
+        "label": "benign",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_config",
+        "edit": "max_chars' default goes from 60 to 12",
+        "question": "Where is my order?",
+        "label": "regressed",
+        "touched": [
+          "lookup_order",
+          "respond"
+        ],
+        "regression_roots": [
+          "lookup_order"
+        ],
+        "drift_roots": [
+          "lookup_order",
+          "respond"
+        ],
+        "lgcov_root": [
+          "lookup_order",
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "lookup_order"
+        ],
+        "fingerprints_changed": [
+          "lookup_order",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_config",
+        "edit": "max_chars' default goes from 60 to 12",
+        "question": "Order status?",
+        "label": "regressed",
+        "touched": [
+          "lookup_order",
+          "respond"
+        ],
+        "regression_roots": [
+          "lookup_order"
+        ],
+        "drift_roots": [
+          "lookup_order",
+          "respond"
+        ],
+        "lgcov_root": [
+          "lookup_order",
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "lookup_order"
+        ],
+        "fingerprints_changed": [
+          "lookup_order",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_config",
+        "edit": "max_chars' default goes from 60 to 12",
+        "question": "What are your hours?",
+        "label": "benign",
+        "touched": [
+          "lookup_order",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [
+          "respond"
+        ],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": [
+          "lookup_order",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_config",
+        "edit": "max_chars' default goes from 60 to 30",
+        "question": "Where is my order?",
+        "label": "inert",
+        "touched": [
+          "lookup_order",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [],
+        "first_divergence": [],
+        "fingerprints_changed": [
+          "lookup_order",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_config",
+        "edit": "max_chars' default goes from 60 to 30",
+        "question": "Order status?",
+        "label": "inert",
+        "touched": [
+          "lookup_order",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [],
+        "first_divergence": [],
+        "fingerprints_changed": [
+          "lookup_order",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support",
+        "operator": "shared_config",
+        "edit": "max_chars' default goes from 60 to 30",
+        "question": "What are your hours?",
+        "label": "inert",
+        "touched": [
+          "lookup_order",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [],
+        "first_divergence": [],
+        "fingerprints_changed": [
+          "lookup_order",
+          "respond"
+        ]
+      },
+      {
+        "agent": "support-nested",
+        "operator": "shared_helper",
+        "edit": "clean keeps the question's case",
+        "question": "Where is my order?",
+        "label": "benign",
+        "touched": [
+          "answer.respond",
+          "classify"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "answer.respond"
+        ],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [
+          "answer"
+        ],
+        "first_divergence": [
+          "answer"
+        ],
+        "fingerprints_changed": [
+          "classify"
+        ]
+      },
+      {
+        "agent": "support-nested",
+        "operator": "shared_helper",
+        "edit": "clean keeps the question's case",
+        "question": "Order status?",
+        "label": "regressed",
+        "touched": [
+          "answer.respond",
+          "classify"
+        ],
+        "regression_roots": [
+          "classify"
+        ],
+        "drift_roots": [
+          "answer.respond",
+          "classify"
+        ],
+        "lgcov_root": [
+          "classify"
+        ],
+        "lgcov_inconclusive": [
+          "answer"
+        ],
+        "first_divergence": [
+          "classify"
+        ],
+        "fingerprints_changed": [
+          "classify"
+        ]
+      },
+      {
+        "agent": "support-nested",
+        "operator": "shared_helper",
+        "edit": "clean keeps the question's case",
+        "question": "What are your hours?",
+        "label": "benign",
+        "touched": [
+          "answer.respond",
+          "classify"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "answer.respond"
+        ],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [
+          "answer"
+        ],
+        "first_divergence": [
+          "answer"
+        ],
+        "fingerprints_changed": [
+          "classify"
+        ]
+      },
+      {
+        "agent": "support-nested",
+        "operator": "shared_helper",
+        "edit": "clean puts \"customer asks: \" first",
+        "question": "Where is my order?",
+        "label": "regressed",
+        "touched": [
+          "answer.respond",
+          "classify"
+        ],
+        "regression_roots": [
+          "answer.respond"
+        ],
+        "drift_roots": [
+          "answer.respond"
+        ],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [
+          "answer"
+        ],
+        "first_divergence": [
+          "answer"
+        ],
+        "fingerprints_changed": [
+          "classify"
+        ]
+      },
+      {
+        "agent": "support-nested",
+        "operator": "shared_helper",
+        "edit": "clean puts \"customer asks: \" first",
+        "question": "Order status?",
+        "label": "benign",
+        "touched": [
+          "answer.respond",
+          "classify"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "answer.respond"
+        ],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [
+          "answer"
+        ],
+        "first_divergence": [
+          "answer"
+        ],
+        "fingerprints_changed": [
+          "classify"
+        ]
+      },
+      {
+        "agent": "support-nested",
+        "operator": "shared_helper",
+        "edit": "clean puts \"customer asks: \" first",
+        "question": "What are your hours?",
+        "label": "benign",
+        "touched": [
+          "answer.respond",
+          "classify"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "answer.respond"
+        ],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [
+          "answer"
+        ],
+        "first_divergence": [
+          "answer"
+        ],
+        "fingerprints_changed": [
+          "classify"
+        ]
+      },
+      {
+        "agent": "support-client",
+        "operator": "shared_model_swap",
+        "edit": "the client is built with fake-5",
+        "question": "Where is my order?",
+        "label": "regressed",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [
+          "classify",
+          "respond"
+        ],
+        "drift_roots": [
+          "classify",
+          "respond"
+        ],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "classify"
+        ],
+        "fingerprints_changed": []
+      },
+      {
+        "agent": "support-client",
+        "operator": "shared_model_swap",
+        "edit": "the client is built with fake-5",
+        "question": "Order status?",
+        "label": "regressed",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [
+          "classify",
+          "respond"
+        ],
+        "drift_roots": [
+          "classify",
+          "respond"
+        ],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "classify"
+        ],
+        "fingerprints_changed": []
+      },
+      {
+        "agent": "support-client",
+        "operator": "shared_model_swap",
+        "edit": "the client is built with fake-5",
+        "question": "What are your hours?",
+        "label": "benign",
+        "touched": [
+          "classify",
+          "respond"
+        ],
+        "regression_roots": [],
+        "drift_roots": [
+          "respond"
+        ],
+        "lgcov_root": [],
+        "lgcov_inconclusive": [],
+        "first_divergence": [
+          "respond"
+        ],
+        "fingerprints_changed": []
+      }
+    ]
+  }
 }

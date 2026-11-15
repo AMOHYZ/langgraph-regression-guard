@@ -166,13 +166,23 @@ from lgcov.sampling import (
 )
 from lgcov.slices import Group, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
-from lgcov.synthetic import Agent, Case, aa_arms, every_case, noise_rule_rates
+from lgcov.synthetic import (
+    Agent,
+    Case,
+    SharedAgent,
+    aa_arms,
+    every_case,
+    every_shared_case,
+    noise_rule_rates,
+)
 from lgcov.synthetic_score import (
     Found,
+    Replayed,
     build_report,
     render_section,
     replace_section,
     report_json,
+    shared_report,
 )
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
 from lgcov.verdict_actions import CI_STATUSES, MODES, CodeFailure, gate_findings
@@ -2665,14 +2675,17 @@ def _labelled(
     )
 
 
-def _synthetic_agents() -> Sequence[Agent]:
-    """T121: the suite's agents live in examples/, which isn't in the wheel."""
+def _synthetic_agents() -> tuple[Sequence[Agent], Sequence[SharedAgent]]:
+    """T121: the suite's agents live in examples/, which isn't in the wheel. T182: and the agents
+    whose edits the diff can't pin to one node."""
     sys.path.insert(0, str(Path.cwd()))
-    agents: Sequence[Agent] = importlib.import_module("examples.synthetic_agents").AGENTS
-    return agents
+    module = importlib.import_module("examples.synthetic_agents")
+    agents: Sequence[Agent] = module.AGENTS
+    shared: Sequence[SharedAgent] = module.SHARED_AGENTS
+    return agents, shared
 
 
-def _shipped(case: Case, base_nodes: Collection[str] | None = None) -> Found:
+def _shipped(case: Replayed, base_nodes: Collection[str] | None = None) -> Found:
     """T222: what `lgcov ci` says about a case: replay the edited agent, serving what it left
     alone, probe its changed nodes offline, and label as ci does (`_node_labels`). T238:
     `base_nodes`: the unedited agent's node names, as `lgcov ci` has them from the base checkout."""
@@ -2707,7 +2720,7 @@ def _lgcov_root(case: Case) -> set[str]:
 def _bench_synthetic(out: Path, results: Path) -> int:
     """T121: offline, so it costs nothing. A report, not a gate: it exits 0 whatever the scores."""
     try:
-        agents = _synthetic_agents()
+        agents, shared_agents = _synthetic_agents()
     except ModuleNotFoundError as exc:
         print(f"lgcov bench: --synthetic needs a repo checkout's examples/: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -2717,6 +2730,14 @@ def _bench_synthetic(out: Path, results: Path) -> int:
     nodes = {agent.name: set(getattr(agent.graph, "nodes", {})) for agent in agents}
     # The cases stay alive in `cases`, so an id names one case.
     found = {id(case): _shipped(case, nodes[case.agent]) for case in cases}
+    # T182: the same labels on edits the diff can't pin to one node, and per edit the nodes
+    # whose fingerprint changed, so that replay ran them live.
+    shared = [case for agent in shared_agents for case in every_shared_case(agent)]
+    graphs = {agent.name: set(getattr(agent.graph, "nodes", {})) for agent in shared_agents}
+    changed: dict[tuple[str, str, str], frozenset[str]] = {}
+    for case in shared:
+        seen = changed.get(case.edit, frozenset())
+        changed[case.edit] = seen | changed_nodes(case.graph, [case.base])
     report = build_report(
         cases,
         lambda case: set(found[id(case)].root),
@@ -2725,6 +2746,7 @@ def _bench_synthetic(out: Path, results: Path) -> int:
         noise,
         labels=lambda case: found[id(case)],
         first_drift=_lgcov_root,
+        shared=shared_report([(c, _shipped(c, graphs[c.agent])) for c in shared], changed),
     )
     section = render_section(report)
     doc = out.read_text(encoding="utf-8") if out.exists() else ""
