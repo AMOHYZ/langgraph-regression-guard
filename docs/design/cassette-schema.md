@@ -119,9 +119,13 @@ T182 found gaps that a schema change can name but not always close.
   served stale. That stays a gap, with `--live` as the way round it.
 - **A config class counts whole.** An edit to one default reaches every node that names the class,
   even nodes that don't read that field *(T182's reading, not run here)*. Parts don't change that.
-- **A pydantic state gets no key** (`_key` returns None). So no node keeps an input or code, and
-  nothing is served. Its drift then reads "no fingerprint: a subgraph or the like (T193)", which
-  names the wrong cause (check 7).
+- **An input that isn't JSON gets no key** (`_key` returns None). That node keeps no input or
+  code, so it is never served, and its drift reads "no fingerprint: a subgraph or the like
+  (T193)", which names the wrong cause. At `0173e8a` a pydantic state was such an input (check 7).
+  A fix, `1b0e45c` on the branch `fix/pydantic-state-key`, keys it by its fields, as a TypedDict
+  state is keyed, and rebuilds the class for the probe. An input that holds another pydantic
+  object, such as a `Document`, still gets no key. That was run with the fix, in a TypedDict state
+  and in a pydantic one.
 
 ## 3. Six questions
 
@@ -267,9 +271,11 @@ field after the flip is optional.
    recording and candidate if it runs over about 200 lines. Then release R1.
 2. **Recording fields** `schema`, `scheme` and `graph`, behind a writer switch, so `lgcov record`
    still writes schema 1. The job that decides reads `graph` from the base checkout.
-3. **Subgraph units:** record and serve them, then the labels. T182 is adding a test that pins
-   today's miss on its nested build: no root, and `answer` inconclusive. This PR flips it, so
-   `answer.respond` is root and `answer` gets no label (the container rule).
+3. **Subgraph units:** record and serve them, then the labels. This PR flips T182's pin (#155),
+   `test_ci_names_no_root_inside_a_subgraph_and_t193_should_change_that` in
+   [`test_cli.py`](../../tests/test_cli.py). On its nested build there is no root today, and
+   `answer` is inconclusive. After this PR `answer.respond` is root, and `answer` gets no label
+   (the container rule).
 4. **Flip:** `lgcov record` writes schema 2. The demo baselines and the fixtures tests compare byte
    for byte are re-recorded once ([`test_demo_agent.py`](../../tests/test_demo_agent.py) requires
    it), with docs and changelog. Then release R2.
