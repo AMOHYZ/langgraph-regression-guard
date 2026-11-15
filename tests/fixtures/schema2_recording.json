@@ -1,0 +1,27 @@
+{
+  "schema": 2,
+  "scheme": "ast",
+  "graph": {"nodes": ["plan", {"tools": ["search", "researcher"]}], "state": {"x": "5e1f"}},
+  "parts": {
+    "plan": {"fingerprint": "a1", "file": "agent.py", "source": "b2"},
+    "prompt": {"fingerprint": "c3", "file": "prompts.py"}
+  },
+  "runs": [
+    {
+      "inputs": {"x": 1},
+      "steps": [
+        {"node": "plan", "kind": "node", "input": {"x": 1}, "output": {"x": 2}, "code": "c0de",
+         "goto": ["tools"], "router": "r0", "routed": ["tools"], "router_state": {"x": 2},
+         "parts": ["plan", "prompt"],
+         "samples": [{"output": {"x": 2}, "goto": ["tools"]}, {"output": {"x": 3}}]},
+        {"node": "tools", "input": {"x": 2}, "output": {"x": 4}, "code": null, "units": [
+          {"node": "search", "kind": "tool", "input": {"q": "x"}, "output": "found",
+           "code": "5ea1", "call_id": "call_1", "status": "rate_limited"},
+          {"node": "researcher", "kind": "agent", "input": {"x": 2}, "output": {"x": 4},
+           "code": null, "call_id": "call_2",
+           "units": [{"node": "inner", "input": {"x": 2}, "output": {"x": 4}, "code": "1a"}]}
+        ]}
+      ]
+    }
+  ]
+}
