@@ -324,6 +324,25 @@ def test_a_forged_probe_is_a_harness_error(pr: Path) -> None:
     assert code == 2 and "matches no recorded step" in report
 
 
+def test_a_schema_3_file_decides_as_its_schema_2_twin(pr: Path) -> None:
+    # T193: a candidate job on a later lgcov writes schema 3, as #116's wrote a key base refused.
+    # Units, probes by position, a probe inside a step and parts leave this job's verdict as it was.
+    _write(pr, {"graph.py": TWO_ROOTS})
+    assert _candidate() == 0
+    code, report, outputs = _evaluate()
+    assert code == 1 and "| `respond` | root | 1/2 |" in report
+    body = json.loads(FILE.read_text("utf-8"))
+    for probe in body["probes"]:
+        probe["unit"] = [probe.pop("step")]
+    first = body["probes"][0]
+    body["runs"][first["run"]]["steps"][first["unit"][0]]["units"] = [{"node": "i", "output": 1}]
+    inner = {**first, "unit": [*first["unit"], 0], "node": "i"}
+    body |= {"schema": 3, "probes": [*body["probes"], inner], "parts": {}, "repeats": []}
+    FILE.write_text(json.dumps(body), encoding="utf-8")
+    again = _evaluate()
+    assert (again[0], again[2], _normal(again[1])) == (code, outputs, _normal(report))
+
+
 CODE_TAXONOMY = """\
 version: 1
 system: demo_agent

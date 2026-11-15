@@ -946,6 +946,11 @@ class ProbeStep:
     output: Any = None
     goto: list[Any] | None = None
     raised: str = ""  # why it couldn't run offline; "" when it returned
+    # T193: read from candidate schema 3, never written yet. `inner`: the probed unit's position
+    # inside step `step`, down its units, or None for the step itself. `routed`: what the router
+    # returned, on a router's probe (T221).
+    inner: list[int] | None = None
+    routed: list[Any] | None = None
 
 
 def _node_input(spec: Any) -> Callable[[Any], Any] | None:
@@ -1036,6 +1041,8 @@ def judge_probes(
     replay compares it? Pure. ValueError for a probe that matches no recorded step."""
     found: dict[str, Probe] = {}
     for p in probes:
+        if p.inner is not None or p.routed is not None:
+            continue  # T193, T221: a probe inside a step, or a router's: no label reads one yet
         steps = runs[p.run].steps if 0 <= p.run < len(runs) else []
         recorded = steps[p.step] if 0 <= p.step < len(steps) else None
         if recorded is None or recorded.node != p.node:

@@ -9,7 +9,7 @@ what it did: docs/trust-boundary.md says what that leaves open.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Literal
 
@@ -17,13 +17,20 @@ from lgcov.cassette import Call, Cassette, Halt, How, ProbeStep, Step
 from lgcov.messages import decode, encode
 from lgcov.snapshot import GraphSnapshot
 
-SCHEMA = 2  # T162: 2 adds the probes
+SCHEMA = 2  # T162: 2 adds the probes. What this lgcov writes
+# T193: 3 holds units, probes by a unit's position, head's parts and its repeats. Read before
+# anything writes it, as 2 was (#114 before #113), so a deciding job on this lgcov can read it.
+READS = (2, 3)
 _HOWS: tuple[How, ...] = ("served", "live", "diverged", "after_divergence")
 _WHYS: tuple[Literal["diverged", "budget"], ...] = ("diverged", "budget")
 _CALL = {"node", "how", "seconds", "rebind_skipped", "raised"}
 _RUN = {"steps", "calls", "halt"}
 _STEP = {"node", "output", "input", "code", "goto", "router"}  # T193's unit fields aren't schema 2
-_PROBE = {f.name for f in fields(ProbeStep)}
+_UNIT = _STEP | {"kind", "units", "routed", "router_state", "parts", "call_id", "status", "samples"}
+_KINDS = (None, "node", "tool", "agent")
+_PROBE = {"run", "step", "node", "output", "goto", "raised"}
+_PROBE_3 = _PROBE - {"step"} | {"unit"}  # T193: a unit's position down the tree, not a step index
+_LATER = {"parts", "repeats"}  # T193: schema 3's own fields, which later PRs fill in
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,10 @@ class CandidateRun:
     lint_lines: tuple[str, ...] = ()
     fresh: tuple[FreshRun, ...] = ()
     probes: tuple[ProbeStep, ...] = ()  # T162: each changed node run offline on base's inputs
+    # T193: read from schema 3, which this lgcov doesn't write: head's part fingerprints, and its
+    # live repeats of a unit for the noise rule (T229), which a user opts into
+    parts: dict[str, str | None] | None = None
+    repeats: tuple[ProbeStep, ...] = ()
     agent_seconds: float = 0.0
     budget_hit: tuple[str, float] | None = None
     seconds: float = 0.0  # all of it, when it ran in another job
@@ -75,14 +86,15 @@ def _run_body(run: FreshRun) -> dict[str, object]:
 
 
 def candidate_to_json(run: CandidateRun) -> str:
-    """TypeError or ValueError if a step can't be saved, as with a tuple for a dict's key."""
-    body: dict[str, object] = asdict(replace(run, head=None, fresh=(), probes=()))
-    del body["fresh"], body["probes"]
+    """TypeError or ValueError if a step can't be saved, as with a tuple for a dict's key. T193: it
+    writes schema 2, so no parts or repeats, and each probe by its step index."""
+    body: dict[str, object] = asdict(replace(run, head=None, fresh=(), probes=(), repeats=()))
+    del body["fresh"], body["probes"], body["parts"], body["repeats"]
     body |= {
         "schema": SCHEMA,
         "head": run.head.to_dict() if run.head else None,
         "runs": [_run_body(r) for r in run.fresh],
-        "probes": [asdict(p) for p in run.probes],
+        "probes": [{k: v for k, v in asdict(p).items() if k in _PROBE} for p in run.probes],
     }
     return json.dumps(body, indent=2, default=_saved) + "\n"
 
@@ -107,15 +119,33 @@ def _seconds(value: object) -> float:
     return float(value)
 
 
-def _step(raw: object) -> Step:
+def _listed(value: object, each: Callable[[object], bool]) -> bool:
+    return value is None or isinstance(value, list) and all(map(each, value))
+
+
+def _sample(value: object) -> bool:
+    # T229: an output, and a goto if it has one
+    if not isinstance(value, dict) or "output" not in value:
+        return False
+    return value.keys() <= {"output", "goto"} and isinstance(value.get("goto"), list | None)
+
+
+def _step(raw: object, schema: int = SCHEMA) -> Step:
     if not isinstance(raw, dict) or not isinstance(raw.get("node"), str):
         raise ValueError("a step has no node")
-    if not raw.keys() <= _STEP:
-        raise ValueError(f"step {raw['node']!r} has fields {sorted(raw.keys() - _STEP)}")
-    step = Step(**raw)
-    texts = isinstance(step.code, str | None) and isinstance(step.router, str | None)
-    if not texts or not isinstance(step.goto, list | None):
-        raise ValueError(f"step {step.node!r} has an invalid code, goto or router")
+    keys = _UNIT if schema == 3 else _STEP
+    if not raw.keys() <= keys:
+        raise ValueError(f"step {raw['node']!r} has fields {sorted(raw.keys() - keys)}")
+    units = raw.get("units")
+    if not isinstance(units, list | None):
+        raise ValueError(f"step {raw['node']!r} has units that aren't a list")
+    step = Step(**{**raw, "units": None if units is None else [_step(u, schema) for u in units]})
+    texts = (step.code, step.router, step.call_id, step.status)  # T248: a status may be any text
+    valid = all(isinstance(v, str | None) for v in texts) and step.kind in _KINDS
+    if not valid or not all(isinstance(v, list | None) for v in (step.goto, step.routed)):
+        raise ValueError(f"step {step.node!r} has an invalid code, goto, router or unit field")
+    if not _listed(step.parts, lambda p: isinstance(p, str)) or not _listed(step.samples, _sample):
+        raise ValueError(f"step {step.node!r} has invalid parts or samples")
     return step
 
 
@@ -141,26 +171,47 @@ def _halt(raw: object) -> Halt | None:
     return Halt(raw["node"], why)
 
 
-def _fresh(raw: object) -> FreshRun:
+def _fresh(raw: object, schema: int = SCHEMA) -> FreshRun:
     if not isinstance(raw, dict) or set(raw) != _RUN:
         raise ValueError(f"a run isn't {sorted(_RUN)}")
     steps, calls = raw["steps"], raw["calls"]
     if not isinstance(steps, list) or not isinstance(calls, list):
         raise ValueError("a run's steps or calls aren't a list")
     return FreshRun(
-        tuple(_step(s) for s in steps), tuple(_call(c) for c in calls), _halt(raw["halt"])
+        tuple(_step(s, schema) for s in steps), tuple(_call(c) for c in calls), _halt(raw["halt"])
     )
 
 
-def _probe(raw: object) -> ProbeStep:
-    if not isinstance(raw, dict) or set(raw) != _PROBE:
-        raise ValueError(f"a probe isn't {sorted(_PROBE)}")
+def _probe(raw: object, schema: int = SCHEMA) -> ProbeStep:
+    """T193: from schema 3 a probe names its unit by `unit`, its position down the tree, read as
+    `step` and `inner`, and a router's probe carries `routed` (T221)."""
+    want = _PROBE_3 if schema == 3 else _PROBE
+    may = want | {"routed"} if schema == 3 else want
+    if not isinstance(raw, dict) or not want <= raw.keys() <= may:
+        raise ValueError(f"a probe isn't {sorted(want)}")
+    if schema == 3:
+        at = raw["unit"]
+        if not isinstance(at, list) or not at:
+            raise ValueError(f"a probe names no unit: {raw!r}")
+        rest = {k: v for k, v in raw.items() if k != "unit"}
+        raw = {**rest, "step": at[0], "inner": at[1:] or None}
     probe = ProbeStep(**raw)
-    ints = all(isinstance(n, int) and not isinstance(n, bool) for n in (probe.run, probe.step))
+    numbers = (probe.run, probe.step, *(probe.inner or ()))
+    ints = all(isinstance(n, int) and not isinstance(n, bool) for n in numbers)
     texts = isinstance(probe.node, str) and isinstance(probe.raised, str)
-    if not ints or not texts or not isinstance(probe.goto, list | None):
+    lists = isinstance(probe.goto, list | None) and isinstance(probe.routed, list | None)
+    if not ints or not texts or not lists:
         raise ValueError(f"not a probe: {raw!r}")
     return probe
+
+
+def _parts(raw: object) -> dict[str, str | None] | None:
+    # T193: head's parts, each a name with its fingerprint
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not all(isinstance(v, str | None) for v in raw.values()):
+        raise ValueError("parts aren't names with fingerprints")
+    return raw
 
 
 def _budget_hit(raw: object) -> tuple[str, float] | None:
@@ -171,24 +222,34 @@ def _budget_hit(raw: object) -> tuple[str, float] | None:
     return raw[0], _seconds(raw[1])
 
 
-_FIELDS = {*(f.name for f in fields(CandidateRun) if f.name != "fresh"), "runs", "schema"}
+_FIELDS = {
+    *(f.name for f in fields(CandidateRun) if f.name not in {"fresh", *_LATER}),
+    "runs",
+    "schema",
+}
 
 
 def parse_candidate(text: str) -> CandidateRun:
     """The run in a file. ValueError if it isn't exactly one."""
     try:
         raw: object = json.loads(text, object_hook=decode)
-        if not isinstance(raw, dict) or raw.get("schema") not in (1, SCHEMA):
-            raise ValueError(f"not a schema {SCHEMA} candidate file")
-        if raw["schema"] != SCHEMA:
+        if not isinstance(raw, dict) or "schema" not in raw:
+            raise ValueError("not a candidate file")
+        schema = raw["schema"]
+        if schema == 1:
             raise ValueError(
-                f"candidate file schema {raw['schema']}, evaluator needs {SCHEMA}: "
+                f"candidate file schema 1, evaluator needs {SCHEMA}: "
                 "run the same lgcov version in both jobs"
             )
-        if set(raw) != _FIELDS:
-            raise ValueError(f"its fields differ: {sorted(set(raw) ^ _FIELDS)}")
-        if not isinstance(raw["runs"], list) or not isinstance(raw["probes"], list):
-            raise ValueError("runs or probes isn't a list")
+        if type(schema) is not int or schema not in READS:
+            reads = " and ".join(map(str, READS))
+            raise ValueError(f"candidate file schema {schema!r}; this lgcov reads {reads}")
+        may = _FIELDS | _LATER if schema == 3 else _FIELDS
+        differ = (_FIELDS - raw.keys()) | (raw.keys() - may)
+        if differ:
+            raise ValueError(f"its fields differ: {sorted(differ)}")
+        if not all(isinstance(raw.get(k, []), list) for k in ("runs", "probes", "repeats")):
+            raise ValueError("runs, probes or repeats isn't a list")
         run = CandidateRun(
             commit=_text(raw, "commit"),
             tier=_text(raw, "tier"),
@@ -197,8 +258,10 @@ def parse_candidate(text: str) -> CandidateRun:
             graph_note=_text(raw, "graph_note"),
             lint_summary=_text(raw, "lint_summary"),
             lint_lines=_lines(raw, "lint_lines"),
-            fresh=tuple(_fresh(r) for r in raw["runs"]),
-            probes=tuple(_probe(p) for p in raw["probes"]),
+            fresh=tuple(_fresh(r, schema) for r in raw["runs"]),
+            probes=tuple(_probe(p, schema) for p in raw["probes"]),
+            parts=_parts(raw.get("parts")),
+            repeats=tuple(_probe(p, schema) for p in raw.get("repeats", [])),
             agent_seconds=_seconds(raw["agent_seconds"]),
             budget_hit=_budget_hit(raw["budget_hit"]),
             seconds=_seconds(raw["seconds"]),
