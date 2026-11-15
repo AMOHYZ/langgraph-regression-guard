@@ -13,10 +13,22 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from fixtures.graphs import S, _noop, conditional, fan_out_send, linear
+from fixtures.graphs import (
+    ASK,
+    Ask,
+    AskData,
+    AskModel,
+    S,
+    _noop,
+    ask,
+    conditional,
+    fan_out_send,
+    linear,
+)
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
+from pydantic import BaseModel, Field
 
 from lgcov.attribution import NEEDS_LIVE, Probe
 from lgcov.cassette import (
@@ -212,6 +224,15 @@ def test_cassette_recorded_before_node_inputs_loads_and_replays_live() -> None:
     spy = Mock(return_value={"x": 2})
     assert replay(_spied(spy, "v1"), legacy, serve=True) == []
     assert spy.call_count == 1  # no recorded input to match, so a ran live
+
+
+@pytest.mark.parametrize("state", [AskModel, AskData])
+def test_a_state_class_is_served_from_a_saved_cassette(state: type[Ask]) -> None:
+    # Each node gets an instance of the class, keyed by its fields as a TypedDict state is by its
+    # keys. Saved and loaded, as `lgcov ci` reads the baseline.
+    saved = Cassette.from_json(record(ask(state), ASK).to_json())
+    calls = replay_run(ask(state), saved, serve=True).calls
+    assert [(c.node, c.how) for c in calls] == [("prep", "served"), ("cut", "served")]
 
 
 def test_replay_serves_parallel_send_workers_by_their_payload() -> None:
@@ -553,6 +574,41 @@ def test_probe_steps_say_what_ran_and_judge_probes_says_what_it_means() -> None:
     assert ran == ProbeStep(0, 0, "n", {"x": 3})
     assert judge_probes([base], [ran]) == {"n": Probe(True)}
     assert judge_probes([base], [ProbeStep(0, 0, "n", {"x": 2})]) == {"n": Probe(False)}
+
+
+class _Fan(BaseModel):
+    topics: list[str] = Field(default_factory=list)
+    notes: Annotated[list[str], operator.add] = Field(default_factory=list)
+
+
+def _fan(shout: bool) -> CompiledStateGraph[_Fan]:
+    def plan(state: _Fan) -> dict[str, list[str]]:
+        return {"topics": ["a", "b"]}
+
+    def send(state: _Fan) -> list[Send]:
+        return [Send("worker", {"topic": t}) for t in state.topics]
+
+    def worker(state: object) -> dict[str, list[str]]:  # no class hint: no schema of its own
+        assert isinstance(state, dict)  # the Send's payload as sent, not the state class
+        topic = str(state["topic"])
+        return {"notes": [topic.upper() if shout else topic]}
+
+    g = StateGraph(_Fan)
+    g.add_node("plan", plan)
+    g.add_node("worker", worker)
+    g.add_edge(START, "plan")
+    g.add_conditional_edges("plan", send, ["worker"])
+    g.add_edge("worker", END)
+    return g.compile()
+
+
+def test_a_probe_hands_a_send_payload_over_as_langgraph_does() -> None:
+    # In a pydantic-state graph LangGraph builds the class for a node it pulls from the state,
+    # but passes a Send's payload as it was sent. The worker's node holds the state's mapper.
+    saved = Cassette.from_json(record(_fan(shout=False), {}).to_json())
+    head = _fan(shout=True)
+    assert changed_nodes(head, [saved]) == {"worker"}
+    assert probe_nodes(head, [saved], {"worker"}) == {"worker": Probe(True)}
 
 
 def test_a_probe_that_reaches_for_the_network_is_recorded_as_raised_not_a_crash() -> None:

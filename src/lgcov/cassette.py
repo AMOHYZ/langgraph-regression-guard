@@ -18,10 +18,12 @@ from types import CodeType, FunctionType
 from typing import Any, Literal, NoReturn, TypedDict
 
 import httpx
+from langchain_core.messages import BaseMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import START
 from langgraph.pregel import Pregel
 from langgraph.types import Command, Send
+from pydantic import BaseModel
 
 from lgcov.attribution import (
     NEEDS_LIVE,
@@ -122,6 +124,15 @@ def _key(value: Any, ignore_paths: Sequence[str], mask_volatile: bool) -> str | 
         return json.dumps(key_view(value, ignore_paths, mask_volatile), sort_keys=True)
     except (TypeError, ValueError):
         return None
+
+
+def _fields(state: Any) -> Any:
+    # A pydantic state reaches a node as an instance LangGraph built from the state's channels.
+    # Its fields are what a TypedDict state's keys are: the key, the saved input and what rebind
+    # reads. key_view already reads a dataclass, and asdict saves one.
+    if isinstance(state, BaseModel) and not isinstance(state, BaseMessage):
+        return dict(state)
+    return state
 
 
 # Network trouble is not the agent's fault, even when it surfaces inside a node (T074).
@@ -535,8 +546,9 @@ def _run(
         # How this call runs: the step to serve, if any, what logs the call when it's done, and
         # what logs it if it raises.
         nonlocal halted
-        key = _key(state, ignore_paths, mask_volatile)
-        snapshot = deepcopy(state) if key is not None else None  # before fn can mutate it
+        view = _fields(state)
+        key = _key(view, ignore_paths, mask_volatile)
+        snapshot = deepcopy(view) if key is not None else None  # before fn can mutate it
         hit: Step | None = None
         diverged = False
         if code is not None and key is not None:
@@ -552,7 +564,7 @@ def _run(
         skipped = False
         if hit is not None:
             try:
-                fitted = rebind({"update": hit.output, "goto": hit.goto}, hit.input, state)
+                fitted = rebind({"update": hit.output, "goto": hit.goto}, hit.input, view)
                 hit = replace(hit, output=fitted["update"], goto=fitted["goto"])
             except Ambiguous:
                 hit, skipped = None, True
@@ -847,8 +859,29 @@ class ProbeStep:
     raised: str = ""  # why it couldn't run offline; "" when it returned
 
 
+def _node_input(spec: Any) -> Callable[[Any], Any] | None:
+    """What LangGraph passes the node, from what base saved for it. A node pulled from a state
+    class gets an instance its mapper builds from the node's channels, so a saved input holding
+    exactly those is rebuilt. A Send's payload reaches the node as it was sent, so it isn't.
+    None when the node gets its input as it was saved."""
+    mapper, channels = getattr(spec, "mapper", None), getattr(spec, "channels", None)
+    if mapper is None or not isinstance(channels, list):
+        return None
+    pulled = set(channels)
+
+    def given(saved: Any) -> Any:
+        return mapper(saved) if isinstance(saved, dict) and saved.keys() == pulled else saved
+
+    return given
+
+
 def _probe_step(
-    i: int, j: int, step: Step, fn: FunctionType | None, live: bool = False
+    i: int,
+    j: int,
+    step: Step,
+    fn: FunctionType | None,
+    live: bool = False,
+    given: Callable[[Any], Any] | None = None,
 ) -> ProbeStep:
     if fn is None:
         return ProbeStep(i, j, step.node, raised=NO_FINGERPRINT)
@@ -858,7 +891,8 @@ def _probe_step(
         with nullcontext() if live else _offline(reached):  # T211: a repeat runs live
             config: dict[str, object] = {"config": {"configurable": {}}}  # what a node can ask for
             asks = "config" in inspect.signature(fn).parameters
-            out = fn(deepcopy(step.input), **(config if asks else {}))
+            state = deepcopy(step.input)
+            out = fn(state if given is None else given(state), **(config if asks else {}))
             if inspect.iscoroutine(out):
                 out = asyncio.run(out)
     except _Refused:
@@ -890,8 +924,9 @@ def probe_steps(
     the network blocked. A node that reaches for the network would need a live call, and one live
     sample can't be told from noise (T211), so its probe is `raised`, never a crash."""
     fns = {name: _plain(spec.bound) for name, spec in getattr(graph, "nodes", {}).items()}
+    given = {name: _node_input(spec) for name, spec in getattr(graph, "nodes", {}).items()}
     return tuple(
-        _probe_step(i, j, s, fns.get(s.node))
+        _probe_step(i, j, s, fns.get(s.node), given=given.get(s.node))
         for i, run in enumerate(runs)
         for j, s in enumerate(run.steps)
         if s.node in nodes
@@ -940,8 +975,9 @@ def repeat_steps(
     """T211: `probe_steps` with the network open, `k` times per recorded input: this graph's
     samples of each of `nodes`. Each is a real call, so a model node costs `k` calls per input."""
     fns = {name: _plain(spec.bound) for name, spec in getattr(graph, "nodes", {}).items()}
+    given = {name: _node_input(spec) for name, spec in getattr(graph, "nodes", {}).items()}
     return tuple(
-        _probe_step(i, j, s, fns.get(s.node), live=True)
+        _probe_step(i, j, s, fns.get(s.node), live=True, given=given.get(s.node))
         for i, run in enumerate(runs)
         for j, s in enumerate(run.steps)
         if s.node in nodes

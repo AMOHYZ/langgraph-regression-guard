@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from fixtures.graphs import ASK, Ask, AskData, AskDataShorter, AskModel, AskModelShorter, ask
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from examples.synthetic_agents import AGENTS, SUPPORT, SUPPORT_CLIENT, SUPPORT_NESTED
@@ -22,6 +23,7 @@ from lgcov.cassette import (
     _router_prints,
     changed_nodes,
     compared_run,
+    probe_nodes,
     record,
     replay_run,
 )
@@ -3415,6 +3417,36 @@ def test_a_rerouted_node_gets_the_same_label_with_one_run_or_two(keep: list[int]
     labels = _node_labels(runs, fresh, drifts, {}, graphs=(nodes, nodes))
     assert (labels.root, labels.propagated) == (("classify",), ("lookup", "respond"))
     assert labels.inconclusive == {}
+
+
+# A PR that edits a default of the state class changes no node's code, so the node that drifts
+# reads unexplained, as with a TypedDict state. One that edits the node's code makes it root.
+@pytest.mark.parametrize(
+    ("base", "head", "half", "root", "inconclusive"),
+    [
+        (AskModel, AskModelShorter, False, (), {"cut": UNEXPLAINED}),
+        (AskModel, AskModel, True, ("cut",), {}),
+        (AskData, AskDataShorter, False, (), {"cut": UNEXPLAINED}),
+        (AskData, AskData, True, ("cut",), {}),
+    ],
+    ids=["pydantic default", "pydantic code", "dataclass default", "dataclass code"],
+)
+def test_a_state_class_gets_the_labels_a_typeddict_state_gets(
+    base: type[Ask],
+    head: type[Ask],
+    half: bool,
+    root: tuple[str, ...],
+    inconclusive: dict[str, str],
+) -> None:
+    saved = Cassette.from_json(record(ask(base), ASK).to_json())  # as `lgcov ci` reads it
+    pr = ask(head, half)
+    run = replay_run(pr, saved, serve=True)
+    probes = probe_nodes(pr, [saved], changed_nodes(pr, [saved]))
+    nodes = {"prep", "cut"}
+    labels = _node_labels(
+        [saved], [list(run.steps)], [list(run.drifts)], probes, graphs=(nodes, nodes)
+    )
+    assert (labels.root, labels.propagated, labels.inconclusive) == (root, (), inconclusive)
 
 
 def _rerouted_ci(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep: list[int]) -> str:

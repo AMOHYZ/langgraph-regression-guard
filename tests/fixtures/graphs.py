@@ -1,8 +1,10 @@
+from dataclasses import dataclass
 from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
+from pydantic import BaseModel
 
 
 class S(TypedDict, total=False):
@@ -69,4 +71,54 @@ def fan_out_send() -> CompiledStateGraph[S]:
     g.add_edge(START, "plan")
     g.add_conditional_edges("plan", fan, ["worker"])
     g.add_edge("worker", END)
+    return g.compile()
+
+
+# A state that is a class: LangGraph hands each node an instance, not a dict. The subclasses
+# are a PR that edits a default, which no node's code holds.
+class AskModel(BaseModel):
+    question: str = ""
+    max_chars: int = 60
+    answer: str = ""
+
+
+class AskModelShorter(AskModel):
+    max_chars: int = 12
+
+
+@dataclass
+class AskData:
+    question: str = ""
+    max_chars: int = 60
+    answer: str = ""
+
+
+@dataclass
+class AskDataShorter(AskData):
+    max_chars: int = 12
+
+
+Ask = AskModel | AskData  # not a class, so LangGraph gives each node the graph's state class
+ASK = {"question": "Where is my order? It was due on Monday."}
+
+
+def _prep(state: Ask) -> dict[str, str]:
+    return {"answer": ""}
+
+
+def _cut(state: Ask) -> dict[str, str]:
+    return {"answer": state.question[: state.max_chars]}
+
+
+def _cut_half(state: Ask) -> dict[str, str]:  # a PR that edits node code
+    return {"answer": state.question[: state.max_chars // 2]}
+
+
+def ask(state: type[Ask], half: bool = False) -> CompiledStateGraph[Ask]:
+    g = StateGraph(state)
+    g.add_node("prep", _prep)
+    g.add_node("cut", _cut_half if half else _cut)
+    g.add_edge(START, "prep")
+    g.add_edge("prep", "cut")
+    g.add_edge("cut", END)
     return g.compile()
