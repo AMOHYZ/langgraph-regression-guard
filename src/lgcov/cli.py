@@ -82,11 +82,14 @@ from lgcov.cassette import (
     Step,
     accept_nodes,
     changed_nodes,
+    check_scheme,
     compared_run,
     judge_probes,
     judge_repeats,
     probe_steps,
     record,
+    recording_from_json,
+    recording_to_json,
     replay_run,
     runs_from_json,
     runs_to_json,
@@ -862,7 +865,9 @@ def _cassette_accept(argv: list[str]) -> int:
     try:
         cfg = load_config(args.config, {"cassette_dir": args.cassette_dir})
         path = Path(cfg.cassette_dir) / "baseline.json"
-        runs = _load_runs(str(path))
+        recording = recording_from_json(path.read_text(encoding="utf-8"))
+        check_scheme(recording)  # T193: before the graph runs, which can cost model calls
+        runs = recording.runs
         graph = _load_graph(cfg.graph_entrypoint)
         fresh = [record(graph, run.inputs) for run in runs]
         if args.all_drifted:
@@ -899,7 +904,9 @@ def _cassette_accept(argv: list[str]) -> int:
     if not changed_nodes:
         print("lgcov cassette accept: no drifted nodes", file=sys.stderr)
         return EXIT_NOT_DRIFTED
-    _write_runs(path, [accepted for accepted, _ in results])
+    # T193: the file keeps its schema and its recording's fields
+    accepted = replace(recording, runs=[run for run, _ in results])
+    path.write_text(recording_to_json(accepted), encoding="utf-8")
     summary = _accept_summary(path, runs, fresh, results, changed_nodes)
     summary_path = path.parent / "accept.md"
     summary_path.write_text(summary, encoding="utf-8")

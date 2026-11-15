@@ -1,5 +1,6 @@
 import contextlib
 import dataclasses
+import json
 import operator
 import random
 import socket
@@ -32,8 +33,10 @@ from pydantic import BaseModel, Field
 
 from lgcov.attribution import NEEDS_LIVE, Probe
 from lgcov.cassette import (
+    SCHEME,
     Cassette,
     ProbeStep,
+    Recording,
     Step,
     _plain,
     _router_prints,
@@ -44,9 +47,13 @@ from lgcov.cassette import (
     probe_nodes,
     probe_steps,
     record,
+    recording_from_json,
+    recording_to_json,
     repeat_steps,
     replay,
     replay_run,
+    runs_from_json,
+    runs_to_json,
     same_input,
     unservable,
 )
@@ -681,6 +688,64 @@ def test_a_step_s_router_fingerprint_survives_the_round_trip() -> None:
 
 def test_a_cassette_with_no_router_saves_as_it_did_before_routers_were_kept() -> None:
     assert "router" not in record(linear(), {"x": 1}).to_json()
+
+
+# T193, PR 1: read recording schema 2 before anything writes it, as T175 did above. The fixture
+# holds every field docs/design/cassette-schema.md defines (section 2), with part `prompt` missing
+# its `source` (ruling 4 is open) and tool call `search` holding a status T248 hasn't settled.
+# Each is read and kept, and nothing acts on one.
+_HERE = Path(__file__).parent
+_SCHEMA_2_FILE = _HERE / "fixtures" / "schema2_recording.json"
+_SCHEMA_2 = json.loads(_SCHEMA_2_FILE.read_text(encoding="utf-8"))
+SCHEMA_2 = json.dumps(_SCHEMA_2, indent=2, sort_keys=True) + "\n"  # as lgcov saves a file
+
+
+def test_a_schema_2_recording_with_every_field_loads_and_saves_as_it_was() -> None:
+    recording = recording_from_json(SCHEMA_2)
+    assert (recording.schema, recording.scheme) == (2, SCHEME)
+    assert (recording.graph, recording.parts) == (_SCHEMA_2["graph"], _SCHEMA_2["parts"])
+    plan, tools = recording.runs[0].steps
+    assert (plan.kind, plan.routed, plan.router_state) == ("node", ["tools"], {"x": 2})
+    assert plan.parts == ["plan", "prompt"]
+    assert plan.samples == [{"output": {"x": 2}, "goto": ["tools"]}, {"output": {"x": 3}}]
+    assert tools.units is not None
+    search, agent = tools.units
+    assert (search.kind, search.call_id, search.status) == ("tool", "call_1", "rate_limited")
+    assert (agent.kind, agent.units) == ("agent", [Step("inner", {"x": 4}, {"x": 2}, "1a")])
+    assert recording_to_json(recording) == SCHEMA_2
+    assert runs_from_json(SCHEMA_2) == recording.runs  # what every command reads
+
+
+@pytest.mark.parametrize(("schema", "named"), [(3, "3"), ("2", "'2'")])
+def test_a_recording_schema_this_lgcov_does_not_read_is_refused_by_its_number(
+    schema: object, named: str
+) -> None:
+    step = {"node": "a", "output": 1, "a_later_field": 1}  # the number is read first
+    text = json.dumps({"schema": schema, "runs": [{"inputs": {}, "steps": [step]}]})
+    with pytest.raises(ValueError, match=f"^schema {named}; this lgcov reads 1 and 2$"):
+        runs_from_json(text)
+
+
+@pytest.mark.parametrize("step", [1, {"node": "a", "output": 1, "units": [1]}])
+def test_a_step_that_is_not_an_object_is_still_a_type_error(step: object) -> None:
+    # The job that decides reads a TypeError as "cannot read baseline", not as a crash.
+    with pytest.raises(TypeError):
+        runs_from_json(json.dumps({"runs": [{"inputs": {}, "steps": [step]}]}))
+
+
+TODAYS_RECORDINGS = {
+    "demo_fixture": _HERE / "fixtures" / "demo_baseline.json",
+    "selfcheck": _HERE / "fixtures" / "selfcheck" / "cassettes" / "baseline.json",
+    "demo_agent": _HERE.parent / "examples" / "demo_agent" / "cassettes" / "baseline.json",
+}
+
+
+@pytest.mark.parametrize("path", TODAYS_RECORDINGS.values(), ids=TODAYS_RECORDINGS.keys())
+def test_today_s_recordings_read_as_schema_1_and_save_byte_for_byte(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    recording = recording_from_json(text)
+    assert recording == Recording(runs_from_json(text))  # schema 1, with no recording fields
+    assert recording_to_json(recording) == runs_to_json(recording.runs) == text
 
 
 # T211: repeats run a node live, K times on each input base recorded; `judge_repeats` compares

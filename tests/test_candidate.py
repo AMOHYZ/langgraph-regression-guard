@@ -130,6 +130,7 @@ REFUSED = {
     "a node that isn't text": _with_run(steps=[{"node": 1, "output": 1}]),
     "a step with no output": _with_run(steps=[{"node": "a"}]),
     "a step with an extra field": _with_run(steps=[{"node": "a", "output": 1, "drifted": False}]),
+    "a schema 2 step with a unit's field": _with_run(steps=[{"node": "a", "output": 1, "kind": 1}]),
     "a code that isn't text": _with_run(steps=[{"node": "a", "output": 1, "code": 1}]),
     "a goto that isn't a list": _with_run(steps=[{"node": "a", "output": 1, "goto": "b"}]),
     "a router that isn't text": _with_run(steps=[{"node": "a", "output": 1, "router": 1}]),

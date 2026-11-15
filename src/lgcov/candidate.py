@@ -22,6 +22,7 @@ _HOWS: tuple[How, ...] = ("served", "live", "diverged", "after_divergence")
 _WHYS: tuple[Literal["diverged", "budget"], ...] = ("diverged", "budget")
 _CALL = {"node", "how", "seconds", "rebind_skipped", "raised"}
 _RUN = {"steps", "calls", "halt"}
+_STEP = {"node", "output", "input", "code", "goto", "router"}  # T193's unit fields aren't schema 2
 _PROBE = {f.name for f in fields(ProbeStep)}
 
 
@@ -109,6 +110,8 @@ def _seconds(value: object) -> float:
 def _step(raw: object) -> Step:
     if not isinstance(raw, dict) or not isinstance(raw.get("node"), str):
         raise ValueError("a step has no node")
+    if not raw.keys() <= _STEP:
+        raise ValueError(f"step {raw['node']!r} has fields {sorted(raw.keys() - _STEP)}")
     step = Step(**raw)
     texts = isinstance(step.code, str | None) and isinstance(step.router, str | None)
     if not texts or not isinstance(step.goto, list | None):

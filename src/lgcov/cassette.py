@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, replace
 from functools import partial, wraps
 from statistics import fmean
 from types import CodeType, FunctionType
-from typing import Any, Literal, NoReturn, TypedDict
+from typing import Any, Literal, NoReturn, NotRequired, TypedDict
 
 import httpx
 from langchain_core.messages import BaseMessage
@@ -39,6 +39,23 @@ from lgcov.normalize import key_view, normalize
 from lgcov.rebind import Ambiguous, rebind
 
 
+class Sample(TypedDict):
+    """T229: what base's code returned when run again on a unit's recorded input. Arbitrary user
+    state, so `output` stays Any, as on a step."""
+
+    output: Any
+    goto: NotRequired[list[Any] | None]
+
+
+class Part(TypedDict, total=False):
+    """T239: one thing units depend on, in a schema-2 recording's `parts`. `source`, a hash of its
+    syntax tree in its file, waits on a ruling (T243), so it may be missing."""
+
+    fingerprint: str | None
+    file: str
+    source: str
+
+
 @dataclass(frozen=True)
 class Step:
     node: str
@@ -56,6 +73,34 @@ class Step:
     # which `code` doesn't cover. None for a node with no such edge or a router with no
     # fingerprint, and in cassettes recorded before this was kept.
     router: str | None = None
+    # T193: a unit's fields in recording schema 2 (docs/design/cassette-schema.md, section 2).
+    # This lgcov reads and keeps them, and neither records nor acts on them yet: each is None
+    # unless a newer lgcov recorded the step, and a step saves without it.
+    kind: str | None = None  # node, tool or agent; None reads as node
+    units: list["Step"] | None = None  # the units that ran inside this one, in start order
+    routed: list[Any] | None = None  # T221: the targets the router returned
+    router_state: Any = None  # T221: the state the router saw, masked as an input is
+    parts: list[str] | None = None  # T239: names in the recording's `parts`
+    call_id: str | None = None  # T239: a tool call's id, or for an agent the call that began it
+    status: str | None = None  # T248: how a tool call ended; any text, until its values settle
+    samples: list[Sample] | None = None  # T229: base's code run again on this input
+
+
+# A step always saves these. It saves any other field only when set, so a step without that field
+# saves byte for byte as before the field existed (T168 goto, T175 router, T193 a unit's fields).
+_ALWAYS = {"node", "output", "input", "code"}
+
+
+def _saved(step: dict[str, Any]) -> dict[str, Any]:
+    if step["units"] is not None:
+        step["units"] = [_saved(u) for u in step["units"]]
+    return {k: v for k, v in step.items() if v is not None or k in _ALWAYS}
+
+
+def _unit(raw: dict[str, Any]) -> Step:
+    # A step as saved, and T193: the units inside it. One that isn't a mapping is a TypeError.
+    units = raw.get("units") if isinstance(raw, dict) else None
+    return Step(**{**raw, "units": None if units is None else [_unit(u) for u in units]})
 
 
 @dataclass
@@ -65,12 +110,10 @@ class Cassette:
 
     def body(self) -> dict[str, Any]:
         """What's saved. A step with no goto has no such key, so a cassette with no Command in
-        it saves byte for byte as it did before goto was kept. T175: the same for router."""
+        it saves byte for byte as it did before goto was kept. T175: the same for router, and
+        T193: for each of a unit's fields, in the units inside a step too."""
         body = asdict(self)
-        for step in body["steps"]:
-            for key in ("goto", "router"):
-                if step[key] is None:
-                    del step[key]
+        body["steps"] = [_saved(s) for s in body["steps"]]
         return body
 
     def to_json(self) -> str:
@@ -79,21 +122,67 @@ class Cassette:
     @classmethod
     def from_json(cls, text: str) -> "Cassette":
         data = json.loads(text, object_hook=decode)
-        return cls(inputs=data["inputs"], steps=[Step(**s) for s in data["steps"]])
+        return cls(inputs=data["inputs"], steps=[_unit(s) for s in data["steps"]])
 
 
-def runs_to_json(runs: Sequence[Cassette]) -> str:
-    # Same shape and formatting as examples/demo_agent/record.py, so baselines diff cleanly.
-    body = {"runs": [r.body() for r in runs]}
+RECORDING_SCHEMAS = (1, 2)  # T193: what this lgcov reads; it writes 1
+SCHEME = "ast"  # T193: the fingerprint scheme this lgcov records, by the name `scheme` gives it
+
+
+@dataclass(frozen=True)
+class Recording:
+    """T193: a baseline file. Schema 1, today's, has no number and holds `runs` alone. Schema 2
+    adds the fields below, which this lgcov reads and keeps but doesn't act on yet."""
+
+    runs: list[Cassette]
+    schema: int = 1
+    scheme: str | None = None  # T212: the scheme of every fingerprint in the file
+    graph: dict[str, object] | None = None  # T238: the recorded graph's node names, and more
+    parts: dict[str, Part] | None = None  # T239: each part, by its name
+
+
+def recording_to_json(recording: Recording) -> str:
+    """Same shape and formatting as examples/demo_agent/record.py, so baselines diff cleanly.
+    Schema 1 saves as `runs` alone. T193: schema 2 saves its number and the fields it holds."""
+    body: dict[str, Any] = {"runs": [r.body() for r in recording.runs]}
+    if recording.schema != 1:
+        held: dict[str, object] = {"schema": recording.schema, "scheme": recording.scheme}
+        held |= {"graph": recording.graph, "parts": recording.parts}
+        body |= {k: v for k, v in held.items() if v is not None}
     return json.dumps(body, indent=2, sort_keys=True, default=encode) + "\n"
 
 
-def runs_from_json(text: str) -> list[Cassette]:
+def runs_to_json(runs: Sequence[Cassette]) -> str:
+    return recording_to_json(Recording(list(runs)))
+
+
+def recording_from_json(text: str) -> Recording:
+    """T193: ValueError, naming the number, for a schema this lgcov doesn't read."""
     # Any: raw JSON before validation
     data: Any = json.loads(text, object_hook=decode)
-    return [
-        Cassette(inputs=r["inputs"], steps=[Step(**s) for s in r["steps"]]) for r in data["runs"]
-    ]
+    schema = data.get("schema", 1) if isinstance(data, dict) else 1
+    if type(schema) is not int or schema not in RECORDING_SCHEMAS:
+        reads = " and ".join(map(str, RECORDING_SCHEMAS))
+        raise ValueError(f"schema {schema!r}; this lgcov reads {reads}")
+    runs = [Cassette(r["inputs"], [_unit(s) for s in r["steps"]]) for r in data["runs"]]
+    if schema == 1:
+        return Recording(runs)
+    return Recording(runs, schema, data.get("scheme"), data.get("graph"), data.get("parts"))
+
+
+def runs_from_json(text: str) -> list[Cassette]:
+    return recording_from_json(text).runs
+
+
+def check_scheme(recording: Recording) -> None:
+    """T193: `cassette accept` puts steps this lgcov records into the file. Every fingerprint in a
+    schema-2 file is in its one `scheme`, so theirs must be too: ValueError when they wouldn't
+    be. A schema-1 file names no scheme and takes them, as before."""
+    if recording.schema != 1 and recording.scheme != SCHEME:
+        raise ValueError(
+            f"the baseline's fingerprints are in scheme {recording.scheme!r} and this lgcov "
+            f"records {SCHEME!r}: accepting would mix the two, so re-record instead"
+        )
 
 
 @dataclass(frozen=True)

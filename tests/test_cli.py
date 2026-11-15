@@ -17,6 +17,7 @@ from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 from examples.synthetic_agents import AGENTS, SUPPORT, SUPPORT_CLIENT, SUPPORT_NESTED
 from lgcov.attribution import UNEXPLAINED, Benchmark, NodeLabels, NoiseCheck
 from lgcov.cassette import (
+    SCHEME,
     Cassette,
     Step,
     _codes,
@@ -470,6 +471,40 @@ def test_cli_accept_all_drifted(tmp_path: Path, capsys: pytest.CaptureFixture[st
         del step["code"]  # fingerprints of the edited code, so they change too
     assert after == want
     assert main(["replay", "--config", str(cfg)]) == 0
+
+
+# T193: accept keeps a schema-2 file's number, its recording fields and the unit fields of every
+# step it doesn't re-record, and it won't mix fingerprint schemes in one.
+def test_cli_accept_keeps_a_schema_2_file_s_number_and_fields(tmp_path: Path) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    body = json.loads(baseline.read_text(encoding="utf-8"))
+    body |= {"schema": 2, "scheme": SCHEME, "graph": {"nodes": ["a", "b"]}}
+    body["parts"] = {"a": {"fingerprint": "f", "file": "graph.py", "source": "s"}}
+    unit: dict[str, object] = {"kind": "node", "parts": ["a"], "routed": ["b"], "call_id": "c"}
+    unit |= {"router_state": {}, "status": "x", "samples": [{"output": {}}]}
+    unit["units"] = [{"node": "i", "input": None, "code": None, "output": 1}]
+    for run in body["runs"]:
+        run["steps"][0] |= unit  # a's: accept leaves it as it was
+    baseline.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    assert main(["cassette", "accept", "--nodes", "b", "--config", str(cfg)]) == 0
+    after = baseline.read_text(encoding="utf-8")
+    for run, new in zip(body["runs"], json.loads(after)["runs"], strict=True):
+        assert new["steps"][1]["output"] == {"b": "B2"}
+        run["steps"][1] = new["steps"][1]
+    assert after == json.dumps(body, indent=2, sort_keys=True) + "\n"
+
+
+def test_cli_accept_won_t_mix_fingerprint_schemes_in_a_schema_2_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    body = json.loads(baseline.read_text(encoding="utf-8")) | {"schema": 2, "scheme": "lines"}
+    baseline.write_text(json.dumps(body), encoding="utf-8")
+    (tmp_path / "graph.py").write_text("import a_module_no_one_has\n", encoding="utf-8")
+    capsys.readouterr()
+    assert main(["cassette", "accept", "--nodes", "b", "--config", str(cfg)]) == 2
+    assert "scheme 'lines'" in capsys.readouterr().err  # said before the graph loads
+    assert json.loads(baseline.read_text(encoding="utf-8")) == body
 
 
 def test_cli_accept_cassette_dir_flag_overrides_config(
