@@ -277,7 +277,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: AMOHYZ/langgraph-regression-guard@v0.3.0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.4.0
         with:
           fail-on: root-drift  # root-drift | any-drift | never
 ```
@@ -338,7 +338,7 @@ jobs:
     schedule:
       - cron: "0 3 * * *"  # the nightly tier, on main
   # ...the same job as above, with:
-        - uses: AMOHYZ/langgraph-regression-guard@v0.3.0
+        - uses: AMOHYZ/langgraph-regression-guard@v0.4.0
           with:
             tier: ${{ github.event_name == 'schedule' && 'nightly' || 'pr' }}
   ```
@@ -390,7 +390,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: AMOHYZ/langgraph-regression-guard@v0.3.0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.4.0
         with:
           phase: candidate  # runs the PR's code and decides nothing
   lgcov:
@@ -408,7 +408,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}  # empty on a push: that commit
-      - uses: AMOHYZ/langgraph-regression-guard@v0.3.0
+      - uses: AMOHYZ/langgraph-regression-guard@v0.4.0
         with:
           phase: evaluate  # decides from what the other job uploaded; installs no project
 ```
