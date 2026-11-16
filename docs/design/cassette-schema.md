@@ -1,7 +1,8 @@
 # The cassette schema (design, T193)
 
-**Status: design only.** Nothing here is built. This file changes no code, no cassette field
-and no label.
+**Status:** PR 1 in section 6, the reader, is built (#158, #159) and shipped in lgcov 0.4.0,
+release R1. It reads every field on this page, and no label uses one yet. The writers are off:
+lgcov still writes recording 1 and candidate 2. The rest of the page is design only.
 
 lgcov records a baseline once and replays each PR against it. Several planned tasks need the
 recording to hold more than it does. This page is the one schema change that carries them all, so
@@ -192,7 +193,7 @@ the ref CI pins.
 | Release | Reads | Writes |
 |---|---|---|
 | 0.3.0 and older | Recording 1, candidate 2 | The same. On a schema-2 recording it ignores the new top-level fields and exits 2 on a step with a new key |
-| R1, the next | Recording 1 and 2, candidate 2 and 3, with every field on this page | Recording 1, candidate 2 |
+| R1, 0.4.0 | Recording 1 and 2, candidate 2 and 3, with every field on this page | Recording 1, candidate 2 |
 | R2 | The same | Recording 2 with `graph` and subgraph units, candidate 3 |
 | Later | The same | Tool and agent units, routes, samples and parts, as optional keys under the same numbers |
 
