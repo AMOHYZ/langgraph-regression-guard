@@ -15,7 +15,8 @@ from types import ModuleType
 
 import pytest
 
-from lgcov.cli import _import_file
+from lgcov.cassette import _codes, runs_from_json
+from lgcov.cli import _import_file, _load_graph
 from lgcov.fingerprint import fingerprint
 
 DEMO = (Path(__file__).parent / "fixtures" / "demo_graph.py").read_text(encoding="utf-8")
@@ -214,7 +215,8 @@ print(fingerprint(module.node))
 """
 
 # T206: one graph per cause, found on 7 Nov, of a fingerprint that changed in every process, so the
-# node was never served. Each node reaches a project pydantic class that uses only that.
+# node was never served. Each node reaches a project pydantic class that uses only that. T250: and
+# one reaches a project object built at import, which counts by what it holds.
 CAUSES = {
     "validator": """\
 from pydantic import BaseModel, field_validator, model_validator
@@ -296,6 +298,16 @@ def node(state):
     config = Config()
     config.name = f"new {state['n']}"
     return {"a": config.name}
+""",
+    "project_object": """\
+class Chat:
+    def __init__(self, model):
+        self.model = model
+
+CLIENT = Chat("fake-40")
+
+def node(state):
+    return {"a": f"{CLIENT.model} {state['n']}"}
 """,
 }
 
@@ -853,3 +865,179 @@ def test_node_fingerprints_are_the_same_on_every_python(tmp_path: Path) -> None:
         "anode": "6aa9cccf9c92df3e",
         "reads": "47aff0937771fd56",
     }
+
+
+# T250: a project object counts by what it holds, which its repr may hide, as a client's model.
+HOLDS = {
+    "plain": """\
+class Chat:
+    def __init__(self, model):
+        self.model = model
+""",
+    "slots": """\
+class Chat:
+    __slots__ = ("model",)
+
+    def __init__(self, model):
+        self.model = model
+""",
+    "dataclass": """\
+from dataclasses import dataclass
+
+@dataclass
+class Chat:
+    model: str
+""",
+    "nested": """\
+class Options:
+    def __init__(self, model):
+        self.model = model
+
+class Chat:
+    def __init__(self, model):
+        self.options = Options(model)
+""",
+}
+USES_CLIENT = """
+CLIENT = Chat("fake-40")
+
+def node(state):
+    return {"a": type(CLIENT).__name__}
+"""
+
+
+def _checkouts(tmp_path: Path, *sources: str) -> list[str | None]:
+    """Each source's node fingerprint, from its own folder, as `graph.py` in each checkout."""
+    found: list[str | None] = []
+    for i, source in enumerate(sources):
+        (tmp_path / str(i)).mkdir()
+        found.append(fingerprint(_module(tmp_path / str(i) / "graph.py", source).node))
+    return found
+
+
+@pytest.mark.parametrize("shape", HOLDS)
+def test_a_project_object_counts_by_its_attributes(tmp_path: Path, shape: str) -> None:
+    source = HOLDS[shape] + USES_CLIENT
+    base, head, swapped = _checkouts(tmp_path, source, source, source.replace("fake-40", "fake-5"))
+    assert base == head is not None  # the same code in another checkout
+    assert swapped != base
+
+
+# A wrapper stores the API key it read from the environment at init. A dev key at record time and
+# a CI key would make every node that reaches it read as changed in CI, so a name with a secret
+# word as a whole segment is skipped: split on "_" and camelCase, in any case.
+SECRET_NAMES = {
+    "api_key": False,
+    "apiKey": False,
+    "APIKey": False,
+    "access_token": False,
+    "auth_header": False,
+    "client_secret": False,
+    "cache_key": False,
+    "OPENAI_API_KEY": False,
+    "model": True,
+    "max_tokens": True,
+    "keywords": True,
+    "author": True,
+    "tokenizer": True,
+}
+
+
+@pytest.mark.parametrize(("name", "counts"), SECRET_NAMES.items(), ids=SECRET_NAMES.keys())
+def test_an_attribute_named_for_a_secret_does_not_count(
+    tmp_path: Path, name: str, counts: bool
+) -> None:
+    source = (
+        "class Chat:\n"
+        "    def __init__(self, value):\n"
+        "        self.model = 'fake-40'\n"
+        f"        self.{name} = value\n\n"
+        "CLIENT = Chat('one')\n\n"
+        "def node(state):\n"
+        "    return {'a': type(CLIENT).__name__}\n"
+    )
+    one, two = _checkouts(tmp_path, source, source.replace("'one'", "'two'"))
+    assert one is not None
+    assert (one != two) is counts
+
+
+# Library state: a callback handler's or an exception's own fields are the library's.
+STATEFUL_BASES = {
+    "callback_handler": (
+        "from langchain_core.callbacks import BaseCallbackHandler\n\n"
+        "class Held(BaseCallbackHandler):\n"
+        "    pass\n"
+    ),
+    "exception": "class Held(Exception):\n    pass\n",
+}
+
+
+@pytest.mark.parametrize("base", STATEFUL_BASES.values(), ids=STATEFUL_BASES.keys())
+def test_an_object_with_a_stateful_library_base_counts_as_before(tmp_path: Path, base: str) -> None:
+    # Its class and its repr, as before T250: a counter a run sets on it changes nothing.
+    node = "\nHELD = Held()\n\ndef node(state):\n    return {'a': type(HELD).__name__}\n"
+    graph = _module(tmp_path / "graph.py", base + node)
+    before = fingerprint(graph.node)
+    graph.HELD.calls = 3
+    assert fingerprint(graph.node) == before is not None
+
+
+@pytest.mark.parametrize(
+    ("head", "served"),
+    [
+        ("Link(Link(Link(Link(None))))", True),  # 4 objects deep: the cap
+        ("Link(Link(Link(Link(Link(None)))))", False),
+        ("Link('x' * 70_000)", False),  # past 64 KiB of one object's attribute text
+    ],
+    ids=["4 deep", "5 deep", "70k characters"],
+)
+def test_an_object_past_the_caps_has_no_fingerprint(
+    tmp_path: Path, head: str, served: bool
+) -> None:
+    # Past either cap lgcov can't vouch for the node, so it runs live: never served on a guess.
+    link = "class Link:\n    def __init__(self, nxt):\n        self.nxt = nxt\n\n"
+    node = "\n\ndef node(state):\n    return {'a': type(HEAD).__name__}\n"
+    graph = _module(tmp_path / "graph.py", f"{link}HEAD = {head}{node}")
+    assert (fingerprint(graph.node) is not None) is served
+
+
+def test_a_value_a_run_sets_on_a_project_object_changes_the_fingerprint(tmp_path: Path) -> None:
+    # T250's limit, pinned on purpose, as for a module-level value a run changes: fingerprints
+    # are taken per case, so the next case's nodes read as changed and run live, never served
+    # stale. A follow-up could take them once per process, before the first case.
+    graph = _module(tmp_path / "graph.py", HOLDS["plain"] + USES_CLIENT)
+    before = fingerprint(graph.node)
+    graph.CLIENT.calls = 1
+    assert fingerprint(graph.node) != before
+
+
+def test_a_model_name_a_node_reads_from_the_environment_is_in_no_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A documented gap: the fingerprint doesn't read the environment, so a served node stays
+    # stale after a change there. `--live` is the way round it.
+    source = "import os\n\ndef node(state):\n    return {'a': os.environ.get('LGCOV_T250_MODEL')}\n"
+    graph = _module(tmp_path / "graph.py", source)
+    monkeypatch.setenv("LGCOV_T250_MODEL", "fake-40")
+    before = fingerprint(graph.node)
+    monkeypatch.setenv("LGCOV_T250_MODEL", "fake-5")
+    assert fingerprint(graph.node) == before is not None
+
+
+# The baselines this repo commits, each recorded from the demo agent.
+BASELINES = (
+    "examples/demo_agent/cassettes/baseline.json",
+    "tests/fixtures/demo_baseline.json",
+    "tests/fixtures/selfcheck/cassettes/baseline.json",
+)
+
+
+@pytest.mark.parametrize("baseline", BASELINES)
+def test_a_committed_baseline_keeps_its_fingerprints(baseline: str) -> None:
+    # A fingerprint change makes a recorded node run live, and read as changed, until re-recorded.
+    root = Path(__file__).resolve().parents[1]
+    graph = _load_graph(f"{root / 'examples' / 'demo_agent' / 'graph.py'}:graph")
+    runs = runs_from_json((root / baseline).read_text(encoding="utf-8"))
+    steps = [step for run in runs for step in run.steps]
+    codes = _codes(graph, steps)
+    assert [(s.node, s.code) for s in steps] == [(s.node, codes[s.node]) for s in steps]

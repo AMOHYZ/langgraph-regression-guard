@@ -582,8 +582,7 @@ def _shared_lines(shared: SharedReport | None) -> list[str]:
         f"recall {_plain(every.drift.recall)}.** "
         + (f"It misses {missed}: {'; '.join(misses)}. " if misses else "")
         + "Inside a subgraph it calls the subgraph node inconclusive, since that has no "
-        "fingerprint (T220's gap). A client object counts by its class and its repr, and this "
-        "one's repr hides its model, so no fingerprint changed and lgcov saw no drift.",
+        "fingerprint (T220's gap).",
         f"- **Against regression roots, lgcov's precision is "
         f"{_plain(every.regression.precision)}.** Of the other "
         f"{every.regression.precision.of - every.regression.precision.hits} nodes it names, "
@@ -595,10 +594,9 @@ def _shared_lines(shared: SharedReport | None) -> list[str]:
         f"- **End-to-end names no node.** As a detector, its final answer changed on "
         f"{_plain(shared.end_to_end_caught)} regressed cases and on "
         f"{_plain(shared.end_to_end_false)} harmless ones.",
-        "- **Follow-ups:** fingerprint and record the nodes inside a subgraph (T193), and "
-        "fingerprint a project object's attributes, not only its repr. Transitive-helper "
-        "fingerprints aren't the gap: here and in T220, a helper edit changed the fingerprint of "
-        "every node lgcov fingerprints that reaches it.",
+        "- **Follow-ups:** fingerprint and record the nodes inside a subgraph (T193). "
+        "Transitive-helper fingerprints aren't the gap: here and in T220, a helper edit changed "
+        "the fingerprint of every node lgcov fingerprints that reaches it.",
         "",
     ]
 
@@ -625,9 +623,9 @@ def render_section(report: Report) -> str:
         [
             "- The T182 cases come from one demo-shaped agent with a fake model and the same three "
             "questions, so each edit counts up to three times.",
-            "- Not built for T182: a model name read from an environment variable. The fingerprint "
-            "doesn't read the environment, so it is predicted to act like the client object: no "
-            "fingerprint change, and no drift seen.",
+            "- Not built for T182: a model name a node reads from an environment variable. The "
+            "fingerprint doesn't read the environment, so it is predicted to change no "
+            "fingerprint, and lgcov to see no drift.",
         ]
         if report.shared
         else []

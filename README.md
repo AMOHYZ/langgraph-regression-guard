@@ -144,9 +144,18 @@ its recorded output without running it, when two things match the recording:
 - **Its code fingerprint**: the node function's code, defaults and closure
   values, plus the values of the module-level names it uses, following the
   functions, classes and modules of your project the same way. Library code
-  counts by name, and other objects (a chat model client, say) by their repr.
+  counts by name, and other objects (a LangChain chat model, say) by their repr.
   Code counts as its syntax tree, so a comment, whitespace, line wrapping or quote
   style doesn't change it.
+- **What an object of your own class holds counts too,** though its repr hides it: a model name
+  kept in your own client class changes the fingerprint. Its attributes and slots are followed up
+  to 4 objects deep and 64 KiB of text per object; past either limit the node gets no fingerprint
+  and runs live. An object whose class inherits from a library class with state of its own (a
+  pydantic model, an Enum, an exception) counts by its repr, as a library object does.
+- **An attribute named for a secret doesn't count:** one where a whole word of the name, split on
+  `_` and camelCase, is `key`, `apikey`, `token`, `secret`, `password`, `passwd`, `credential`,
+  `credentials` or `auth`. So `api_key`, `apiKey` and `access_token` are skipped, and a dev key
+  and a CI key give the same fingerprint, while `max_tokens` counts.
 - **A node function's own docstring doesn't count,** unless something could read it: the
   function has a decorator, a `ToolNode` in the graph exposes it as a tool, its code or project
   code it reaches names `__doc__` or `getdoc`, or the docstring shares a line with code. The
@@ -156,9 +165,11 @@ its recorded output without running it, when two things match the recording:
 
 Everything else runs live: changed nodes, nodes that are not plain functions
 (subgraphs, `ToolNode`) and every node of an older cassette with no recorded
-inputs. What a node reads at run time (files, environment variables, network) and
-dependency upgrades are not part of the fingerprint: pass `--live` to either
-command to re-run every node.
+inputs. So does a node whose fingerprint takes in a value that differs from one
+process or run to the next, such as a timestamp or a counter a run increments, in
+a module-level name or in an object of your class. What a node reads at run time
+(files, environment variables, network) and dependency upgrades are not part of
+the fingerprint: pass `--live` to either command to re-run every node.
 
 #### Known replay limits
 

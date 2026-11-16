@@ -379,10 +379,20 @@ def _chain(a_out: int) -> CompiledStateGraph[S]:
     return g.compile()
 
 
+def _recorded(a_out: int) -> Cassette:
+    """`_chain(a_out)` recorded on a clock set back to 0 before and after, as a fresh process
+    finds it. T250: a node's fingerprint counts what CLOCK holds, so the time a recording left
+    on it would read as a code change."""
+    CLOCK.now = 0.0
+    cassette = record(_chain(a_out), {"x": 0})
+    CLOCK.now = 0.0
+    return cassette
+
+
 def test_replay_run_tells_served_live_and_diverged_calls_apart() -> None:
     from lgcov.cassette import replay_run
 
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     r = replay_run(_chain(2), cassette, serve=True)  # on_divergence="flag" by default
     # a changed; b's code didn't, but its input did: diverged, so it ran live.
     assert [(c.node, c.how) for c in r.calls] == [
@@ -397,7 +407,7 @@ def test_replay_run_tells_served_live_and_diverged_calls_apart() -> None:
 def test_on_divergence_fail_stops_the_run_and_leaves_the_rest_not_checked() -> None:
     from lgcov.cassette import replay_run
 
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     r = replay_run(_chain(2), cassette, serve=True, on_divergence="fail")
     assert r.halt is not None and (r.halt.node, r.halt.why) == ("b", "diverged")
     assert r.not_checked == ("b", "c")
@@ -409,7 +419,7 @@ def test_compared_run_says_what_replay_run_says_from_the_steps_alone() -> None:
     # T179: so a job that can't run the graph can do this with steps another job reports.
     from lgcov.cassette import ON_DIVERGENCE, compared_run, replay_run
 
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     for on_divergence in ON_DIVERGENCE:
         r = replay_run(_chain(2), cassette, serve=True, on_divergence=on_divergence)
         assert compared_run(cassette, r.steps, r.calls, r.halt) == r
@@ -418,7 +428,7 @@ def test_compared_run_says_what_replay_run_says_from_the_steps_alone() -> None:
 def test_on_divergence_live_runs_the_rest_of_the_run_live() -> None:
     from lgcov.cassette import replay_run
 
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     r = replay_run(_chain(2), cassette, serve=True, on_divergence="live")
     assert [(c.node, c.how) for c in r.calls] == [
         ("a", "live"),
@@ -430,7 +440,7 @@ def test_on_divergence_live_runs_the_rest_of_the_run_live() -> None:
 def test_the_budget_stops_new_live_calls_once_the_projection_runs_over() -> None:
     from lgcov.cassette import Budget, replay_run
 
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     budget = Budget(90, CLOCK, expected_live=3)
     r = replay_run(_chain(2), cassette, serve=True, budget=budget)
     # a ran: nothing was measured before it. Then 50 s + 50 s x 2 to come > 90 s, so b
@@ -444,7 +454,7 @@ def test_the_budget_stops_new_live_calls_once_the_projection_runs_over() -> None
 def test_served_calls_still_run_after_the_budget_is_hit() -> None:
     from lgcov.cassette import Budget, replay_run
 
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     budget = Budget(0, CLOCK)
     budget.hit = ("a", 0.0)
     r = replay_run(_chain(1), cassette, serve=True, budget=budget)
@@ -454,7 +464,7 @@ def test_served_calls_still_run_after_the_budget_is_hit() -> None:
 def test_unservable_counts_recorded_steps_whose_code_changed() -> None:
     from lgcov.cassette import unservable
 
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     assert unservable(_chain(1), [cassette]) == 0
     assert unservable(_chain(2), [cassette, cassette]) == 2  # a, in each run
 

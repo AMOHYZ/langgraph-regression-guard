@@ -13,8 +13,8 @@ Each kind of evidence has its own section, and their numbers never combine: demo
 - **One real PR (n=1).** Both runs are the same PR and question, so they aren't two data points.
 - **The edited-node baseline beats lgcov on single-node edits,** on recall, 1.00 (20 of 20) against 0.85 (17 of 20), and on coverage, 1.00 (44 of 44) against 0.86 (38 of 44). lgcov is ahead only on case-level precision, 0.45 against 0.35: see [Synthetic](#synthetic).
 - **`lgcov ci` can't tell an added node from a newly reached one.** The synthetic bench gives lgcov both graphs, so a node a route stopped or started reaching is propagated there, and exact match on all edits is 0.90 (28 of 31): see [Per node](#per-node). `lgcov ci` doesn't know base's graph yet, in one job or two, so a node only the PR reached, which no baseline run ever reached, reads inconclusive whether the PR added it or newly reached it. It blocks either way. `lgcov bench` on real rows and `--from-runs` have neither graph, so there a node only one side ran is always inconclusive. The label becomes precise once the baseline recording holds the graph's node names: see [the design note](router-route-design.md#the-graphs-node-names-t238).
-- **No harmless-edit discrimination yet.** lgcov names a root on 21 of 24 harmless synthetic cases and leaves the other 3 inconclusive, and both node-naming baselines flag 24 of 24; negative controls (T123) are the next test. On edits the diff can't pin to one node, it names a root on 9 of 14 harmless cases.
-- **On edits the diff can't pin to one node, lgcov misses 11 of 32 drift roots** (T182). Six sit inside a subgraph, which it calls inconclusive, since a subgraph has no fingerprint. Five are a model swap inside a client object whose repr hides the model name: no fingerprint changes, so lgcov sees no drift. Each of the 21 nodes it names there is a drift root, and 9 of them are regression roots: see [Edits the diff can't pin to one node](#edits-the-diff-cant-pin-to-one-node).
+- **No harmless-edit discrimination yet.** lgcov names a root on 21 of 24 harmless synthetic cases and leaves the other 3 inconclusive, and both node-naming baselines flag 24 of 24; negative controls (T123) are the next test. On edits the diff can't pin to one node, it names a root on 10 of 14 harmless cases.
+- **On edits the diff can't pin to one node, lgcov misses 6 of 32 drift roots** (T182). All six sit inside a subgraph, which it calls inconclusive, since a subgraph has no fingerprint. The five T182 found in a model swap inside a client object are seen since T250: the fingerprint counts what a project object holds, not only its repr. Each of the 26 nodes it names there is a drift root, and 13 of them are regression roots: see [Edits the diff can't pin to one node](#edits-the-diff-cant-pin-to-one-node).
 - **Synthetic cases come from our own generator,** so they share its assumptions about what an edit looks like; real PRs (T171) are the check.
 - **Usage counts are pending.** Request, token and error counts for the `gpt-6-luna` runs and the pilot still have to come from the usage page: see [Cost per run](#cost-per-run).
 - **lgcov's root label has no noise threshold.** Base run against itself gave the same root and propagated labels as both #163 runs, so #163's 1 of 1 can't be told apart from model noise, and real-PR root precision doesn't test the kill criterion yet: see [A/A noise floor](#aa-noise-floor). `lgcov bench --noise-repeats 3` gave no false alarm on one later base-against-base run ([A/A at K=3](#aa-at-k3)); the gate doesn't use that rule.
@@ -45,7 +45,7 @@ lgcov bench tests/fixtures/bench
 
 ## Synthetic
 
-Run 2026-11-15: 72 cases from 24 distinct edits on 3 offline agents, covering all 8 classes in [mutations.yaml](mutations.yaml) (31 regressed, 24 benign, 17 inert). No paid calls. These numbers never combine with the real PRs below.
+Run 2026-11-16: 72 cases from 24 distinct edits on 3 offline agents, covering all 8 classes in [mutations.yaml](mutations.yaml) (31 regressed, 24 benign, 17 inert). No paid calls. These numbers never combine with the real PRs below.
 
 - **Precision:** of the cases where a method names a node, the share where that node is the edited one and the edit regressed.
 - **Recall:** of regressed cases, the share where the edited node is named.
@@ -142,13 +142,13 @@ The counts are small, 10 regressed cases, so every ratio comes with them.
 | Model swap (support) | lgcov root | 0.50 (4 of 8) | 1.00 (4 of 4) | 1.00 (2 of 2) | 1.00 (4 of 4) | 0 | 1.00 (4 of 4) |
 | Model swap (support) | edited node from the diff: all touched nodes | 0.33 (4 of 12) | 1.00 (4 of 4) | 1.00 (2 of 2) | 1.00 (4 of 4) | 0 | — |
 | Model swap (support) | first divergence | 0.33 (2 of 6) | 0.50 (2 of 4) | 0.00 (0 of 2) | 1.00 (4 of 4) | 0 | — |
-| Model swap (support-client) | lgcov root | — | 0.00 (0 of 4) | 0.00 (0 of 2) | 0.00 (0 of 1) | 0 | 0.00 (0 of 2) |
+| Model swap (support-client) | lgcov root | 0.80 (4 of 5) | 1.00 (4 of 4) | 1.00 (2 of 2) | 1.00 (1 of 1) | 0 | 1.00 (2 of 2) |
 | Model swap (support-client) | edited node from the diff: all touched nodes | 0.67 (4 of 6) | 1.00 (4 of 4) | 1.00 (2 of 2) | 1.00 (1 of 1) | 0 | — |
 | Model swap (support-client) | first divergence | 0.67 (2 of 3) | 0.50 (2 of 4) | 0.00 (0 of 2) | 1.00 (1 of 1) | 0 | — |
 | Shared config (support) | lgcov root | 0.40 (2 of 5) | 1.00 (2 of 2) | 0.00 (0 of 2) | 1.00 (1 of 1) | 0 | 1.00 (4 of 4) |
 | Shared config (support) | edited node from the diff: all touched nodes | 0.17 (2 of 12) | 1.00 (2 of 2) | 0.00 (0 of 2) | 1.00 (1 of 1) | 0 | — |
 | Shared config (support) | first divergence | 0.67 (2 of 3) | 1.00 (2 of 2) | 1.00 (2 of 2) | 1.00 (1 of 1) | 0 | — |
-| All | lgcov root | 0.43 (9 of 21) | 0.64 (9 of 14) | 0.40 (4 of 10) | 0.64 (9 of 14) | 5 | 0.80 (16 of 20) |
+| All | lgcov root | 0.50 (13 of 26) | 0.93 (13 of 14) | 0.60 (6 of 10) | 0.71 (10 of 14) | 5 | 0.90 (18 of 20) |
 | All | edited node from the diff: all touched nodes | 0.23 (14 of 60) | 1.00 (14 of 14) | 0.40 (4 of 10) | 1.00 (14 of 14) | 0 | — |
 | All | first divergence | 0.38 (9 of 24) | 0.64 (9 of 14) | 0.50 (5 of 10) | 1.00 (14 of 14) | 0 | — |
 
@@ -165,21 +165,21 @@ The counts are small, 10 regressed cases, so every ratio comes with them.
 | Model swap (support) | lgcov root | 1.00 (8 of 8) | 1.00 (8 of 8) | 1.00 (6 of 6) | 0 |
 | Model swap (support) | edited node from the diff: all touched nodes | 0.67 (8 of 12) | 1.00 (8 of 8) | 0.33 (2 of 6) | 0 |
 | Model swap (support) | first divergence | 1.00 (6 of 6) | 0.75 (6 of 8) | 0.67 (4 of 6) | 0 |
-| Model swap (support-client) | lgcov root | — | 0.00 (0 of 5) | 0.00 (0 of 3) | 0 |
+| Model swap (support-client) | lgcov root | 1.00 (5 of 5) | 1.00 (5 of 5) | 1.00 (3 of 3) | 0 |
 | Model swap (support-client) | edited node from the diff: all touched nodes | 0.83 (5 of 6) | 1.00 (5 of 5) | 0.67 (2 of 3) | 0 |
 | Model swap (support-client) | first divergence | 1.00 (3 of 3) | 0.60 (3 of 5) | 0.33 (1 of 3) | 0 |
 | Shared config (support) | lgcov root | 1.00 (5 of 5) | 1.00 (5 of 5) | 1.00 (3 of 3) | 0 |
 | Shared config (support) | edited node from the diff: all touched nodes | 0.42 (5 of 12) | 1.00 (5 of 5) | 0.67 (2 of 3) | 0 |
 | Shared config (support) | first divergence | 1.00 (3 of 3) | 0.60 (3 of 5) | 0.33 (1 of 3) | 0 |
-| All | lgcov root | 1.00 (21 of 21) | 0.66 (21 of 32) | 0.62 (15 of 24) | 5 |
+| All | lgcov root | 1.00 (26 of 26) | 0.81 (26 of 32) | 0.75 (18 of 24) | 5 |
 | All | edited node from the diff: all touched nodes | 0.53 (32 of 60) | 1.00 (32 of 32) | 0.33 (8 of 24) | 0 |
 | All | first divergence | 0.79 (19 of 24) | 0.59 (19 of 32) | 0.46 (11 of 24) | 0 |
 
-- **Against drift roots, lgcov's precision is 1.00 (21 of 21) and its recall 0.66 (21 of 32).** It misses 11: 6 in Shared helper (support-nested), where its fingerprint saw 0.50 (2 of 4) of the touched nodes and 5 cases are inconclusive; 5 in Model swap (support-client), where its fingerprint saw 0.00 (0 of 2) of the touched nodes and 0 cases are inconclusive. Inside a subgraph it calls the subgraph node inconclusive, since that has no fingerprint (T220's gap). A client object counts by its class and its repr, and this one's repr hides its model, so no fingerprint changed and lgcov saw no drift.
-- **Against regression roots, lgcov's precision is 0.43 (9 of 21).** Of the other 12 nodes it names, 12 are drift roots that did no harm: correct as drift, false as harm.
+- **Against drift roots, lgcov's precision is 1.00 (26 of 26) and its recall 0.81 (26 of 32).** It misses 6: 6 in Shared helper (support-nested), where its fingerprint saw 0.50 (2 of 4) of the touched nodes and 5 cases are inconclusive. Inside a subgraph it calls the subgraph node inconclusive, since that has no fingerprint (T220's gap).
+- **Against regression roots, lgcov's precision is 0.50 (13 of 26).** Of the other 13 nodes it names, 13 are drift roots that did no harm: correct as drift, false as harm.
 - **All touched nodes names 60 nodes,** with recall 1.00 (14 of 14) against regression roots. **First divergence names 24,** one per changed case, with exact match 0.50 (5 of 10) against regression roots.
 - **End-to-end names no node.** As a detector, its final answer changed on 1.00 (10 of 10) regressed cases and on 1.00 (14 of 14) harmless ones.
-- **Follow-ups:** fingerprint and record the nodes inside a subgraph (T193), and fingerprint a project object's attributes, not only its repr. Transitive-helper fingerprints aren't the gap: here and in T220, a helper edit changed the fingerprint of every node lgcov fingerprints that reaches it.
+- **Follow-ups:** fingerprint and record the nodes inside a subgraph (T193). Transitive-helper fingerprints aren't the gap: here and in T220, a helper edit changed the fingerprint of every node lgcov fingerprints that reaches it.
 
 ### A/A re-runs
 
@@ -213,7 +213,7 @@ The noise rule (`drift_exceeds_noise`), on the seeded-noise agent at K=3: the re
 - The regression label comes from each agent's own outcome check.
 - The two order questions gave every edit the same label, so the case-level numbers count some edits more than their evidence supports.
 - The T182 cases come from one demo-shaped agent with a fake model and the same three questions, so each edit counts up to three times.
-- Not built for T182: a model name read from an environment variable. The fingerprint doesn't read the environment, so it is predicted to act like the client object: no fingerprint change, and no drift seen.
+- Not built for T182: a model name a node reads from an environment variable. The fingerprint doesn't read the environment, so it is predicted to change no fingerprint, and lgcov to see no drift.
 
 Reproduce:
 

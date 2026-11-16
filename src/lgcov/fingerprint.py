@@ -11,10 +11,12 @@ from another checkout. T212: a function's source counts as its syntax tree (`_tr
 comments, whitespace, line wrapping, quote style and redundant brackets don't, and neither does
 a node function's own docstring where nothing reads it (`_bare`). A class counts as
 its first use would leave it. A pydantic class
-counts by its members and core schema, without the schema's class ids.
+counts by its members and core schema, without the schema's class ids. T250: an object of a
+project class also counts by what it holds, its attributes and slots, a few objects deep, but
+not a secret-named one (`_attributes`).
 
 Not seen: what a node reads at run time (files, environment, network), library upgrades,
-and changes an object's repr hides. A node that uses a compiled graph, or code with no
+and changes a library object's repr hides. A node that uses a compiled graph, or code with no
 readable source, gets no fingerprint (None) and always runs live. Code installed anywhere else
 (`pip install --target`, `UV_LINK_MODE=symlink`) counts as project code, which can only make a
 node run live: an upgrade counts as an edit, and a cassette recorded elsewhere doesn't match.
@@ -76,6 +78,22 @@ _READS_SOURCE = frozenset({"getsource", "getsourcelines"})
 _READS_DOC = frozenset({"__doc__", "getdoc"})
 
 
+# T250: how far a project object's attributes are followed. Past either cap the node gets no
+# fingerprint and runs live, so a cap never hides an edit. Proposals, not measured on real agents.
+_MAX_DEPTH = 4  # project objects inside project objects; the one a node names is the first
+_MAX_TEXT = 1 << 16  # characters of one object's attribute text
+
+# T250: words that name a secret, as a whole segment of an attribute's name. A wrapper keeps the
+# API key it read from the environment: counted, a dev key at record time and a CI key would make
+# every node that reaches it read as changed in CI.
+_SECRET_WORDS = frozenset(
+    {"key", "apikey", "token", "secret", "password", "passwd", "credential", "credentials", "auth"}
+)
+# Where a name splits into segments: at `_` (api_key), before a capital after a small letter or a
+# digit (apiKey), and before the last capital of a run (APIKey).
+_SEGMENT = re.compile(r"_|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
 class _Raw(dict[int, object]):
     """The `seen` of a walk in the scheme from before T212: each function as its raw lines.
     Recordings made before T212 hold these values, so they are still computed, to match them.
@@ -107,6 +125,12 @@ def _in_project(path: str | None) -> bool:
     return _SITE_DIRS.isdisjoint(resolved.parts) and not any(
         resolved.is_relative_to(root) for root in _LIBRARY
     )
+
+
+def _library(cls: type) -> bool:
+    """Installed code, which counts by name. A class whose module isn't imported isn't."""
+    module = sys.modules.get(cls.__module__)
+    return module is not None and not _in_project(getattr(module, "__file__", None))
 
 
 def _name(value: FunctionType | type) -> str:
@@ -255,8 +279,9 @@ def _function(fn: FunctionType, seen: dict[int, object], bare: bool = False) -> 
     return "\n".join([source, values, *used])
 
 
-def _describe(value: object, names: frozenset[str], seen: dict[int, object]) -> str:
-    """Stable text for a value a node's code uses; raises when it can't vouch for one."""
+def _describe(value: object, names: frozenset[str], seen: dict[int, object], depth: int = 0) -> str:
+    """Stable text for a value a node's code uses; raises when it can't vouch for one.
+    T250: `depth`, how many project objects the value sits inside (`_attributes`)."""
     if value is None or isinstance(value, str | bytes | int | float | complex):
         return repr(value)
     if id(value) in seen:
@@ -265,9 +290,9 @@ def _describe(value: object, names: frozenset[str], seen: dict[int, object]) -> 
     if isinstance(value, FunctionType):
         return _function(value, seen) if _in_project(value.__code__.co_filename) else _name(value)
     if isinstance(value, MethodType):
-        return _describe((value.__func__, value.__self__), names, seen)
+        return _describe((value.__func__, value.__self__), names, seen, depth)
     if isinstance(value, functools.partial):
-        return _describe((value.func, value.args, value.keywords), names, seen)
+        return _describe((value.func, value.args, value.keywords), names, seen, depth)
     if isinstance(value, ModuleType):
         if not _in_project(getattr(value, "__file__", None)):
             return value.__name__
@@ -276,8 +301,7 @@ def _describe(value: object, names: frozenset[str], seen: dict[int, object]) -> 
             f"{n}={_describe(attrs[n], names, seen)}" for n in sorted(names & attrs.keys())
         )
     if isinstance(value, type):
-        module = sys.modules.get(value.__module__)  # None: not imported, so not a library
-        if module is not None and not _in_project(getattr(module, "__file__", None)):
+        if _library(value):
             return _name(value)
         _finish_building(value)
         members = {k: v for k, v in vars(value).items() if k not in _CLASS_NOISE}
@@ -289,15 +313,60 @@ def _describe(value: object, names: frozenset[str], seen: dict[int, object]) -> 
     if isinstance(value, Pregel):
         raise TypeError("a compiled graph is not fingerprinted")
     if isinstance(value, list | tuple):
-        return "[" + ",".join(_describe(v, names, seen) for v in value) + "]"
+        return "[" + ",".join(_describe(v, names, seen, depth) for v in value) + "]"
     if isinstance(value, set | frozenset):
-        return "{" + ",".join(sorted(_describe(v, names, seen) for v in value)) + "}"
+        return "{" + ",".join(sorted(_describe(v, names, seen, depth) for v in value)) + "}"
     if isinstance(value, dict):
         items = (
-            f"{_describe(k, names, seen)}:{_describe(v, names, seen)}" for k, v in value.items()
+            f"{_describe(k, names, seen, depth)}:{_describe(v, names, seen, depth)}"
+            for k, v in value.items()
         )
         return "{" + ",".join(items) + "}"
-    # Any other object: its class, its repr, and project code it holds (a @tool's func).
+    # Any other object: its class, its repr, and project code it holds (a @tool's func). T250: and
+    # what a project object holds.
     held = [v for v in getattr(value, "__dict__", {}).values() if isinstance(v, FunctionType)]
     text = _describe(type(value), names, seen) + _ADDRESS.sub("", repr(value))
-    return text + _describe(held, names, seen)
+    return text + _describe(held, names, seen) + _attributes(value, names, seen, depth)
+
+
+def _keeps_state(cls: type) -> bool:
+    """T250: a class that gives its instances state of its own: a `__dict__` or a slot."""
+    return "__dict__" in vars(cls) or bool(vars(cls).get("__slots__"))
+
+
+def _secret(name: str) -> bool:
+    """T250: a name with a secret word as a whole segment: api_key, apiKey and access_token, but
+    not max_tokens, keywords or author."""
+    return any(part.lower() in _SECRET_WORDS for part in _SEGMENT.split(name))
+
+
+def _attributes(value: object, names: frozenset[str], seen: dict[int, object], depth: int) -> str:
+    """T250: what a project object holds, which its repr may hide, as a client's model name: its
+    instance attributes and set slots, by name, each counted as `_describe` counts any value.
+
+    Nothing for an object of a library class, or of a class with a library base that keeps state
+    of its own (a pydantic model, an Enum, an exception): those count by their repr, as before.
+    Plain functions are left out, since the caller counts them, and so are secret-named
+    attributes (`_secret`). Read straight from `__dict__` and the slots, so no property runs.
+    Raises past `_MAX_DEPTH` or `_MAX_TEXT`: the node then runs live."""
+    cls = type(value)
+    if _library(cls) or any(_library(c) and _keeps_state(c) for c in cls.__mro__):
+        return ""
+    attrs = dict(getattr(value, "__dict__", {}))
+    for c in cls.__mro__:
+        slots = vars(c).get("__slots__", ())
+        for name in (slots,) if isinstance(slots, str) else slots:
+            slot = vars(c).get(name)
+            if name in attrs or name in ("__dict__", "__weakref__") or slot is None:
+                continue
+            with contextlib.suppress(AttributeError):  # a slot never set
+                attrs[name] = slot.__get__(value, c)
+    kept = {k: v for k, v in attrs.items() if not isinstance(v, FunctionType) and not _secret(k)}
+    if not kept:
+        return ""
+    if depth >= _MAX_DEPTH:
+        raise ValueError(f"a project object more than {_MAX_DEPTH} deep")
+    text = _describe(dict(sorted(kept.items())), names, seen, depth + 1)
+    if len(text) > _MAX_TEXT:
+        raise ValueError(f"a project object's attributes past {_MAX_TEXT} characters")
+    return "{attrs " + text + "}"
