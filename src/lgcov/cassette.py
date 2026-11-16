@@ -9,7 +9,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Collection, Container, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
-from contextvars import copy_context
+from contextvars import ContextVar, copy_context
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial, wraps
@@ -348,21 +348,60 @@ def _tool_codes(graph: Any) -> set[CodeType]:
     return found
 
 
+# One lgcov run's fingerprints, by function and by (raw, node): taken the first time the run asks,
+# before its first case, so a counter or cache a case fills reaches no later case's. None outside
+# a run: each call fingerprints afresh, so code that records, changes a value and replays in one
+# process sees the change.
+_RUN: ContextVar[dict[FunctionType, dict[tuple[bool, bool], str | None]] | None] = ContextVar(
+    "lgcov_fingerprints", default=None
+)
+
+
+@contextmanager
+def fingerprint_session() -> Iterator[None]:
+    """One lgcov run, from a command's entry point: each node's and router's fingerprint is
+    taken once, before the first case, and every case in the run gets that one. The next run
+    takes them again, so it sees what changed since. It also works as a decorator."""
+    token = _RUN.set({})
+    try:
+        yield
+    finally:
+        _RUN.reset(token)
+
+
+def _print(fn: object, raw: bool = False, node: bool = False) -> str | None:
+    """`fingerprint`, taken once per function in a run (`fingerprint_session`). The old scheme's
+    is taken at the same moment, so the run never reads it from code a case has changed."""
+    prints = _RUN.get()
+    if prints is None or not isinstance(fn, FunctionType):
+        return fingerprint(fn, raw, node)
+    held = prints.setdefault(fn, {})
+    key = (raw, node and not raw)
+    if key not in held:
+        held[key] = fingerprint(fn, raw, node)
+        if (True, False) not in held:
+            held[(True, False)] = fingerprint(fn, raw=True)
+    return held[key]
+
+
 def _codes(graph: Any, recorded: Collection[Step] = ()) -> dict[str, str | None]:
     """The plain-function nodes replay wraps, by name; subgraphs and the like run untouched.
 
     T212: `recorded` may hold fingerprints in the scheme from before T212, where a function was
     its raw lines. A node whose old-scheme fingerprint is the recorded one is byte-identical to
     what was recorded, so it is unchanged, and its fingerprint here is that value: everything
-    downstream compares fingerprints as plain text."""
+    downstream compares fingerprints as plain text.
+
+    T250 follow-up: in an lgcov run each node's fingerprint is taken once per run, before the
+    first case (`fingerprint_session`)."""
     held = {(s.node, s.code) for s in recorded}
     tools = _tool_codes(graph)
     codes: dict[str, str | None] = {}
     for name, spec in getattr(graph, "nodes", {}).items():
         fn = _plain(spec.bound)
         if name != START and fn is not None:
-            codes[name] = fingerprint(fn, node=fn.__code__ not in tools)
-            if (name, codes[name]) not in held and (name, old := fingerprint(fn, raw=True)) in held:
+            codes[name] = _print(fn, node=fn.__code__ not in tools)
+            if (name, codes[name]) not in held and (name, old := _print(fn, raw=True)) in held:
                 codes[name] = old
     return codes
 
@@ -385,7 +424,7 @@ def _router_prints(
         parts: list[str] = []
         for name, branch in sorted(per_source.items()):
             path = getattr(branch, "path", None)
-            code = fingerprint(getattr(path, "func", None) or getattr(path, "afunc", None), raw)
+            code = _print(getattr(path, "func", None) or getattr(path, "afunc", None), raw)
             ends = sorted(map(repr, (getattr(branch, "ends", None) or {}).items()))
             parts += [] if code is None else [f"{name}:{code}:{ends}"]
         whole = len(parts) == len(per_source)

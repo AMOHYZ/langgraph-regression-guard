@@ -1002,9 +1002,9 @@ def test_an_object_past_the_caps_has_no_fingerprint(
 
 
 def test_a_value_a_run_sets_on_a_project_object_changes_the_fingerprint(tmp_path: Path) -> None:
-    # T250's limit, pinned on purpose, as for a module-level value a run changes: fingerprints
-    # are taken per case, so the next case's nodes read as changed and run live, never served
-    # stale. A follow-up could take them once per process, before the first case.
+    # `fingerprint()` reads the object as it is now, as it reads a module-level value. An lgcov
+    # run takes each node's fingerprint once, before its first case (`fingerprint_session`), so a
+    # counter a case moves reaches no later case in that run: see test_cassette.py.
     graph = _module(tmp_path / "graph.py", HOLDS["plain"] + USES_CLIENT)
     before = fingerprint(graph.node)
     graph.CLIENT.calls = 1

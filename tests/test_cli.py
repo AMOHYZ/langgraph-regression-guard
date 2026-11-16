@@ -3567,3 +3567,60 @@ def test_bench_synthetic_writes_the_t182_table(tmp_path: Path) -> None:
     shared = json.loads(results.read_text(encoding="utf-8"))["shared"]
     assert (shared["cases"], shared["edits"], len(shared["per_case"])) == (30, 10, 30)
     assert "### Edits the diff can't pin to one node" in (tmp_path / "b.md").read_text("utf-8")
+
+
+# T250 follow-up: a counter a case moves, on a project object or in a module-level name.
+COUNTERS = {
+    "object": "class Tally:\n    def __init__(self):\n        self.calls = 0\n\n\n"
+    "TALLY = Tally()\n\n\ndef _count():\n    TALLY.calls += 1\n",
+    "module": "CALLS = 0\n\n\ndef _count():\n    global CALLS\n    CALLS += 1\n",
+}
+COUNTED = """\
+from pathlib import Path
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+LOG = Path(__file__).with_name("calls.log")
+COUNTER
+
+
+class State(TypedDict, total=False):
+    n: int
+    a: str
+
+
+def node(state):
+    _count()
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write("node\\n")
+    return {"a": f"n={state['n']}"}
+
+
+builder = StateGraph(State)
+builder.add_node("node", node)
+builder.add_edge(START, "node")
+builder.add_edge("node", END)
+graph = builder.compile()
+"""
+
+
+@pytest.mark.parametrize("counter", COUNTERS.values(), ids=COUNTERS.keys())
+def test_one_lgcov_run_takes_each_node_s_fingerprint_once(tmp_path: Path, counter: str) -> None:
+    # Each command is one run: `lgcov record` takes the node's fingerprint once, before its first
+    # case, so the counter the first case moved isn't in the second's, and `lgcov replay` serves
+    # both cases.
+    (tmp_path / "graph.py").write_text(COUNTED.replace("COUNTER", counter), encoding="utf-8")
+    (tmp_path / "inputs.json").write_text('[{"n": 1}, {"n": 2}]', encoding="utf-8")
+    cfg = tmp_path / "lgcov.yaml"
+    cfg.write_text(
+        f"graph_entrypoint: {tmp_path / 'graph.py'}:graph\n"
+        f"cassette_dir: {tmp_path / 'cassettes'}\n",
+        encoding="utf-8",
+    )
+    assert main(["record", "--config", str(cfg), "--inputs", str(tmp_path / "inputs.json")]) == 0
+    saved = json.loads((tmp_path / "cassettes" / "baseline.json").read_text(encoding="utf-8"))
+    assert len({step["code"] for run in saved["runs"] for step in run["steps"]}) == 1
+    (tmp_path / "calls.log").unlink()
+    assert main(["replay", "--config", str(cfg)]) == 0
+    assert not (tmp_path / "calls.log").exists()  # every case served: the node never ran
