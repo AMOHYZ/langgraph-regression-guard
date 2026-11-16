@@ -108,9 +108,11 @@ T182 found gaps that a schema change can name but not always close.
   the drift read "drifted with no changed node before it". `graph` gets one fingerprint per channel,
   so the comment can say "the state schema changed (channel `x`)". It makes no unit root by itself.
 - **A model name in a client object or an environment variable.** The fingerprint sees a
-  module-level client only through its class and repr, so it depends on the class (check 6). A plain
-  class's repr shows only its type, and a change to its model changed no fingerprint: T182 builds
-  this case. A LangChain chat model's repr left out a model name equal to its default and showed it
+  module-level client through its class and repr, so it depends on the class (check 6). A plain
+  class's repr shows only its type, so a change to its model changed no fingerprint: T182 built
+  this case. Since T250 (#161) an object of a project class also counts by what it holds, so that
+  change now changes the fingerprint of every node that reaches the client. A LangChain chat
+  model's repr left out a model name equal to its default and showed it
   otherwise. It also held langchain-core's version, so an upgrade would change it *(inferred from
   the repr)*. A name read from an environment variable inside the node changed nothing. Schema 2
   adds two things. The request as sent names the model whenever the unit runs live (question 3).
