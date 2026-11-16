@@ -3549,13 +3549,16 @@ def test_ci_names_no_root_inside_a_subgraph_and_t193_should_change_that() -> Non
     assert _shipped(flat, set(SUPPORT.graph.nodes)).root == {"respond"}
 
 
-def test_ci_sees_no_model_swap_inside_a_plain_client_object() -> None:
-    # A module-level object counts by its class and its repr, and this client's repr hides its
-    # model: no fingerprint changes, every node is served from the recording, no drift is seen.
+def test_ci_sees_a_model_swap_inside_a_plain_client_object() -> None:
+    # T250: a project object counts by what it holds, though its repr hides it, so the client's
+    # model is in the fingerprint of both nodes that use it. Both run live, and both are root:
+    # each one alone fails the outcome check.
     case = _shared_case(SUPPORT_CLIENT, "fake-5", "Where is my order?")
     assert case.truth.label == "regressed"
-    assert changed_nodes(case.graph, [case.base]) == set()
-    assert _shipped(case, set(SUPPORT_CLIENT.graph.nodes)) == Found(frozenset())
+    assert changed_nodes(case.graph, [case.base]) == {"classify", "respond"}
+    assert _shipped(case, set(SUPPORT_CLIENT.graph.nodes)) == Found(
+        frozenset({"classify", "respond"})
+    )
 
 
 def test_bench_synthetic_writes_the_t182_table(tmp_path: Path) -> None:

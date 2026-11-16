@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-15",
+  "date": "2026-11-16",
   "cases": 72,
   "edits": 24,
   "agents": 3,
@@ -1077,50 +1077,50 @@
         "method": "lgcov root",
         "regression": {
           "precision": {
-            "hits": 0,
-            "of": 0,
-            "value": null
+            "hits": 4,
+            "of": 5,
+            "value": 0.8
           },
           "recall": {
-            "hits": 0,
+            "hits": 4,
             "of": 4,
-            "value": 0.0
+            "value": 1.0
           },
           "exact": {
-            "hits": 0,
+            "hits": 2,
             "of": 2,
-            "value": 0.0
+            "value": 1.0
           },
           "false_flag": {
-            "hits": 0,
+            "hits": 1,
             "of": 1,
-            "value": 0.0
+            "value": 1.0
           },
           "inconclusive": 0
         },
         "drift": {
           "precision": {
-            "hits": 0,
-            "of": 0,
-            "value": null
+            "hits": 5,
+            "of": 5,
+            "value": 1.0
           },
           "recall": {
-            "hits": 0,
+            "hits": 5,
             "of": 5,
-            "value": 0.0
+            "value": 1.0
           },
           "exact": {
-            "hits": 0,
+            "hits": 3,
             "of": 3,
-            "value": 0.0
+            "value": 1.0
           },
           "false_flag": null,
           "inconclusive": 0
         },
         "fingerprint_saw": {
-          "hits": 0,
+          "hits": 2,
           "of": 2,
-          "value": 0.0
+          "value": 1.0
         }
       },
       {
@@ -1367,50 +1367,50 @@
         "method": "lgcov root",
         "regression": {
           "precision": {
-            "hits": 9,
-            "of": 21,
-            "value": 0.42857142857142855
+            "hits": 13,
+            "of": 26,
+            "value": 0.5
           },
           "recall": {
-            "hits": 9,
+            "hits": 13,
             "of": 14,
-            "value": 0.6428571428571429
+            "value": 0.9285714285714286
           },
           "exact": {
-            "hits": 4,
+            "hits": 6,
             "of": 10,
-            "value": 0.4
+            "value": 0.6
           },
           "false_flag": {
-            "hits": 9,
+            "hits": 10,
             "of": 14,
-            "value": 0.6428571428571429
+            "value": 0.7142857142857143
           },
           "inconclusive": 5
         },
         "drift": {
           "precision": {
-            "hits": 21,
-            "of": 21,
+            "hits": 26,
+            "of": 26,
             "value": 1.0
           },
           "recall": {
-            "hits": 21,
+            "hits": 26,
             "of": 32,
-            "value": 0.65625
+            "value": 0.8125
           },
           "exact": {
-            "hits": 15,
+            "hits": 18,
             "of": 24,
-            "value": 0.625
+            "value": 0.75
           },
           "false_flag": null,
           "inconclusive": 5
         },
         "fingerprint_saw": {
-          "hits": 16,
+          "hits": 18,
           "of": 20,
-          "value": 0.8
+          "value": 0.9
         }
       },
       {
@@ -2228,12 +2228,18 @@
           "classify",
           "respond"
         ],
-        "lgcov_root": [],
+        "lgcov_root": [
+          "classify",
+          "respond"
+        ],
         "lgcov_inconclusive": [],
         "first_divergence": [
           "classify"
         ],
-        "fingerprints_changed": []
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
       },
       {
         "agent": "support-client",
@@ -2253,12 +2259,18 @@
           "classify",
           "respond"
         ],
-        "lgcov_root": [],
+        "lgcov_root": [
+          "classify",
+          "respond"
+        ],
         "lgcov_inconclusive": [],
         "first_divergence": [
           "classify"
         ],
-        "fingerprints_changed": []
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
       },
       {
         "agent": "support-client",
@@ -2274,12 +2286,17 @@
         "drift_roots": [
           "respond"
         ],
-        "lgcov_root": [],
+        "lgcov_root": [
+          "respond"
+        ],
         "lgcov_inconclusive": [],
         "first_divergence": [
           "respond"
         ],
-        "fingerprints_changed": []
+        "fingerprints_changed": [
+          "classify",
+          "respond"
+        ]
       }
     ]
   }

@@ -331,8 +331,18 @@ def _chain(a_out: int) -> CompiledStateGraph[S]:
     return g.compile()
 
 
+def _recorded(a_out: int) -> Cassette:
+    """`_chain(a_out)` recorded on a clock set back to 0 before and after, as a fresh process
+    finds it. T250: a node's fingerprint counts what CLOCK holds, so the time a recording left
+    on it would read as a code change."""
+    CLOCK.now = 0.0
+    cassette = record(_chain(a_out), {"x": 0})
+    CLOCK.now = 0.0
+    return cassette
+
+
 def test_on_divergence_fail_stops_an_async_run_and_leaves_the_rest_not_checked() -> None:
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     r = replay_run(_chain(2), cassette, serve=True, on_divergence="fail")
     assert r.halt is not None and (r.halt.node, r.halt.why) == ("b", "diverged")
     assert r.not_checked == ("b", "c")
@@ -341,7 +351,7 @@ def test_on_divergence_fail_stops_an_async_run_and_leaves_the_rest_not_checked()
 
 
 def test_on_divergence_live_runs_the_rest_of_an_async_run_live() -> None:
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     r = replay_run(_chain(2), cassette, serve=True, on_divergence="live")
     assert [(c.node, c.how) for c in r.calls] == [
         ("a", "live"),
@@ -351,7 +361,7 @@ def test_on_divergence_live_runs_the_rest_of_an_async_run_live() -> None:
 
 
 def test_the_budget_stops_new_live_calls_in_an_async_run() -> None:
-    cassette = record(_chain(1), {"x": 0})
+    cassette = _recorded(1)
     budget = Budget(90, CLOCK, expected_live=3)
     r = replay_run(_chain(2), cassette, serve=True, budget=budget)
     assert r.halt is not None and (r.halt.node, r.halt.why) == ("b", "budget")
