@@ -469,6 +469,26 @@ def test_unservable_counts_recorded_steps_whose_code_changed() -> None:
     assert unservable(_chain(2), [cassette, cassette]) == 2  # a, in each run
 
 
+def test_one_run_takes_each_node_s_fingerprint_once() -> None:
+    # Within one lgcov run, a value a case moves, as the clock here, reaches no later case's
+    # fingerprint: the run takes each node's once, before its first case. A second run in the
+    # same process takes them again, so it sees what changed since. Outside a run every call
+    # does, as before.
+    from lgcov.cassette import changed_nodes, fingerprint_session, replay_run, unservable
+
+    graph = _chain(1)
+    CLOCK.now = 0.0
+    with fingerprint_session():
+        one, two = record(graph, {"x": 0}), record(graph, {"x": 0})
+        assert [s.code for s in one.steps] == [s.code for s in two.steps]
+        assert unservable(graph, [one, two]) == 0
+        assert [c.how for c in replay_run(graph, two, serve=True).calls] == ["served"] * 3
+    with fingerprint_session():
+        assert changed_nodes(graph, [one]) == {"a", "b", "c"}  # the clock moved since
+    three, four = record(graph, {"x": 0}), record(graph, {"x": 0})
+    assert [s.code for s in three.steps] != [s.code for s in four.steps]
+
+
 # T109: an error in a router or inside a subgraph names it, like an error in a node.
 def _routed(router: Callable[[S], str]) -> CompiledStateGraph[S]:
     g = StateGraph(S)

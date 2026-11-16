@@ -84,6 +84,7 @@ from lgcov.cassette import (
     changed_nodes,
     check_scheme,
     compared_run,
+    fingerprint_session,
     judge_probes,
     judge_repeats,
     probe_steps,
@@ -587,6 +588,7 @@ def _fail_on_arg(value: str) -> FailOn:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+@fingerprint_session()  # T250 follow-up: one command, one run, one fingerprint per node
 def _replay(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lgcov replay")
     ap.add_argument("target", nargs="?", help="<file.py>:<attr>; overrides graph_entrypoint")
@@ -710,6 +712,7 @@ def _write_runs(path: Path, runs: list[Cassette]) -> None:
     path.write_text(runs_to_json(runs), encoding="utf-8")
 
 
+@fingerprint_session()
 def _record(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lgcov record")
     ap.add_argument("--inputs", required=True, help="JSON list of graph input objects")
@@ -840,6 +843,7 @@ def _accept_summary(
     return "\n".join(lines) + "\n"
 
 
+@fingerprint_session()
 def _cassette_accept(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="lgcov cassette")
     ap.add_argument("action", choices=["accept"])
@@ -1352,6 +1356,7 @@ def _read_candidate(path: str, tier: str) -> CandidateRun:
     return run
 
 
+@fingerprint_session()  # one-job ci, the deciding job, and each selfcheck fixture
 def _ci_result(args: argparse.Namespace) -> CiResult:
     start = perf_counter()
     budget = Budget(None, perf_counter)  # T089: from the start of the run; seconds below
@@ -1370,6 +1375,7 @@ def _ci_result(args: argparse.Namespace) -> CiResult:
         return CiResult(fail_on, harness_error=msg)
 
 
+@fingerprint_session()  # the candidate job
 def _write_candidate(args: argparse.Namespace, start: Commits) -> int:
     """T179: `--candidate-out`: only the half that runs the PR's code. Nothing it finds changes
     this exit code, since `--candidate-in` decides in another job."""
@@ -2692,6 +2698,7 @@ def _synthetic_agents() -> tuple[Sequence[Agent], Sequence[SharedAgent]]:
     return agents, shared
 
 
+@fingerprint_session()  # one synthetic case, a graph pair. Not the whole bench: it edits in-process
 def _shipped(case: Replayed, base_nodes: Collection[str] | None = None) -> Found:
     """T222: what `lgcov ci` says about a case: replay the edited agent, serving what it left
     alone, probe its changed nodes offline, and label as ci does (`_node_labels`). T238:

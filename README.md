@@ -166,10 +166,12 @@ its recorded output without running it, when two things match the recording:
 Everything else runs live: changed nodes, nodes that are not plain functions
 (subgraphs, `ToolNode`) and every node of an older cassette with no recorded
 inputs. So does a node whose fingerprint takes in a value that differs from one
-process or run to the next, such as a timestamp or a counter a run increments, in
-a module-level name or in an object of your class. What a node reads at run time
-(files, environment variables, network) and dependency upgrades are not part of
-the fingerprint: pass `--live` to either command to re-run every node.
+lgcov run to the next, such as a timestamp or a random id, in a module-level name
+or in an object of your class. A counter a case increments doesn't count: each
+lgcov run takes a node's fingerprint once per run, before the first case. What a
+node reads at run time (files, environment variables, network) and dependency
+upgrades are not part of the fingerprint: pass `--live` to either command to
+re-run every node.
 
 #### Known replay limits
 

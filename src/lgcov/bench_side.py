@@ -27,6 +27,7 @@ from lgcov.cassette import (
     Cassette,
     Replay,
     changed_nodes,
+    fingerprint_session,
     probe_nodes,
     record,
     repeat_steps,
@@ -53,6 +54,7 @@ def _probes(graph: object, recorded: list[Cassette], drifted: list[list[str]]) -
     return {n: [p.drifted, p.reason] for n, p in probes.items()}
 
 
+@fingerprint_session()  # one side is one run: its cases share each node's fingerprint
 def side_main(argv: list[str]) -> int:
     mode, target, *paths = argv
     live = paths[-1:] == ["--live"]  # T173: run every node, serve none
