@@ -7,6 +7,8 @@ does: paired_test, then decide() with one KPI (Holm with m = 1 is p <= alpha).
 
 Both arms use one rho. A rho the PR arm's rates can't reach is skipped, or clamped to the
 largest they allow (rho_policy), never changed for one arm only.
+
+Part 2 adds power arms (POWER_DELTAS), each run at the cell's rho or skipped with its reason.
 """
 
 from __future__ import annotations
@@ -17,14 +19,16 @@ import random
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from statistics import NormalDist
 from typing import Literal
 
 from lgcov.config import GateConfig
-from lgcov.stats import decide, paired_test, wilson
+from lgcov.stats import decide, paired_test, sigma_d, wilson
 
 _GATE = GateConfig()
 RhoPolicy = Literal["skip", "clamp"]
 Cells = tuple[float, float, float, float]  # both pass, base only, PR only, both fail
+POWER_DELTAS = (-0.10, 0.05)  # T151 part 2: BLOCK is right at -0.10, SHIP at +0.05
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,7 @@ class Resolved:
     rho: float  # the rho both arms use
     clamped: bool  # True when rho is below cell.rho because the PR arm can't reach it
     arms: tuple[tuple[float, Cells], ...]  # (delta, joint cells) per arm
+    power: tuple[tuple[float, Cells | str], ...] = ()  # power arms: cells, or why rho can't
 
 
 @dataclass(frozen=True)
@@ -82,8 +87,26 @@ def joint_cells(p_a: float, p_b: float, rho: float) -> Cells:
     return (p11, p_a - p11, p_b - p11, 1 - p_a - p_b + p11)
 
 
-def resolve(cell: Cell, rho_policy: RhoPolicy = "skip") -> Resolved | Skipped:
-    """The cell's two arms with one rho, or why the cell can't run."""
+def _power_arm(cell: Cell, rho: float, delta: float) -> Cells | str:
+    """A power arm's 2x2 table at the cell's rho, or why that rho can't reach it."""
+    p_pr = cell.p_base + delta
+    if not 0 < p_pr < 1:
+        return f"PR rate {p_pr:g} not in (0, 1)"
+    lo, hi = _rho_range(cell.p_base, p_pr)
+    if lo - 1e-9 <= rho <= hi + 1e-9:
+        return joint_cells(cell.p_base, p_pr, rho)
+    bound = min(cell.p_base, p_pr) if rho > hi else max(0.0, cell.p_base + p_pr - 1)
+    return (
+        f"rho={rho:.3f} impossible at p_base={cell.p_base:g}, PR={p_pr:g}: needs p11 "
+        f"{'<=' if rho > hi else '>='} {bound:g}; the reachable rho is {min(max(rho, lo), hi):.3f}"
+    )
+
+
+def resolve(
+    cell: Cell, rho_policy: RhoPolicy = "skip", power: Sequence[float] = ()
+) -> Resolved | Skipped:
+    """The cell's two arms with one rho, or why the cell can't run. Each power arm runs at
+    that rho or carries the reason it can't; it never changes the rho."""
     deltas = (0.0, -cell.margin)
     rates = [cell.p_base + d for d in deltas]
     if not all(0 < p < 1 for p in rates):
@@ -100,7 +123,8 @@ def resolve(cell: Cell, rho_policy: RhoPolicy = "skip") -> Resolved | Skipped:
             f"p11 {'<=' if cell.rho > hi else '>='} {bound:g}; the reachable rho is {rho:.3f}",
         )
     arms = tuple((d, joint_cells(cell.p_base, p, rho)) for d, p in zip(deltas, rates, strict=True))
-    return Resolved(cell, rho, abs(rho - cell.rho) > 1e-9, arms)
+    reach = tuple((d, _power_arm(cell, rho, d)) for d in power)
+    return Resolved(cell, rho, abs(rho - cell.rho) > 1e-9, arms, reach)
 
 
 def spawn_seeds(base: int, count: int) -> list[int]:
@@ -137,24 +161,36 @@ def _run(cell: Cell, cells: Cells, seed: int) -> tuple[str, bool]:
     return decision, r.discordant == 0
 
 
+def arms_to_run(resolved: Resolved, seed: int) -> list[tuple[float, Cells, int]]:
+    """(delta, joint cells, arm seed) for each arm that can run: the error arms, then the power
+    arms in reach. Seeds go by slot, error arms first, so power arms never move their runs."""
+    slots = [*resolved.arms, *resolved.power]
+    seeds = spawn_seeds(seed, len(slots))
+    return [(d, c, s) for (d, c), s in zip(slots, seeds, strict=True) if not isinstance(c, str)]
+
+
+def simulate_arm(
+    cell: Cell, delta: float, cells: Cells, arm_seed: int, start: int, stop: int
+) -> ArmResult:
+    """Runs start to stop - 1 of one arm, so a pool can cut an arm into blocks."""
+    runs = [_run(cell, cells, s) for s in spawn_seeds(arm_seed, stop)[start:stop]]
+    decisions = [d for d, _ in runs]
+    return ArmResult(
+        delta=delta,
+        reps=stop - start,
+        ship=decisions.count("SHIP"),
+        block=decisions.count("BLOCK"),
+        inconclusive=decisions.count("INCONCLUSIVE"),
+        no_drop_ship=sum(1 for d, none in runs if d == "SHIP" and none),
+    )
+
+
 def simulate(resolved: Resolved, reps: int, seed: int = 0) -> tuple[ArmResult, ...]:
     """reps runs per arm; each arm's run seeds are spawned from that arm's own seed."""
-    out = []
-    arm_seeds = spawn_seeds(seed, len(resolved.arms))
-    for (delta, cells), arm_seed in zip(resolved.arms, arm_seeds, strict=True):
-        runs = [_run(resolved.cell, cells, s) for s in spawn_seeds(arm_seed, reps)]
-        decisions = [d for d, _ in runs]
-        out.append(
-            ArmResult(
-                delta=delta,
-                reps=reps,
-                ship=decisions.count("SHIP"),
-                block=decisions.count("BLOCK"),
-                inconclusive=decisions.count("INCONCLUSIVE"),
-                no_drop_ship=sum(1 for d, none in runs if d == "SHIP" and none),
-            )
-        )
-    return tuple(out)
+    return tuple(
+        simulate_arm(resolved.cell, delta, cells, arm_seed, 0, reps)
+        for delta, cells, arm_seed in arms_to_run(resolved, seed)
+    )
 
 
 def sweep(
@@ -172,6 +208,22 @@ def mc_error(k: int, reps: int) -> tuple[float, float, tuple[float, float]]:
     """A Monte Carlo rate, its binomial SE and its Wilson 95% interval."""
     rate = k / reps
     return rate, math.sqrt(rate * (1 - rate) / reps), wilson(k, reps)
+
+
+_NORMAL = NormalDist()
+
+
+def predicted(cell: Cell, rho: float, delta: float) -> float | None:
+    """The chance of the right call by the normal approximation the gate sizes N with: SHIP
+    above -margin (ni_required_n's), BLOCK below it (required_n's, detection). None at the
+    margin, where neither decisive call is the right one."""
+    if abs(delta + cell.margin) < 1e-9:
+        return None
+    se = sigma_d(cell.p_base, cell.p_base + delta, rho) / math.sqrt(cell.n)
+    if se <= 0:
+        return 1.0
+    gap = delta + cell.margin if delta > -cell.margin else -delta
+    return _NORMAL.cdf(gap / se - _NORMAL.inv_cdf(1 - cell.alpha / 2))
 
 
 def _pct(x: float) -> str:
