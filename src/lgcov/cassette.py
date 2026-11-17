@@ -19,6 +19,7 @@ from typing import Any, Literal, NoReturn, NotRequired, TypedDict
 
 import httpx
 from langchain_core.messages import BaseMessage
+from langgraph.config import get_config
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import START
 from langgraph.pregel import Pregel
@@ -213,7 +214,9 @@ class Drift:
     actual: list[str] | None
 
 
-def record(graph: Any, inputs: dict[str, Any], like: Sequence[Cassette] = ()) -> Cassette:
+def record(
+    graph: Any, inputs: dict[str, Any], like: Sequence[Cassette] = (), units: bool = False
+) -> Cassette:
     """Run the graph once and save every node's output, in order, with the input and
     code fingerprint `replay` needs to serve it later.
 
@@ -223,8 +226,11 @@ def record(graph: Any, inputs: dict[str, Any], like: Sequence[Cassette] = ()) ->
 
     T212: `like` is an older baseline this recording will be compared with. A node whose code is
     what `like` recorded gets `like`'s fingerprint for it, whichever scheme that used (`_codes`).
+
+    T193: `units` also saves the nodes that ran inside each subgraph, as units of its step, for a
+    schema-2 recording. A graph started inside a node or a tool isn't one yet.
     """
-    steps = _run(graph, inputs, (), (), like=[s for r in like for s in r.steps])[0]
+    steps = _run(graph, inputs, (), (), like=[s for r in like for s in r.steps], units=units)[0]
     return Cassette(inputs=inputs, steps=steps)
 
 
@@ -587,19 +593,100 @@ def _anaming(failed: Callable[[Exception], None], fn: Callable[..., Any]) -> Cal
     return call
 
 
-def _attributed(graph: Any, prefix: str, failed: Callable[[str, Exception], None]) -> Any:
+def _attributed(
+    graph: Any,
+    prefix: str,
+    failed: Callable[[str, Exception], None],
+    recorded: Callable[[str, Any, str | None], Any] | None = None,
+) -> Any:
     """T109: a copy of a subgraph whose nodes' errors name them `<prefix><node>`. It runs
-    as it is otherwise: a subgraph's nodes are never served."""
+    as it is otherwise: a subgraph's nodes are never served.
+
+    T193: with `recorded`, each plain node is wrapped by it instead, given its name with the
+    subgraph's (`answer.respond`), its spec and its fingerprint, so `_run` records it as a unit."""
     original = getattr(graph, "nodes", {})
     nodes = dict(original)
+    codes = _codes(graph) if recorded is not None else {}
     for name, spec in original.items():
-        if name != START and _plain(spec.bound) is not None:
+        if name != START and _plain(spec.bound) is not None and recorded is not None:
+            nodes[name] = recorded(f"{prefix}{name}", spec, codes.get(name))
+        elif name != START and _plain(spec.bound) is not None:
             named = partial(failed, f"{prefix}{name}")
             nodes[name] = _around(spec, partial(_naming, named), partial(_anaming, named))
         elif isinstance(spec.bound, Pregel):
-            inner = _attributed(spec.bound, f"{prefix}{name}.", failed)
+            inner = _attributed(spec.bound, f"{prefix}{name}.", failed, recorded)
             nodes[name] = spec.copy({"bound": inner})
     return graph.copy({"nodes": nodes}) if original else graph
+
+
+def _parent_ns() -> tuple[str, ...]:
+    """T193: the namespace the running node's update streams under: its task's checkpoint
+    namespace less its own segment, so ("answer:<id>",) for `answer:<id>|respond:<id>`."""
+    try:
+        ns = str(get_config().get("configurable", {}).get("checkpoint_ns", ""))
+    except RuntimeError:  # not inside a run
+        return ()
+    return tuple(ns.split("|")[:-1]) if ns else ()
+
+
+@dataclass
+class _Unit:
+    step: Step
+    task: str | None = None  # LangGraph's task id, once its task result names it
+    inside: list["_Unit"] = field(default_factory=list)
+
+
+class _Units:
+    """T193: the units of one `record(units=True)` run, from `stream(subgraphs=True)` with the
+    `tasks` mode. Each unit is filed under the namespace it streamed in and learns its task id from
+    the task result LangGraph emits right after its update. A unit goes inside the one whose task
+    its namespace names, in the order LangGraph started them."""
+
+    def __init__(self, graph: Any) -> None:
+        self.graph = graph
+        self.filed: dict[tuple[str, ...], list[_Unit]] = {}
+        self.started: dict[tuple[tuple[str, ...], str], int] = {}
+
+    def graph_at(self, ns: tuple[str, ...]) -> Any:
+        """The subgraph a namespace runs in. None under a node that isn't a subgraph: a graph
+        started inside a node or a tool (T193's section 6, PR 7)."""
+        graph = self.graph
+        for segment in ns:
+            graph = getattr(getattr(graph, "nodes", {}).get(segment.split(":")[0]), "bound", None)
+            if not isinstance(graph, Pregel):
+                return None
+        return graph
+
+    def file(self, ns: tuple[str, ...], step: Step) -> None:
+        self.filed.setdefault(ns, []).append(_Unit(step))
+
+    def task(self, ns: tuple[str, ...], event: Mapping[str, Any]) -> None:
+        if "result" not in event:  # it started
+            self.started[(ns, str(event["id"]))] = len(self.started)
+            return
+        named = [
+            u for u in self.filed.get(ns, []) if (u.task, u.step.node) == (None, event["name"])
+        ]
+        if named:
+            named[0].task = str(event["id"])
+
+    def _start(self, ns: tuple[str, ...], unit: _Unit) -> int:
+        return self.started.get((ns, unit.task or ""), len(self.started))
+
+    def steps(self) -> list[Step]:
+        """The top-level steps, in the order they streamed, with the units inside each."""
+        for ns in sorted(self.filed, key=len, reverse=True):
+            name, _, task = ns[-1].partition(":") if ns else ("", "", "")
+            outer = [
+                u for u in self.filed.get(ns[:-1], []) if (u.step.node, u.task) == (name, task)
+            ]
+            if ns and outer:
+                outer[0].inside = sorted(self.filed[ns], key=partial(self._start, ns))
+        return [self._built(u) for u in self.filed.get((), [])]
+
+    def _built(self, unit: _Unit) -> Step:
+        inside = [self._built(u) for u in unit.inside]
+        return replace(unit.step, units=inside) if inside else unit.step
 
 
 def _goto_saved(goto: Any) -> list[Any]:
@@ -650,6 +737,7 @@ def _run(
     budget: Budget | None = None,
     mask_volatile: bool = False,
     like: Sequence[Step] = (),
+    units: bool = False,
 ) -> tuple[list[Step], list[Call], Halt | None]:
     """Stream the graph once; return its steps with each node's input and fingerprint, how
     each call ran, and where the run stopped, if it stopped early.
@@ -671,11 +759,16 @@ def _run(
 
     T212: `like` is the recording this run will be compared with, all of its runs: it decides
     which scheme each node's fingerprint is written in (`_codes`), served or not.
+
+    T193: `units` also records each plain node inside a subgraph, wrapped as a top-level one, and
+    puts what it streamed under its subgraph's step (`_Units`). The run streams subgraphs then.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     unused = [(s, _key(s.input, ignore_paths, mask_volatile)) for s in served if s.code is not None]
     recorded = {(s.node, s.code) for s in served if s.code is not None}
-    calls: list[tuple[str, Any, Any, str | None]] = []  # node, input, returned, fingerprint
+    # node, input, returned, fingerprint, and T193: the namespace it ran in
+    calls: list[tuple[str, Any, Any, str | None, tuple[str, ...]]] = []
+    tree = _Units(graph) if units and isinstance(graph, Pregel) else None
     log: list[Call] = []
     failures: list[tuple[str, Exception]] = []  # each attempt that raised: `Call`s hold no errors
     run = {"diverged": False, "live": False}  # diverged yet; on_divergence="live" took over
@@ -698,6 +791,7 @@ def _run(
         view = _fields(state)
         key = _key(view, ignore_paths, mask_volatile)
         snapshot = deepcopy(view) if key is not None else None  # before fn can mutate it
+        ns = _parent_ns() if tree is not None else ()
         hit: Step | None = None
         diverged = False
         if code is not None and key is not None:
@@ -735,7 +829,7 @@ def _run(
                 if budget is not None and hit is None:
                     budget.live.append(seconds)
                 if key is not None:
-                    calls.append((name, snapshot, out, code))
+                    calls.append((name, snapshot, out, code, ns))
             return out
 
         return hit, finish, partial(failed, name, how=how, skipped=skipped)
@@ -771,32 +865,63 @@ def _run(
         nodes[name] = _around(
             original[name], partial(wrap, name, code=code), partial(awrap, name, code=code)
         )
+
+    def as_unit(name: str, spec: Any, code: str | None) -> Any:  # T193: a node in a subgraph
+        return _around(spec, partial(wrap, name, code=code), partial(awrap, name, code=code))
+
     for name, spec in original.items():  # T109: a subgraph's errors name its own node
         if isinstance(getattr(spec, "bound", None), Pregel):
-            nodes[name] = spec.copy({"bound": _attributed(spec.bound, f"{name}.", failed)})
+            inner = _attributed(spec.bound, f"{name}.", failed, as_unit if tree else None)
+            nodes[name] = spec.copy({"bound": inner})
     routers = _routers(graph)
     routed = _router_prints(graph, recorded=[*served, *like])
+    prints: dict[tuple[str, ...], dict[str, str | None]] = {(): routed}  # T193: by subgraph
     runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
 
-    def take(chunk: Mapping[str, Any]) -> None:
+    def take(chunk: Mapping[str, Any], ns: tuple[str, ...] = ()) -> None:
+        names = tuple(segment.split(":")[0] for segment in ns)  # T193: ("answer",) inside answer
+        if tree is not None and names not in prints:
+            prints[names] = _router_prints(tree.graph_at(ns))
+        path = "".join(f"{n}." for n in names)
         for node, update in chunk.items():
             with lock:  # the call that made this update
+                made = (path + node, ns, update)
                 i = next(
-                    (i for i, c in enumerate(calls) if (c[0], _streamed(c[2])) == (node, update)),
-                    None,
+                    (i for i, c in enumerate(calls) if (c[0], c[4], _streamed(c[2])) == made), None
                 )
                 call = None if i is None else calls.pop(i)
             if call is None:
-                steps.append(Step(node, update, router=routed.get(node)))
-                continue
-            goto = _goto_saved(call[2].goto) if isinstance(call[2], Command) else None
-            steps.append(Step(node, update, call[1], call[3], goto, routed.get(node)))
+                step = Step(node, update, router=prints[names].get(node))
+            else:
+                goto = _goto_saved(call[2].goto) if isinstance(call[2], Command) else None
+                step = Step(node, update, call[1], call[3], goto, prints[names].get(node))
+            steps.extend([step] if not ns else [])
+            if tree is not None:
+                tree.file(ns, step)
+
+    def took(chunk: Any) -> None:
+        # T193: with units, each chunk is (namespace, mode, data). A graph started inside a node
+        # or a tool streams under that node's namespace, which isn't a subgraph's: left out.
+        if tree is None:
+            take(chunk)
+            return
+        ns, mode, data = chunk
+        if tree.graph_at(ns) is None:
+            return
+        if mode == "tasks":
+            tree.task(ns, data)
+        else:
+            take(data, ns)
+
+    modes: dict[str, Any] = {"stream_mode": "updates"}
+    if tree is not None:
+        modes = {"stream_mode": ["updates", "tasks"], "subgraphs": True}
 
     async def drain() -> None:
         try:
-            async for chunk in runner.astream(inputs, stream_mode="updates"):
-                take(chunk)
+            async for chunk in runner.astream(inputs, **modes):
+                took(chunk)
         finally:
             await _cancel_the_rest()
 
@@ -807,8 +932,8 @@ def _run(
         if driven_async:
             _thread_loop().run(drain(), context=copy_context())  # the caller's, new each run
         else:
-            for chunk in runner.stream(inputs, stream_mode="updates"):
-                take(chunk)
+            for chunk in runner.stream(inputs, **modes):
+                took(chunk)
     except _Halted as stop:
         return steps, log, stop.halt
     except GraphBubbleUp:
@@ -818,7 +943,7 @@ def _run(
         if named is None:
             raise
         raise NodeError(named, exc, sum(n == named for n, _ in failures) or 1) from exc
-    return steps, log, None
+    return (steps if tree is None else tree.steps()), log, None
 
 
 def _compared(step: Step, ignore_paths: Sequence[str], routed: Container[str]) -> object:
