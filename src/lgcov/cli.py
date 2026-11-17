@@ -2531,23 +2531,33 @@ _KEPT = ("base.json", "head.json")  # T169: what --keep-runs saves, per benchmar
 _NODES = ("base-nodes.json", "head-nodes.json")  # T242: and each side's graph's node names
 
 
-def _side_nodes(path: Path) -> frozenset[str] | None:
+def _text(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def _names(text: str | None, file: str) -> frozenset[str] | None:
     """T242: the node names a bench side saved, or None where it saved none: runs kept before."""
-    if not path.exists():
+    if text is None:
         return None
-    names: object = json.loads(path.read_text(encoding="utf-8"))
+    names: object = json.loads(text)
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
-        raise ValueError(f"{path.name} isn't a list of node names")
+        raise ValueError(f"{file} isn't a list of node names")
     return frozenset(names)
 
 
-def _put_back(path: Path, names: frozenset[str] | None) -> None:
-    """T242, T238: base's node names as base's own process saved them, written again once head's
-    code has run: that code could write the file too, and `--from-runs` trusts it."""
-    if names is None:
-        path.unlink(missing_ok=True)
-    else:
-        path.write_text(json.dumps(sorted(names)), encoding="utf-8")
+def _side_nodes(path: Path) -> frozenset[str] | None:
+    return _names(_text(path), path.name)
+
+
+def _put_back(files: Mapping[Path, str | None]) -> None:
+    """T242, T238: base's files as base's own process wrote them, written again once head's code
+    has run, since that code could write them too: its runs, which base's repeats and
+    `--from-runs` read, and its node names. None: base wrote no such file."""
+    for path, text in files.items():
+        if text is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(text, encoding="utf-8")
 
 
 class _SideFailed(Exception):
@@ -2611,9 +2621,10 @@ def _repeats(
     saved: Path,
     repeat: set[str],
     k: int,
+    runs: Sequence[Cassette],
 ) -> dict[str, NoiseCheck]:
     """T211: `repeat`'s nodes run live `k` more times on each side, each in its own process, and
-    what the samples say of each node."""
+    what the samples say of each node, against `runs`: base's, as base recorded them."""
     (tmp / "repeat").write_text(json.dumps(sorted(repeat)), encoding="utf-8")
     samples: list[list[ProbeStep]] = []
     for side, (root, target) in sides.items():
@@ -2623,7 +2634,7 @@ def _repeats(
         )
         raw = json.loads(out.read_text(encoding="utf-8"), object_hook=decode)
         samples.append([ProbeStep(**p) for p in raw])
-    return judge_repeats(_load_runs(str(saved)), samples[0], samples[1])
+    return judge_repeats(runs, samples[0], samples[1])
 
 
 def _bench_one(
@@ -2644,11 +2655,11 @@ def _bench_one(
 
     T242: each side saves the node names of the graph it ran, base's as it records and head's as
     it replays, so a node only one side ran is labelled by the other side's graph. T238: base's
-    are read before head's code runs again, and written back once it has, so head can't change
-    them, here or for `--from-runs`."""
+    names and runs are read before head's code runs again, and written back once it has, so
+    head can't change them: not here, not for base's repeats, not for `--from-runs`."""
     start = perf_counter()
     worktrees: list[Path] = []
-    base_saved: tuple[Path, frozenset[str] | None] | None = None  # T242: base's, as base saved
+    base_files: dict[Path, str | None] = {}  # T242: base's, as base's own process wrote them
     try:
         with tempfile.TemporaryDirectory() as tmp:
             try:
@@ -2663,12 +2674,15 @@ def _bench_one(
                 _run_side(b, "head", head_root, "check", head_target)
                 recording = [base_target, str(cases), str(saved), f"--nodes={base_names}"]
                 _run_side(b, "base", base_root, "record", *recording)
-                base_saved = (base_names, _side_nodes(base_names))
+                base_runs = _text(saved)
+                base_files = {saved: base_runs, base_names: _text(base_names)}
                 replaying = [head_target, str(saved), str(drifted), str(fresh), str(probed)]
                 replaying += [f"--nodes={head_names}", *(["--live"] if live else [])]
                 _run_side(b, "head", head_root, "replay", *replaying)
-                graphs = (base_saved[1], _side_nodes(head_names))
-                runs = _load_runs(str(saved))
+                _put_back(base_files)  # base's repeats read them next
+                graphs = (_names(base_files[base_names], base_names.name), _side_nodes(head_names))
+                # Base wrote no runs: the file is gone again, so the read fails as it always has.
+                runs = _load_runs(str(saved)) if base_runs is None else runs_from_json(base_runs)
                 heads = _load_runs(str(fresh))
                 nodes: list[list[str]] = json.loads(drifted.read_text(encoding="utf-8"))
                 drifts = [[Drift(n, None, None) for n in names] for names in nodes]
@@ -2682,10 +2696,9 @@ def _bench_one(
                 noise: dict[str, NoiseCheck] = {}
                 if repeats and repeat:
                     sides = {"base": (base_root, base_target), "head": (head_root, head_target)}
-                    noise = _repeats(b, Path(tmp), sides, saved, repeat, repeats)
+                    noise = _repeats(b, Path(tmp), sides, saved, repeat, repeats, runs)
             finally:
-                if base_saved is not None:  # T238: head's code has run since, and could write it
-                    _put_back(*base_saved)
+                _put_back(base_files)  # T238: head's code has run since, and could write them
                 for worktree in worktrees:
                     remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]
                     subprocess.run(remove, check=False, capture_output=True)

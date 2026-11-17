@@ -13,7 +13,8 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage
 
-from lgcov.attribution import Benchmark
+from lgcov.attribution import NEEDS_LIVE, NOT_PROBED, Benchmark
+from lgcov.cassette import Cassette, Step, runs_to_json
 from lgcov.cli import CANT_IMPORT, _load_runs, _run_side, _SideFailed, main
 
 LINEAR = Path(__file__).parent / "fixtures" / "bench" / "linear"
@@ -283,6 +284,25 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> _Run:
         base, head = graph(row), swapped(row, writes)
         project.row(row, {"graph.py": base, "helper.py": v1}, {"graph.py": head, "helper.py": v1})
 
+    # Head's helper changes, so `b` is root and `c` propagated. Head's `b`, as it replays, also
+    # sets every fingerprint in base's kept runs to None, which would make both inconclusive.
+    rewrite = (
+        '    _called("rewrite")\n'
+        "    import json\n"
+        '    with open(os.environ["BENCH_TEST_FORGE_RUNS"], encoding="utf-8") as f:\n'
+        "        saved = json.load(f)\n"
+        '    for step in saved["runs"][0]["steps"]:\n'
+        '        step["code"] = None\n'
+        '    with open(os.environ["BENCH_TEST_FORGE_RUNS"], "w", encoding="utf-8") as f:\n'
+        "        json.dump(saved, f)\n"
+    )
+    rewrites = graph("forged_runs").replace('    _called("b")\n', f'    _called("b")\n{rewrite}')
+    project.row(
+        "forged_runs",
+        {"graph.py": graph("forged_runs"), "helper.py": v1},
+        {"graph.py": rewrites, "helper.py": v2},
+    )
+
     installed = root / "installed"
     installed.mkdir()
     (installed / "helper.py").write_text(_helper("installed"), encoding="utf-8")
@@ -293,6 +313,7 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> _Run:
         patch.setenv("PYTHONPATH", str(installed))
         patch.setenv("BENCH_TEST_CALLS", str(calls))
         patch.setenv("BENCH_TEST_FORGE", str(root / "kept" / "forged" / "base-nodes.json"))
+        patch.setenv("BENCH_TEST_FORGE_RUNS", str(root / "kept" / "forged_runs" / "base.json"))
         patch.syspath_prepend(str(installed))
         patch.chdir(root)  # --keep-runs is relative here, and each side runs from its own folder
         args = ["--out", str(md), "--json", str(results), "--keep-runs", "kept"]
@@ -362,6 +383,7 @@ def test_a_bad_import_exits_2_after_the_other_rows_ran_and_the_report_is_written
             "messages",
             "swapped",
             "forged",
+            "forged_runs",
         ]
     )
     assert "own_helper:a" in bench.calls  # a row after the first bad one still ran
@@ -530,6 +552,20 @@ def test_head_s_code_writing_base_s_node_names_changes_no_label(
     assert _kept_names(bench, "forged", "base") == ["__end__", "__start__", "a", "b", "c"]
     again = _rescored(bench, "forged", tmp_path)
     assert (again["found_root"], again["inconclusive"]) == (["c", "d"], {})
+
+
+@pytest.mark.slow
+def test_head_s_code_rewriting_base_s_runs_changes_no_label(bench: _Run, tmp_path: Path) -> None:
+    # Base's runs come from base's own process too. Head's `b` set every fingerprint in base's
+    # kept runs to None as it replayed, which would make `b` and `c` inconclusive if lgcov read
+    # the file back.
+    assert "forged_runs:rewrite" in bench.calls  # the rewrite happened
+    row = bench.rows["forged_runs"]
+    assert (row["error"], row["found_root"], row["found_propagated"]) == ("", ["b"], ["c"])
+    assert row["inconclusive"] == {}
+    assert all(s.code for s in _load_runs(str(bench.kept / "forged_runs" / "base.json"))[0].steps)
+    again = _rescored(bench, "forged_runs", tmp_path)  # saved runs can't be probed
+    assert (again["found_propagated"], again["inconclusive"]) == (["c"], {"b": NOT_PROBED})
 
 
 CRASHES_ON_TWO = """\
@@ -710,6 +746,41 @@ def test_bench_passes_live_to_head_s_replay_only(
     main(["bench", str(LINEAR.parent), "--only", "linear", *flags, *out])
     assert [s[:2] for s in steps] == [("head", "check"), ("base", "record"), ("head", "replay")]
     assert [s for s in steps if "--live" in s] == ([steps[2]] if flags else [])
+
+
+def test_head_rewriting_base_s_runs_reaches_neither_base_s_repeats_nor_the_kept_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Base's repeat process reads base.json after head's replay has run, and head's repeat runs
+    # last, so base's runs go back after each.
+    base = runs_to_json([Cassette({"question": "x"}, [Step("b", "v1", {"question": "x"}, "b1")])])
+    seen: list[str] = []
+
+    def side(_b: Benchmark, name: str, _root: Path, mode: str, *args: str) -> None:
+        if mode == "check":
+            return
+        saved = Path(args[2] if mode == "record" else args[1])
+        if mode == "record":
+            saved.parent.mkdir(parents=True)
+            saved.write_text(base, encoding="utf-8")
+        elif mode == "replay":
+            fresh = [Cassette({"question": "x"}, [Step("b", "v2", {"question": "x"}, "b2")])]
+            Path(args[2]).write_text('[["b"]]', encoding="utf-8")
+            Path(args[3]).write_text(runs_to_json(fresh), encoding="utf-8")
+            Path(args[4]).write_text(json.dumps({"b": [None, NEEDS_LIVE]}), encoding="utf-8")
+        else:  # repeat
+            if name == "base":
+                seen.append(saved.read_text(encoding="utf-8"))
+            Path(args[3]).write_text("[]", encoding="utf-8")
+        if name == "head":
+            saved.write_text("head's code wrote this", encoding="utf-8")
+
+    monkeypatch.setattr("lgcov.cli._run_side", side)
+    out = ["--out", str(tmp_path / "b.md"), "--json", str(tmp_path / "r.json")]
+    kept = ["--keep-runs", str(tmp_path / "kept"), "--noise-repeats", "1"]
+    main(["bench", str(LINEAR.parent), "--only", "linear", *kept, *out])
+    assert seen == [base]
+    assert (tmp_path / "kept" / "linear" / "base.json").read_text(encoding="utf-8") == base
 
 
 # T211: --noise-repeats K runs base's code K more times on a node's recorded input, and head's K
