@@ -15,7 +15,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import perf_counter
 from types import CodeType, ModuleType
 from typing import Any
@@ -166,7 +166,7 @@ from lgcov.metrics import (
     summarize,
 )
 from lgcov.normalize import normalize
-from lgcov.review import ReviewDecision, apply_decision
+from lgcov.review import Changes, ReviewDecision, apply_decision, reject_changes, unwritable
 from lgcov.sampling import (
     KpiStats,
     gate_exit_code,
@@ -2171,7 +2171,8 @@ def _calibrate_cmd(argv: list[str]) -> int:
 
 _REVIEW_USAGE = (
     "usage: lgcov review override --kpi KPI --case-id CASE --judge-label LABEL "
-    "--human-label LABEL --reviewer NAME [--note TEXT]"
+    "--human-label LABEL --reviewer NAME [--note TEXT]\n"
+    "       lgcov review reject --base-dir DIR [--config FILE] [--cassette-dir DIR]"
 )
 
 
@@ -2352,10 +2353,143 @@ def _guard_cmd(argv: list[str]) -> int:
     return 0
 
 
+def _plain_files(root: Path) -> dict[str, bytes]:
+    """T186: each file under root, by its path from root, as bytes; none when root is missing.
+    ValueError on a symlink, a submodule or anything else that isn't a plain file or folder:
+    `review reject` follows, restores and removes none of those."""
+    if root.is_symlink():
+        raise ValueError(f"{root} is a symlink")
+    if not root.exists():
+        return {}
+    if not root.is_dir():
+        raise ValueError(f"{root} isn't a folder")
+    files: dict[str, bytes] = {}
+    for folder, dirs, names in os.walk(root):  # it doesn't follow a symlinked folder
+        here = Path(folder)
+        if ".git" in (*dirs, *names):
+            raise ValueError(f"{here} is a submodule")
+        for name in (*dirs, *names):
+            if (here / name).is_symlink():
+                raise ValueError(f"{here / name} is a symlink")
+        for name in names:
+            path = here / name
+            if not path.is_file():
+                raise ValueError(f"{path} isn't a plain file")
+            files[path.relative_to(root).as_posix()] = path.read_bytes()
+    return files
+
+
+def _repo_dir(path: str) -> str:
+    """T186: a folder lgcov.yaml names, from the checkout's root; ValueError when it's outside."""
+    folder = Path(path)
+    if folder.is_absolute():
+        try:
+            folder = folder.relative_to(Path.cwd())
+        except ValueError:
+            raise ValueError(f"cassette_dir {path} is outside this checkout") from None
+    return PurePosixPath(folder.as_posix()).as_posix()
+
+
+def _outputs_by_node(text: bytes | None) -> dict[str, str] | None:
+    """Each node's recorded output hashes over the runs, as accept.md shows them. None when the
+    file is missing or isn't a baseline this lgcov reads."""
+    if text is None:
+        return None
+    try:
+        runs = recording_from_json(text.decode("utf-8")).runs
+    except (ValueError, KeyError, TypeError, AttributeError):  # a bad encoding is a ValueError
+        return None
+    hashes: dict[str, list[str]] = {}
+    for run in runs:
+        for step in run.steps:
+            hashes.setdefault(step.node, []).append(_output_hash(step))
+    return {node: ",".join(dict.fromkeys(h)) for node, h in hashes.items()}
+
+
+def _reject_summary(
+    folder: str, here: Mapping[str, bytes], there: Mapping[str, bytes], changes: Changes
+) -> str:
+    """Markdown: each node whose recorded output goes back to the base's, then the files."""
+    lines = ["### Cassette reject", ""]
+    ours = _outputs_by_node(here.get("baseline.json"))
+    theirs = _outputs_by_node(there.get("baseline.json"))
+    if ours is not None and theirs is not None:
+        back = sorted(node for node in {*ours, *theirs} if ours.get(node) != theirs.get(node))
+        if back:
+            lines += ["| node | this PR | the base |", "|---|---|---|"]
+            lines += [f"| `{n}` | `{ours.get(n, '—')}` | `{theirs.get(n, '—')}` |" for n in back]
+            lines.append("")
+    elif "baseline.json" in here:
+        lines += ["No node is named: this PR's baseline.json isn't one lgcov can read.", ""]
+    for label, paths in (
+        ("Restored", [path for path in changes.write if path in here]),
+        ("Put back", [path for path in changes.write if path not in here]),
+        ("Removed", list(changes.remove)),
+    ):
+        if paths:
+            lines.append(f"{label}: " + ", ".join(f"`{folder}/{path}`" for path in paths) + ".")
+    return "\n".join(lines) + "\n"
+
+
+def _review_reject(argv: list[str]) -> int:
+    """T186: put this checkout's cassette_dir back to the base's, which undoes an accept made in
+    the PR: every file the base has, as the base has it, and none that it doesn't. The base's
+    lgcov.yaml names the folder, since the gate reads it there (T154). Exit 1 when the two
+    already match, and 2 when the base has no recording or a path can't be written."""
+    ap = argparse.ArgumentParser(prog="lgcov review reject")
+    ap.add_argument("--base-dir", required=True, help="a checkout of the PR's base")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml, read from --base-dir")
+    ap.add_argument("--cassette-dir", help="overrides cassette_dir")
+    args = ap.parse_args(argv)
+    base = Path(args.base_dir)
+    config = Path(args.config) if Path(args.config).is_absolute() else base / args.config
+    try:
+        # no graph loads here, so a stand-in entrypoint validates
+        overrides = {"graph_entrypoint": "reject.py:unused", "cassette_dir": args.cassette_dir}
+        folder = _repo_dir(load_config(config, overrides).cassette_dir)
+        why = unwritable(folder)
+        if why:
+            raise ValueError(f"cassette_dir {why}")
+        here, there = _plain_files(Path(folder)), _plain_files(base / folder)
+        if "baseline.json" not in there:
+            raise ValueError(
+                f"the base has no {folder}/baseline.json, so there is no recording to go back to"
+            )
+        for path in sorted({*here, *there}):
+            why = unwritable(f"{folder}/{path}")
+            if why:
+                raise ValueError(why)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"lgcov review reject: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    changes = reject_changes(here, there)
+    if changes.empty:
+        print(
+            f"lgcov review reject: nothing to reject: {folder} already matches the base's",
+            file=sys.stderr,
+        )
+        return EXIT_NOT_DRIFTED
+    for path in changes.remove:  # first, so a file can take the place of a folder it empties
+        gone = Path(folder) / path
+        gone.unlink()
+        for parent in gone.parents:
+            if parent == Path(folder) or any(parent.iterdir()):
+                break
+            parent.rmdir()
+    for path, data in changes.write.items():
+        target = Path(folder) / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    print(_reject_summary(folder, here, there, changes), end="")
+    return 0
+
+
 def _review_cmd(argv: list[str]) -> int:
     """T102: override a judge's verdict on one case. The override is a label; when the
     human disagrees, the case is saved so the judge is re-checked on it on every PR; and
     the judge's band is recalculated."""
+    if argv[:1] == ["reject"]:  # T186
+        return _review_reject(argv[1:])
     if argv[:1] != ["override"]:
         print(_REVIEW_USAGE, file=sys.stderr)
         return EXIT_ERROR
@@ -3265,6 +3399,7 @@ commands:
   judge             run the taxonomy's judges k times per case
   calibrate         compare each judge with human labels and set its band
   review override   override a judge's verdict on one case
+  review reject     put cassette_dir back to the base's, undoing an accept
   taxonomy check    validate a taxonomy and print its KPIs
   taxonomy draft    draft failure modes and KPIs from traces, each pending review
   taxonomy approve  approve one drafted entry
