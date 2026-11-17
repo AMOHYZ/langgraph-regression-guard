@@ -68,7 +68,13 @@ from lgcov.calibration import (
     uncalibrated_line,
     upsert_case,
 )
-from lgcov.candidate import CandidateRun, FreshRun, candidate_to_json, parse_candidate
+from lgcov.candidate import (
+    CandidateRun,
+    FreshRun,
+    candidate_to_json,
+    fresh_cassettes,
+    parse_candidate,
+)
 from lgcov.cassette import (
     ON_DIVERGENCE,
     SCHEME,
@@ -875,6 +881,11 @@ def _cassette_accept(argv: list[str]) -> int:
     )
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
     ap.add_argument("--cassette-dir", help="overrides cassette_dir from config")
+    ap.add_argument(
+        "--candidate-in",
+        help="take the fresh runs from this file, which `lgcov ci --candidate-out` wrote, "
+        "instead of running the graph: nothing is imported",
+    )
     args = ap.parse_args(argv)
     if bool(args.nodes) == args.all_drifted:
         print(
@@ -883,14 +894,21 @@ def _cassette_accept(argv: list[str]) -> int:
         )
         return EXIT_ERROR
     named = {n for n in (args.nodes or "").split(",") if n}
+    # T186: from a candidate file no graph loads, so a stand-in entrypoint validates
+    standin = "candidate.py:unused" if args.candidate_in else None
     try:
-        cfg = load_config(args.config, {"cassette_dir": args.cassette_dir})
+        overrides = {"cassette_dir": args.cassette_dir, "graph_entrypoint": standin}
+        cfg = load_config(args.config, overrides)
         path = Path(cfg.cassette_dir) / "baseline.json"
         recording = recording_from_json(path.read_text(encoding="utf-8"))
         check_scheme(recording)  # T193: before the graph runs, which can cost model calls
         runs = recording.runs
-        graph = _load_graph(cfg.graph_entrypoint)
-        fresh = [record(graph, run.inputs) for run in runs]
+        if args.candidate_in:  # T186: what the candidate job ran, read as data
+            ran = parse_candidate(Path(args.candidate_in).read_text(encoding="utf-8"))
+            fresh = fresh_cassettes(ran, runs)
+        else:
+            graph = _load_graph(cfg.graph_entrypoint)
+            fresh = [record(graph, run.inputs) for run in runs]
         if args.all_drifted:
             nodes = {
                 node

@@ -3,14 +3,21 @@ anything in it, so it says what ran, never what that means, and one that isn't e
 is refused."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from lgcov.attribution import NEEDS_LIVE
-from lgcov.candidate import CandidateRun, FreshRun, candidate_to_json, parse_candidate
-from lgcov.cassette import Call, Halt, ProbeStep, Step, runs_from_json
+from lgcov.candidate import (
+    CandidateRun,
+    FreshRun,
+    candidate_to_json,
+    fresh_cassettes,
+    parse_candidate,
+)
+from lgcov.cassette import Call, Cassette, Halt, ProbeStep, Step, runs_from_json
 from lgcov.snapshot import Edge, GraphSnapshot
 
 HEAD = GraphSnapshot(frozenset({"a", "b"}), frozenset({Edge("a", "b")}))
@@ -232,3 +239,71 @@ def test_this_lgcov_still_writes_schema_2_with_probes_by_step_index() -> None:
     assert body["schema"] == 2
     by_index = {"run", "step", "node", "output", "goto", "raised"}
     assert all(set(p) == by_index for p in body["probes"])
+
+
+# T186: `cassette accept --candidate-in` takes its fresh runs from the file, so the review commands
+# can accept without running the PR's code (docs/review.md).
+RECORDED = [
+    Cassette({"q": "one"}, [Step("a", 1, {"q": "one"}, "c1"), Step("b", 2, {"a": 1}, "c1")]),
+    Cassette({"q": "two"}, [Step("a", 3, {"q": "two"}, "c1"), Step("b", 4, {"a": 3}, "c1")]),
+]
+RAN = (
+    FreshRun((Step("a", 10, {"q": "one"}, "c2"), Step("b", 20, {"a": 10}, "c1")), ()),
+    FreshRun((Step("a", 30, {"q": "two"}, "c2"), Step("b", 40, {"a": 30}, "c1")), ()),
+)
+
+
+def test_each_run_in_the_file_stands_in_for_a_fresh_run_of_the_recorded_input() -> None:
+    fresh = fresh_cassettes(CandidateRun(head=HEAD, fresh=RAN), RECORDED)
+    assert fresh == [
+        Cassette({"q": "one"}, list(RAN[0].steps)),
+        Cassette({"q": "two"}, list(RAN[1].steps)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("run", "why"),
+    [
+        (
+            CandidateRun(harness_error="Installing your project failed"),
+            "^the candidate job hit a harness error, so its file holds no runs to accept$",
+        ),
+        (
+            CandidateRun(head=HEAD, crash="Node `b` raised ValueError: boom", crash_node="b"),
+            "^the candidate job's run crashed at node 'b', so nothing after it ran$",
+        ),
+        (
+            CandidateRun(head=HEAD, crash="the graph raised"),
+            "^the candidate job's run crashed, so nothing after it ran$",
+        ),
+        (
+            CandidateRun(head=HEAD, fresh=RAN[:1]),
+            "^the candidate file holds 1 run and the baseline 2 runs: they must be the same runs$",
+        ),
+        (
+            CandidateRun(head=HEAD, fresh=(*RAN, RAN[0])),
+            "holds 3 runs and the baseline 2 runs",
+        ),
+        (
+            CandidateRun(head=HEAD, fresh=(RAN[0], replace(RAN[1], halt=Halt("b", "diverged")))),
+            "^run 1 stopped at node 'b' as its input no longer matched the recording, so nothing "
+            "from there on ran$",
+        ),
+        (
+            CandidateRun(head=HEAD, fresh=(replace(RAN[0], halt=Halt("a", "budget")), RAN[1])),
+            "^run 0 stopped at node 'a' as the time budget ran out, so nothing from there on ran$",
+        ),
+    ],
+    ids=[
+        "harness error",
+        "crash",
+        "crash, no node",
+        "fewer runs",
+        "more runs",
+        "diverged",
+        "budget",
+    ],
+)
+def test_a_file_that_can_t_stand_in_for_fresh_runs_is_refused(run: CandidateRun, why: str) -> None:
+    with pytest.raises(ValueError, match=why):
+        fresh_cassettes(run, RECORDED)

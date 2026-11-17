@@ -566,6 +566,130 @@ def test_cli_accept_cassette_dir_flag_overrides_config(
     assert (other / "accept.md").is_file()
 
 
+# T186: `--candidate-in` takes the fresh runs from what the candidate job wrote, so the review
+# commands can accept without running the PR's code (docs/review.md).
+NOT_IMPORTABLE = 'raise AssertionError("cassette accept imported the graph")\n'
+
+
+def _candidate_file(cfg: Path, *flags: str) -> Path:
+    """What the candidate job writes for the project as it stands: `lgcov ci --candidate-out`."""
+    out, report = cfg.parent / "candidate.json", cfg.parent / "report.md"
+    args = ["ci", "--report", str(report), "--candidate-out", str(out), "--config", str(cfg)]
+    assert main([*args, *flags]) == 0
+    return out
+
+
+def _accept(cfg: Path, *flags: str) -> int:
+    return main(["cassette", "accept", *flags, "--config", str(cfg)])
+
+
+@pytest.mark.parametrize("which", [("--all-drifted",), ("--nodes", "b")])
+def test_cli_accept_from_a_candidate_file_writes_what_a_live_accept_writes(
+    tmp_path: Path, which: tuple[str, ...]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    recorded = baseline.read_text(encoding="utf-8")
+    assert _accept(cfg, *which) == 0
+    live = baseline.read_text(encoding="utf-8")
+    baseline.write_text(recorded, encoding="utf-8")
+    candidate = _candidate_file(cfg)
+    (tmp_path / "graph.py").write_text(NOT_IMPORTABLE, encoding="utf-8")
+    assert _accept(cfg, *which, "--candidate-in", str(candidate)) == 0
+    assert baseline.read_text(encoding="utf-8") == live
+    assert (baseline.parent / "accept.md").is_file()
+
+
+def test_cli_accept_from_a_candidate_file_needs_no_graph_entrypoint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The review workflow passes the base's lgcov.yaml, which may leave the graph to the
+    Action's graph-entrypoint input: nothing is loaded, so nothing needs naming."""
+    cfg, baseline = _ab_project(tmp_path)
+    candidate = _candidate_file(cfg)
+    cfg.write_text(f"cassette_dir: {baseline.parent}\n", encoding="utf-8")
+    capsys.readouterr()
+    assert _accept(cfg, "--nodes", "b") == 2  # the live accept still needs it
+    assert "graph_entrypoint" in capsys.readouterr().err
+    assert _accept(cfg, "--nodes", "b", "--candidate-in", str(candidate)) == 0
+    runs = json.loads(baseline.read_text(encoding="utf-8"))["runs"]
+    assert [r["steps"][1]["output"] for r in runs] == [{"b": "B2"}] * 2
+
+
+def test_cli_accept_from_a_candidate_file_refuses_a_run_that_crashed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    raises = AB_GRAPH.replace('return {"b": "B1"}', 'raise ValueError("boom")')
+    (tmp_path / "graph.py").write_text(raises, encoding="utf-8")
+    candidate = _candidate_file(cfg)
+    before = baseline.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert _accept(cfg, "--nodes", "a", "--candidate-in", str(candidate)) == 2
+    assert "crashed at node 'b', so nothing after it ran" in capsys.readouterr().err
+    assert baseline.read_text(encoding="utf-8") == before
+
+
+def test_cli_accept_from_a_candidate_file_refuses_a_run_that_stopped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    (tmp_path / "graph.py").write_text(AB_GRAPH.replace("A1", "A2"), encoding="utf-8")
+    candidate = _candidate_file(cfg, "--on-divergence", "fail")  # b's input moved: stop there
+    before = baseline.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert _accept(cfg, "--nodes", "a", "--candidate-in", str(candidate)) == 2
+    assert "run 0 stopped at node 'b'" in capsys.readouterr().err
+    assert baseline.read_text(encoding="utf-8") == before
+
+
+def test_cli_accept_from_a_candidate_file_still_refuses_a_node_that_did_not_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    (tmp_path / "graph.py").write_text(AB_GRAPH.replace("B1", "B2"), encoding="utf-8")
+    candidate = _candidate_file(cfg)
+    before = baseline.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert _accept(cfg, "--nodes", "a", "--candidate-in", str(candidate)) == 1
+    assert "node 'a' is not drifted" in capsys.readouterr().err
+    assert baseline.read_text(encoding="utf-8") == before
+
+
+def test_cli_accept_from_a_candidate_file_of_other_runs_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    candidate = _candidate_file(cfg)
+    body = json.loads(baseline.read_text(encoding="utf-8"))
+    body["runs"] = body["runs"][:1]
+    baseline.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    before = baseline.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert _accept(cfg, "--all-drifted", "--candidate-in", str(candidate)) == 2
+    assert "holds 2 runs and the baseline 1 run" in capsys.readouterr().err
+    assert baseline.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    ("text", "why"),
+    [("{}", "not a candidate file"), ("not json", "Expecting value"), (None, "No such file")],
+    ids=["no schema", "not json", "no file"],
+)
+def test_cli_accept_from_what_isn_t_a_candidate_file_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], text: str | None, why: str
+) -> None:
+    cfg, baseline = _ab_project(tmp_path)
+    bad = tmp_path / "candidate.json"
+    if text is not None:
+        bad.write_text(text, encoding="utf-8")
+    before = baseline.read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert _accept(cfg, "--all-drifted", "--candidate-in", str(bad)) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("lgcov cassette accept: ") and why in err
+    assert baseline.read_text(encoding="utf-8") == before
+
+
 def test_cli_replay_sees_edit_with_same_size_and_mtime(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
