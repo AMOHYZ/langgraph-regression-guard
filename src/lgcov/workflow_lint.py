@@ -6,6 +6,9 @@ problems out). tests/test_workflow_lint.py runs it over this repo's workflows.
 
 T179: with the Action's `phase` input, the candidate job holds nothing worth taking, and the job
 that decides can't be skipped into a pass.
+
+T186: a workflow on `issue_comment` starts only for a maintainer, reads the comment only in an
+`if`, and checks out and runs nothing of the PR (docs/review.md, "What the lint checks").
 """
 
 from __future__ import annotations
@@ -95,11 +98,68 @@ def _phase_problems(
     return problems
 
 
+# T186: what the comment says, which anyone could have written: only an `if` may read it.
+_READS_COMMENT = re.compile(r"\$\{\{[^}]*\bgithub\.event\.(comment\.|issue\.title\b|issue\.body\b)")
+_GATE_LOCAL = ("./", "./.")  # the repo root, whole: `./review` is another action
+
+
+def _outside_if(value: object) -> str:
+    """Every value under this one as text, but for what an `if` key holds."""
+    if isinstance(value, dict):
+        return " ".join(_outside_if(v) for k, v in value.items() if k != "if")
+    if isinstance(value, list):
+        return " ".join(_outside_if(v) for v in value)
+    return str(value)
+
+
+def _comment_problems(workflow: Mapping[object, object]) -> list[str]:
+    """T186: the rules for a workflow on `issue_comment`, which holds a write token on the base
+    and runs from the default branch (docs/review.md, "What the lint checks")."""
+    on = workflow.get("on", workflow.get(True))
+    event = _mapping(on).get("issue_comment") if isinstance(on, dict) else None
+    problems = []
+    if _mapping(event).get("types") != ["created"]:
+        problems.append("issue_comment: types must be exactly [created], so an edit runs nothing")
+    if "permissions" not in workflow:
+        problems.append("the workflow sets no top-level permissions, so jobs get the default token")
+    if _READS_COMMENT.search(_outside_if({k: v for k, v in workflow.items() if k != "jobs"})):
+        problems.append("the workflow reads the comment outside an `if`")
+    for name, raw in _mapping(workflow.get("jobs")).items():
+        job = _mapping(raw)
+        if "uses" in job:
+            problems.append(f"job {name} calls a reusable workflow, which this lint can't see into")
+        condition = str(job.get("if", ""))
+        for field in ("github.event.issue.pull_request", "github.event.comment.author_association"):
+            if field not in condition:
+                problems.append(f"job {name}'s `if` must read {field}")
+        if _READS_COMMENT.search(_outside_if(job)):
+            problems.append(f"job {name} reads the comment outside an `if`")
+        for step in _steps(job):
+            uses = _uses(step)
+            if uses.startswith("actions/checkout@"):
+                problems += [
+                    f"job {name} checks out with `{key}`: only the default branch, never the PR"
+                    for key in ("ref", "repository")
+                    if key in _with(step)
+                ]
+                if str(_with(step).get("persist-credentials", True)).lower() != "false":
+                    problems.append(
+                        f"job {name} leaves its token in .git/config; "
+                        "set persist-credentials: false"
+                    )
+            if uses in _GATE_LOCAL or uses.startswith(ACTION):
+                problems.append(
+                    f"job {name} runs the gate Action ({uses}), which installs and runs the "
+                    "project; use the review action"
+                )
+    return problems
+
+
 def workflow_problems(doc: object) -> list[str]:
     """What's wrong with one parsed workflow file; [] when nothing is."""
     workflow = _mapping(doc)
     triggers = _triggers(workflow)
-    problems = []
+    problems = _comment_problems(workflow) if "issue_comment" in triggers else []
     if "pull_request_target" in triggers:
         problems.append(
             "uses pull_request_target, which runs with the base's secrets and a write token; "
