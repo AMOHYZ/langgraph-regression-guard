@@ -6,17 +6,19 @@ import pytest
 
 from lgcov.config import GateConfig
 from lgcov.gate_sim import (
+    POWER_DELTAS,
     Cell,
     Resolved,
     Skipped,
     joint_cells,
     mc_error,
+    predicted,
     resolve,
     simulate,
     spawn_seeds,
     sweep,
 )
-from lgcov.stats import rho_from_2x2, wilson
+from lgcov.stats import ni_required_n, required_n, rho_from_2x2, wilson
 
 
 def test_joint_cells_keep_the_marginals_and_give_rho_back() -> None:
@@ -92,3 +94,44 @@ def test_sweep_skips_infeasible_cells_and_keeps_going() -> None:
     out = sweep(cells, reps=5, seed=0, rho_policy="skip")
     assert isinstance(out[0], Skipped)
     assert not isinstance(out[1], Skipped) and len(out[1].arms) == 2
+
+
+# T151 part 2: power arms and predicted power
+
+
+def test_power_arms_keep_the_cells_rho_and_say_why_one_is_out_of_reach() -> None:
+    r = resolve(Cell(n=100, rho=0.3, p_base=0.95), power=POWER_DELTAS)
+    assert not isinstance(r, Skipped) and r.rho == 0.3
+    (drop, cells), (gain, why) = r.power
+    assert (drop, gain) == (-0.10, 0.05)
+    assert not isinstance(cells, str) and isinstance(why, str)
+    assert rho_from_2x2(0.95, 0.85, cells[0]) == pytest.approx(0.3)
+    assert "PR rate 1 not in (0, 1)" in why
+
+
+def test_the_clamped_cell_reaches_neither_power_arm() -> None:
+    r = resolve(Cell(n=100, rho=0.7, p_base=0.95), rho_policy="clamp", power=POWER_DELTAS)
+    assert not isinstance(r, Skipped)
+    (_, drop), (_, gain) = r.power
+    assert isinstance(drop, str) and "the reachable rho is 0.546" in drop
+    assert isinstance(gain, str) and "PR rate 1" in gain
+
+
+def test_power_arms_leave_the_error_arms_runs_as_they_were() -> None:
+    cell = Cell(n=50, rho=0.3, p_base=0.80)
+    plain, wide = resolve(cell), resolve(cell, power=POWER_DELTAS)
+    assert not isinstance(plain, Skipped) and not isinstance(wide, Skipped)
+    arms = simulate(wide, reps=20, seed=3)
+    assert [a.delta for a in arms] == [0.0, pytest.approx(-0.05), -0.10, 0.05]
+    assert arms[:2] == simulate(plain, reps=20, seed=3)
+
+
+def test_predicted_power_is_the_gates_sizing_turned_around() -> None:
+    n_block = required_n(0.80, 0.70, 0.3)  # BLOCK at Δ = -0.10: detection
+    n_ship = ni_required_n(0.80, 0.80, 0.3, margin=0.05)  # SHIP at Δ = 0: non-inferiority
+    assert n_block is not None and n_ship is not None
+    block = predicted(Cell(n=n_block, rho=0.3, p_base=0.80), 0.3, -0.10)
+    ship = predicted(Cell(n=n_ship, rho=0.3, p_base=0.80), 0.3, 0.0)
+    assert block is not None and 0.80 <= block < 0.81
+    assert ship is not None and 0.80 <= ship < 0.81
+    assert predicted(Cell(n=100, rho=0.3, p_base=0.80), 0.3, -0.05) is None  # at the margin
