@@ -25,6 +25,8 @@ from fixtures.graphs import (
     conditional,
     fan_out_send,
     linear,
+    with_subgraph,
+    with_tools,
 )
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -42,6 +44,7 @@ from lgcov.cassette import (
     _router_prints,
     changed_nodes,
     compared_run,
+    graph_shape,
     judge_probes,
     judge_repeats,
     probe_nodes,
@@ -783,6 +786,15 @@ def test_today_s_recordings_read_as_schema_1_and_save_byte_for_byte(path: Path) 
     recording = recording_from_json(text)
     assert recording == Recording(runs_from_json(text))  # schema 1, with no recording fields
     assert recording_to_json(recording) == runs_to_json(recording.runs) == text
+
+
+# T193, PR 2: `lgcov record --schema 2` writes the graph's shape as `graph`: each node by name, a
+# subgraph's own nodes nested, and a tool node's tools.
+def test_graph_shape_nests_a_subgraph_and_names_a_tool_node_s_tools() -> None:
+    inner: dict[str, object] = {"nodes": {"a": {}, "b": {}}}
+    assert graph_shape(with_subgraph()) == {"nodes": {"prep": {}, "inner": inner}}
+    assert graph_shape(with_tools()) == {"nodes": {"agent": {}, "tools": {"tools": ["lookup"]}}}
+    assert graph_shape(object()) is None  # an object with only .stream() has no nodes to read
 
 
 # T211: repeats run a node live, K times on each input base recorded; `judge_repeats` compares

@@ -71,6 +71,7 @@ from lgcov.calibration import (
 from lgcov.candidate import CandidateRun, FreshRun, candidate_to_json, parse_candidate
 from lgcov.cassette import (
     ON_DIVERGENCE,
+    SCHEME,
     TRANSPORT_ERRORS,
     Budget,
     Cassette,
@@ -78,6 +79,7 @@ from lgcov.cassette import (
     NodeError,
     OnDivergence,
     ProbeStep,
+    Recording,
     Replay,
     Step,
     accept_nodes,
@@ -85,6 +87,7 @@ from lgcov.cassette import (
     check_scheme,
     compared_run,
     fingerprint_session,
+    graph_shape,
     judge_probes,
     judge_repeats,
     probe_steps,
@@ -718,6 +721,15 @@ def _record(argv: list[str]) -> int:
     ap.add_argument("--inputs", required=True, help="JSON list of graph input objects")
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="lgcov.yaml (optional)")
     ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
+    ap.add_argument(
+        "--schema",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="the recording's schema: 1, the default, or 2, a preview of T193's "
+        "(docs/design/cassette-schema.md). Every lgcov that reads a schema-2 file, the "
+        "Action's in both jobs included, must be 0.4.0 or later",
+    )
     args = ap.parse_args(argv)
     try:
         cfg = load_config(args.config, {"graph_entrypoint": args.graph})
@@ -731,8 +743,13 @@ def _record(argv: list[str]) -> int:
         return EXIT_ERROR
     runs = [record(graph, i) for i in inputs]
     out = Path(cfg.cassette_dir) / "baseline.json"
-    _write_runs(out, runs)
-    print(f"recorded {len(runs)} runs to {out}")
+    if args.schema == 1:
+        _write_runs(out, runs)
+    else:  # T193: the recording's fields beside today's runs
+        out.parent.mkdir(parents=True, exist_ok=True)
+        recording = Recording(runs, 2, SCHEME, graph_shape(graph))
+        out.write_text(recording_to_json(recording), encoding="utf-8")
+    print(f"recorded {len(runs)} runs to {out}" + (" in schema 2" if args.schema == 2 else ""))
     return 0
 
 

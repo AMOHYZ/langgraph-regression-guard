@@ -3,6 +3,7 @@ from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.prebuilt import ToolNode
 from langgraph.types import Send
 from pydantic import BaseModel
 
@@ -71,6 +72,21 @@ def fan_out_send() -> CompiledStateGraph[S]:
     g.add_edge(START, "plan")
     g.add_conditional_edges("plan", fan, ["worker"])
     g.add_edge("worker", END)
+    return g.compile()
+
+
+def lookup(query: str) -> str:
+    """Look up an order."""
+    return query
+
+
+def with_tools() -> CompiledStateGraph[S]:
+    g = StateGraph(S)
+    g.add_node("agent", _noop)
+    g.add_node("tools", ToolNode([lookup]))
+    g.add_edge(START, "agent")
+    g.add_edge("agent", END)
+    g.add_edge("tools", END)  # never reached: only the graph's shape is read
     return g.compile()
 
 

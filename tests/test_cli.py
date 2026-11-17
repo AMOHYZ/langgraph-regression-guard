@@ -26,6 +26,7 @@ from lgcov.cassette import (
     compared_run,
     probe_nodes,
     record,
+    recording_from_json,
     replay_run,
     runs_to_json,
 )
@@ -354,6 +355,23 @@ def test_cli_record_then_replay_round_trips(
     assert main(["replay", "--config", str(cfg)]) == 0
 
 
+# T193, PR 2: --schema 2 writes the recording's fields beside the runs schema 1 writes. A preview:
+# without it `lgcov record` writes schema 1, byte for byte as before (the test above).
+def test_cli_record_schema_2_writes_schema_scheme_and_graph(tmp_path: Path) -> None:
+    cfg = _demo_config(tmp_path)
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text('[{"question": "Where is my order?"}, {"question": "What are your hours?"}]')
+    assert main(["record", "--config", str(cfg), "--inputs", str(inputs), "--schema", "2"]) == 0
+    written = (tmp_path / "cassettes" / "baseline.json").read_text(encoding="utf-8")
+    body = json.loads(written)
+    assert set(body) == {"schema", "scheme", "graph", "runs"}
+    assert (body["schema"], body["scheme"]) == (2, SCHEME)
+    assert body["graph"] == {"nodes": {"classify": {}, "lookup_order": {}, "respond": {}}}
+    assert body["runs"] == json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))["runs"]
+    assert recording_from_json(written).graph == body["graph"]
+    assert main(["replay", "--config", str(cfg)]) == 0
+
+
 @pytest.mark.parametrize("body", ['{"question": "x"}', "[1, 2]", "not json"])
 def test_cli_record_bad_inputs_exits_two(
     tmp_path: Path, body: str, capsys: pytest.CaptureFixture[str]
@@ -396,8 +414,9 @@ graph = g.compile()
 """
 
 
-def _ab_project(tmp_path: Path) -> tuple[Path, Path]:
-    """Record a baseline for AB_GRAPH, then change both nodes; returns (config, baseline)."""
+def _ab_project(tmp_path: Path, *record: str) -> tuple[Path, Path]:
+    """Record a baseline for AB_GRAPH, then change both nodes; returns (config, baseline).
+    `record`: more arguments for `lgcov record`."""
     graph = tmp_path / "graph.py"
     graph.write_text(AB_GRAPH, encoding="utf-8")
     cfg = tmp_path / "lgcov.yaml"
@@ -407,7 +426,7 @@ def _ab_project(tmp_path: Path) -> tuple[Path, Path]:
     )
     inputs = tmp_path / "inputs.json"
     inputs.write_text("[{}, {}]", encoding="utf-8")
-    assert main(["record", "--config", str(cfg), "--inputs", str(inputs)]) == 0
+    assert main(["record", "--config", str(cfg), "--inputs", str(inputs), *record]) == 0
     graph.write_text(AB_GRAPH.replace("A1", "A2").replace("B1", "B2"), encoding="utf-8")
     return cfg, tmp_path / "cassettes" / "baseline.json"
 
@@ -506,6 +525,18 @@ def test_cli_accept_won_t_mix_fingerprint_schemes_in_a_schema_2_file(
     assert main(["cassette", "accept", "--nodes", "b", "--config", str(cfg)]) == 2
     assert "scheme 'lines'" in capsys.readouterr().err  # said before the graph loads
     assert json.loads(baseline.read_text(encoding="utf-8")) == body
+
+
+def test_cli_accept_keeps_what_record_schema_2_wrote(tmp_path: Path) -> None:
+    cfg, baseline = _ab_project(tmp_path, "--schema", "2")
+    before = json.loads(baseline.read_text(encoding="utf-8"))
+    assert before["graph"] == {"nodes": {"a": {}, "b": {}}}
+    assert main(["cassette", "accept", "--nodes", "b", "--config", str(cfg)]) == 0
+    after = json.loads(baseline.read_text(encoding="utf-8"))
+    assert {k: after[k] for k in ("schema", "scheme", "graph")} == {
+        k: before[k] for k in ("schema", "scheme", "graph")
+    }
+    assert [r["steps"][1]["output"] for r in after["runs"]] == [{"b": "B2"}] * 2
 
 
 def test_cli_accept_cassette_dir_flag_overrides_config(

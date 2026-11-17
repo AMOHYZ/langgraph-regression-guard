@@ -37,6 +37,7 @@ from lgcov.fingerprint import fingerprint
 from lgcov.messages import decode, encode
 from lgcov.normalize import key_view, normalize
 from lgcov.rebind import Ambiguous, rebind
+from lgcov.snapshot import node_tools
 
 
 class Sample(TypedDict):
@@ -183,6 +184,26 @@ def check_scheme(recording: Recording) -> None:
             f"the baseline's fingerprints are in scheme {recording.scheme!r} and this lgcov "
             f"records {SCHEME!r}: accepting would mix the two, so re-record instead"
         )
+
+
+def graph_shape(graph: Any) -> dict[str, object] | None:
+    """T193: a schema-2 recording's `graph`. Each node by name: a subgraph's own nodes nested, a
+    tool node's tools (T207's `node_tools`), and {} for any other node. None for an object with
+    no nodes to read, like one with only .stream()."""
+    nodes = getattr(graph, "nodes", None)
+    if not isinstance(nodes, Mapping):
+        return None
+    tools = node_tools(graph) if hasattr(graph, "get_graph") else {}
+    shape: dict[str, object] = {}
+    for name, spec in nodes.items():
+        bound = getattr(spec, "bound", None)
+        if name == START:
+            continue
+        if isinstance(bound, Pregel):
+            shape[name] = graph_shape(bound) or {"nodes": {}}
+        else:
+            shape[name] = {"tools": list(tools[name])} if name in tools else {}
+    return {"nodes": shape}
 
 
 @dataclass(frozen=True)
