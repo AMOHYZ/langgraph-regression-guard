@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
-from langgraph.types import Send
+from langgraph.types import Command, Send
 from pydantic import BaseModel
 
 
@@ -87,6 +87,64 @@ def with_tools() -> CompiledStateGraph[S]:
     g.add_edge(START, "agent")
     g.add_edge("agent", END)
     g.add_edge("tools", END)  # never reached: only the graph's shape is read
+    return g.compile()
+
+
+# T193: subgraphs whose nodes `record(..., units=True)` puts under the subgraph's step.
+def _holding(sub: CompiledStateGraph[S]) -> CompiledStateGraph[S]:
+    g = StateGraph(S)
+    g.add_node("inner", sub)
+    g.add_edge(START, "inner")
+    g.add_edge("inner", END)
+    return g.compile()
+
+
+def subgraph_in_subgraph() -> CompiledStateGraph[S]:
+    return _holding(with_subgraph())
+
+
+async def _jump(state: S) -> Command[Literal["b"]]:  # async, so the run uses .astream
+    return Command(goto="b", update={"route": "jumped"})
+
+
+def async_command_subgraph() -> CompiledStateGraph[S]:
+    sub = StateGraph(S)
+    sub.add_node("a", _jump)
+    sub.add_node("b", _noop)
+    sub.add_edge(START, "a")
+    sub.add_edge("b", END)
+    return _holding(sub.compile())
+
+
+def _calls_a_graph(state: S) -> S:
+    return cast(S, linear().invoke(state))
+
+
+def graph_inside_node() -> CompiledStateGraph[S]:
+    g = StateGraph(S)
+    g.add_node("calls", _calls_a_graph)
+    g.add_edge(START, "calls")
+    g.add_edge("calls", END)
+    return g.compile()
+
+
+def _bump(state: S) -> S:
+    return {"x": state.get("x", 0) + 1}
+
+
+def _again(state: S) -> Literal["again", "done"]:
+    return "again" if state.get("x", 0) < 2 else "done"
+
+
+def subgraph_in_loop() -> CompiledStateGraph[S]:
+    sub = StateGraph(S)
+    sub.add_node("bump", _bump)
+    sub.add_edge(START, "bump")
+    sub.add_edge("bump", END)
+    g = StateGraph(S)
+    g.add_node("inner", sub.compile())
+    g.add_edge(START, "inner")
+    g.add_conditional_edges("inner", _again, {"again": "inner", "done": END})
     return g.compile()
 
 

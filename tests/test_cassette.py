@@ -22,9 +22,13 @@ from fixtures.graphs import (
     S,
     _noop,
     ask,
+    async_command_subgraph,
     conditional,
     fan_out_send,
+    graph_inside_node,
     linear,
+    subgraph_in_loop,
+    subgraph_in_subgraph,
     with_subgraph,
     with_tools,
 )
@@ -795,6 +799,61 @@ def test_graph_shape_nests_a_subgraph_and_names_a_tool_node_s_tools() -> None:
     assert graph_shape(with_subgraph()) == {"nodes": {"prep": {}, "inner": inner}}
     assert graph_shape(with_tools()) == {"nodes": {"agent": {}, "tools": {"tools": ["lookup"]}}}
     assert graph_shape(object()) is None  # an object with only .stream() has no nodes to read
+
+
+# T193, 3a-1: with `units`, `record` puts the nodes that ran inside a subgraph under its step:
+# each with its input, output and fingerprint, in the order LangGraph started them.
+def _units(step: Step) -> list[Step]:
+    assert step.units is not None, step
+    return step.units
+
+
+def test_record_with_units_puts_a_subgraph_s_nodes_under_its_step() -> None:
+    graph = with_subgraph()
+    twin, cassette = record(graph, {"x": 1}), record(graph, {"x": 1}, units=True)
+    assert [dataclasses.replace(s, units=None) for s in cassette.steps] == twin.steps
+    prep, inner = cassette.steps
+    assert prep.units is None
+    a, b = _units(inner)
+    assert [(u.node, u.input, u.output) for u in (a, b)] == [
+        ("a", {"x": 1}, {"x": 1}),
+        ("b", {"x": 1}, {"x": 1}),
+    ]
+    assert a.code is not None and a.code == b.code  # both run _noop
+    text = recording_to_json(Recording([cassette], 2, SCHEME, graph_shape(graph)))
+    assert recording_from_json(text).runs == [cassette]
+
+
+def test_each_visit_to_a_subgraph_keeps_its_own_units() -> None:
+    first, second = record(subgraph_in_loop(), {"x": 0}, units=True).steps
+    assert [u.input for u in _units(first)] == [{"x": 0}]
+    assert [u.input for u in _units(second)] == [{"x": 1}]
+
+
+def test_units_nest_a_subgraph_inside_a_subgraph() -> None:
+    (outer,) = record(subgraph_in_subgraph(), {"x": 1}, units=True).steps
+    prep, inner = _units(outer)
+    assert [u.node for u in _units(inner)] == ["a", "b"]
+
+
+def test_an_async_subgraph_s_unit_keeps_where_its_command_went() -> None:
+    (inner,) = record(async_command_subgraph(), {"x": 1}, units=True).steps
+    jump, b = _units(inner)
+    assert (jump.goto, jump.output, b.node) == (["b"], {"route": "jumped"}, "b")
+
+
+def test_a_graph_started_inside_a_node_gets_no_units_yet() -> None:
+    (calls,) = record(graph_inside_node(), {"x": 1}, units=True).steps
+    assert calls.units is None  # T193's section 6, PR 7
+
+
+def test_a_recording_with_units_replays_as_its_twin() -> None:
+    graph = with_subgraph()
+    replays = [
+        replay_run(graph, record(graph, {"x": 1}, units=u), serve=True) for u in (False, True)
+    ]
+    calls = [[(c.node, c.how) for c in r.calls] for r in replays]
+    assert calls[0] == calls[1] and replays[0].drifts == replays[1].drifts
 
 
 # T211: repeats run a node live, K times on each input base recorded; `judge_repeats` compares
