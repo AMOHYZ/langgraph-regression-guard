@@ -9,7 +9,7 @@ what it did: docs/trust-boundary.md says what that leaves open.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Literal
 
@@ -275,3 +275,41 @@ def parse_candidate(text: str) -> CandidateRun:
     if run.head is None and not run.harness_error:
         raise ValueError("it has no graph and no error")
     return run
+
+
+_STOPPED = {
+    "diverged": "its input no longer matched the recording",
+    "budget": "the time budget ran out",
+}
+
+
+def _runs(n: int) -> str:
+    return f"{n} run" if n == 1 else f"{n} runs"
+
+
+def fresh_cassettes(run: CandidateRun, recorded: Sequence[Cassette]) -> list[Cassette]:
+    """T186: the baseline's runs as the candidate job ran them, for `cassette accept
+    --candidate-in`: each recorded input, with the steps the file says ran. ValueError when the
+    file can't stand in for fresh runs: its job hit a harness error or crashed, it holds another
+    number of runs, or a run stopped early. Those steps are still only the PR's code's word
+    (docs/trust-boundary.md, limit 1). T193: a schema-3 file's unit fields come along with its
+    steps, and nothing writes such a file yet."""
+    if run.harness_error:
+        raise ValueError(
+            "the candidate job hit a harness error, so its file holds no runs to accept"
+        )
+    if run.crash:
+        where = f" at node {run.crash_node!r}" if run.crash_node else ""
+        raise ValueError(f"the candidate job's run crashed{where}, so nothing after it ran")
+    if len(run.fresh) != len(recorded):
+        raise ValueError(
+            f"the candidate file holds {_runs(len(run.fresh))} and the baseline "
+            f"{_runs(len(recorded))}: they must be the same runs"
+        )
+    for i, fresh in enumerate(run.fresh):
+        if fresh.halt:
+            raise ValueError(
+                f"run {i} stopped at node {fresh.halt.node!r} as {_STOPPED[fresh.halt.why]}, so "
+                "nothing from there on ran"
+            )
+    return [Cassette(r.inputs, list(f.steps)) for r, f in zip(recorded, run.fresh, strict=True)]
