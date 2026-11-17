@@ -2,7 +2,8 @@
 
 **Status:** PR 1 in section 6, the reader, is built (#158, #159) and shipped in lgcov 0.4.0,
 release R1. It reads every field on this page, and no label uses one yet. The writers are off:
-lgcov still writes recording 1 and candidate 2. The rest of the page is design only.
+lgcov still writes recording 1 and candidate 2. The rest of the page is design only. The rulings in
+section 7 were decided on 17 November 2026.
 
 lgcov records a baseline once and replays each PR against it. Several planned tasks need the
 recording to hold more than it does. This page is the one schema change that carries them all, so
@@ -44,8 +45,8 @@ a read. A function named with no file is in [`cassette.py`](../../src/lgcov/cass
 |---|---|---|---|---|
 | `schema` | Integer, `2`. Absent means 1, today's file | `lgcov record`. `cassette accept` keeps the file's number | Every reader (`runs_from_json`). A number it doesn't know is refused by name | All |
 | `scheme` | Text: the fingerprint scheme | `lgcov record` | `_codes` and `_router_prints`, which then compute that scheme only | T212 |
-| `graph` | Object: node names, nested for subgraphs; each tool node's tool names; one fingerprint per state channel | `lgcov record`, from the compiled graph | The job that decides, from the base checkout's recording. One-job `ci` the same way | T238, T193 |
-| `parts` | Object: part name to `fingerprint`, `file` and `source` | `lgcov record` | The candidate job (what changed), the job that decides (a root's cause, the outside-part rule), the comment | T239. `source` is for T243, if ruling 4 is yes |
+| `graph` | Object: `{"nodes": {name: entry}}`. An entry is `{}` for a node, `{"tools": [names]}` for a tool node, and `{"nodes": {...}}` for a subgraph. Later, as an optional key, `state`: one fingerprint per state channel | `lgcov record`, from the compiled graph | The job that decides, from the base checkout's recording, once T243's check can tell a stale one (ruling 4). One-job `ci` the same way | T238, T193 |
+| `parts` | Object: part name to `fingerprint`, `file` and `source` | `lgcov record` | The candidate job (what changed), the job that decides (a root's cause, the outside-part rule), the comment | T239. `source` is for T243 (ruling 4) |
 | `runs` | As today | | | |
 
 `source` is a hash of the part's own syntax tree in its file, read as T212 reads source. A job that
@@ -271,13 +272,17 @@ field after the flip is optional.
 
 1. **Read** recording 2 and candidate 3, every field on this page, and write nothing. Split it into
    recording and candidate if it runs over about 200 lines. Then release R1.
-2. **Recording fields** `schema`, `scheme` and `graph`, behind a writer switch, so `lgcov record`
-   still writes schema 1. The job that decides reads `graph` from the base checkout.
-3. **Subgraph units:** record and serve them, then the labels. This PR flips T182's pin (#155),
-   `test_ci_names_no_root_inside_a_subgraph_and_t193_should_change_that` in
-   [`test_cli.py`](../../tests/test_cli.py). On its nested build there is no root today, and
-   `answer` is inconclusive. After this PR `answer.respond` is root, and `answer` gets no label
-   (the container rule).
+2. **Recording fields** `schema`, `scheme` and `graph`, behind a writer switch
+   (`lgcov record --schema 2`), so `lgcov record` still writes schema 1. The job that decides
+   starts reading `graph` from the base checkout with T243's stale check. A recording can be older
+   than base's graph, and a node the PR adds back would then read as propagated and stop blocking.
+   Until then T238's "not known" stays (ruling 4).
+3. **Subgraph units,** in two PRs. 3a records them behind the same switch and serves them: replay
+   serves a unit inside a subgraph as it serves a node, and no label changes. 3b adds the labels and
+   flips T182's pin (#155), `test_ci_names_no_root_inside_a_subgraph_and_t193_should_change_that`
+   in [`test_cli.py`](../../tests/test_cli.py). On its nested build there is no root today, and
+   `answer` is inconclusive. After 3b `answer.respond` is root, and `answer` gets no label (the
+   container rule).
 4. **Flip:** `lgcov record` writes schema 2. The demo baselines and the fixtures tests compare byte
    for byte are re-recorded once ([`test_demo_agent.py`](../../tests/test_demo_agent.py) requires
    it), with docs and changelog. Then release R2.
@@ -292,17 +297,20 @@ Each of 5 to 10 ships when ready, with no new schema number. It re-records the d
 the demo graph gains that field. A PR that changes a label also updates the docs that state lgcov's
 limits.
 
-## 7. Open rulings
+## 7. Rulings
 
-1. **Do transient errors never count as evidence?** *Recommendation: yes.* A unit with a transient
+Decided on 17 November 2026, as recommended here.
+
+1. **Do transient errors never count as evidence?** *Decided: yes.* A unit with a transient
    status (`timeout`, `rate_limited`, `server_error`) is not checked, and neither is the rest of its
    run. That makes the verdict INCONCLUSIVE, never a pass, so a PR can't hide a regression behind
    timeouts. This covers a failure a tool node handled, so the run went on (check 5d). One that ends
    the run is judged as today: a timeout or connection error is INFRA_ERROR, exit 2, and anything
    else a node raises is an agent failure ([README](../../README.md#outcomes)). A tool that catches
-   its own timeout and returns text can't be told apart.
-2. **Confirm a root by serving base's output there and running again?** *Recommendation: only when
-   several units changed; later for the rest.* With one changed unit, the units after it see base's
+   its own timeout and returns text can't be told apart. It applies once tool units record a
+   `status` (section 6, PR 6) and T248 settles the transient values.
+2. **Confirm a root by serving base's output there and running again?** *Decided: only when
+   several units changed; not built now.* With one changed unit, the units after it see base's
    inputs and, where they can be served, are served from base's recording. So the run equals base by
    construction. With several, serving base's output at one while another runs live tells them
    apart. Where units after the root run live, it needs `K` repeats and base's `samples`. Causal
@@ -310,18 +318,18 @@ limits.
    effect with a confidence interval. Its abstract names a confound that running forward brings
    ([arXiv 2606.08275](https://arxiv.org/abs/2606.08275); tested on synthetic models only). No new
    field: serving a recorded output exists.
-3. **Report an A/A rate, and an explicit low-confidence outcome?** *Recommendation: the outcome now,
-   the rate later.* A root that rests on one live sample of a model unit, with no `samples` to weigh
+3. **Report an A/A rate, and an explicit low-confidence outcome?** *Decided: the outcome now, the
+   rate later.* A root that rests on one live sample of a model unit, with no `samples` to weigh
    it against, says so in the comment. It still blocks as a root does: the words only stop it
    reading as proof, as `write_research_brief` was a root by construction on a real PR ([A/A noise
    floor](../benchmark.md#aa-noise-floor)). No new field. The rate needs many paid runs.
-4. **A stale baseline (T243)?** *Recommendation: block, with the re-record command, once detection
-   reads only the base checkout.* The job that decides recomputes each part's `source` from the base
+4. **A stale baseline (T243)?** *Decided: block, with the re-record command, once detection reads
+   only the base checkout.* The job that decides recomputes each part's `source` from the base
    checkout and compares it with the recording. Exempt a PR that changes only the recording, or the
    PR that fixes a stale one can't merge. That PR still goes through the edited-cassette check: its
    headline is "No decision: needs_human", never SHIP (`cassettes_edited`). So the exemption can't
    be used to swap in a convenient baseline. Until detection exists, T238's "not known:
-   inconclusive" stays.
+   inconclusive" stays, and the job that decides doesn't read `graph` (section 6, PR 2).
 
 ## Not verified
 
