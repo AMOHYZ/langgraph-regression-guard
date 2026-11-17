@@ -263,6 +263,26 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> _Run:
         case='{messages: [{role: user, content: "hi"}]}',
     )
 
+    # T242: head swaps node `c` for `d`, so each is a node only one side ran. In `forged`, head's
+    # `d` also writes base's node names as it replays, with `d` among them.
+    def swapped(row: str, forge: str = "") -> str:
+        d = f'def d(state: S) -> S:\n    _called("d")\n{forge}    return {{"c": "D"}}\n\n\ng = '
+        return (
+            graph(row)
+            .replace('g.add_node("c", c)', 'g.add_node("d", d)')
+            .replace('"b", "c")\ng.add_edge("c", END)', '"b", "d")\ng.add_edge("d", END)')
+            .replace("g = StateGraph(S)", d + "StateGraph(S)")
+        )
+
+    forge = (
+        "    import json\n"
+        '    with open(os.environ["BENCH_TEST_FORGE"], "w", encoding="utf-8") as f:\n'
+        '        json.dump(["__end__", "__start__", "a", "b", "c", "d"], f)\n'
+    )
+    for row, writes in (("swapped", ""), ("forged", forge)):
+        base, head = graph(row), swapped(row, writes)
+        project.row(row, {"graph.py": base, "helper.py": v1}, {"graph.py": head, "helper.py": v1})
+
     installed = root / "installed"
     installed.mkdir()
     (installed / "helper.py").write_text(_helper("installed"), encoding="utf-8")
@@ -272,6 +292,7 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> _Run:
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("PYTHONPATH", str(installed))
         patch.setenv("BENCH_TEST_CALLS", str(calls))
+        patch.setenv("BENCH_TEST_FORGE", str(root / "kept" / "forged" / "base-nodes.json"))
         patch.syspath_prepend(str(installed))
         patch.chdir(root)  # --keep-runs is relative here, and each side runs from its own folder
         args = ["--out", str(md), "--json", str(results), "--keep-runs", "kept"]
@@ -339,6 +360,8 @@ def test_a_bad_import_exits_2_after_the_other_rows_ran_and_the_report_is_written
             "crashes",
             "base_crashes",
             "messages",
+            "swapped",
+            "forged",
         ]
     )
     assert "own_helper:a" in bench.calls  # a row after the first bad one still ran
@@ -391,6 +414,21 @@ def test_a_run_crosses_from_one_side_to_the_other_as_a_file(tmp_path: Path) -> N
     ]
 
 
+def test_each_side_saves_its_graph_s_node_names(tmp_path: Path) -> None:
+    # T242: base's as it records, head's as it replays, read as `lgcov ci` reads head's.
+    from lgcov.bench_side import side_main
+
+    cases, runs = tmp_path / "cases.json", tmp_path / "base.json"
+    cases.write_text('[{"question": "one"}]', encoding="utf-8")
+    base, head = tmp_path / "kept" / "base-nodes.json", tmp_path / "kept" / "head-nodes.json"
+    record = ["record", f"{LINEAR / 'base.py'}:graph", str(cases), str(runs)]
+    assert side_main([*record, f"--nodes={base}"]) == 0
+    replay = ["replay", f"{LINEAR / 'head.py'}:graph", str(runs), str(tmp_path / "drifted.json")]
+    assert side_main([*replay, str(tmp_path / "head.json"), f"--nodes={head}"]) == 0
+    for names in (base, head):
+        assert json.loads(names.read_text("utf-8")) == ["__end__", "__start__", "a", "b", "c"]
+
+
 def test_a_crash_after_the_import_is_exit_1_and_says_why(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -427,7 +465,8 @@ def test_head_crashing_leaves_base_s_file_intact(bench: _Run) -> None:
     assert "head side" in bench.rows["crashes"]["error"]
     assert _inputs(bench.kept / "crashes" / "base.json") == ["one", "boom"]
     assert _inputs(bench.kept / "crashes" / "head.json") == ["one"]  # the run that finished
-    assert sorted(f.name for f in (bench.kept / "crashes").iterdir()) == ["base.json", "head.json"]
+    kept = sorted(f.name for f in (bench.kept / "crashes").iterdir())
+    assert kept == ["base-nodes.json", "base.json", "head-nodes.json", "head.json"]  # T242
 
 
 @pytest.mark.slow
@@ -447,6 +486,50 @@ def test_a_bad_import_keeps_nothing(bench: _Run) -> None:
 def test_kept_messages_load_back_as_messages(bench: _Run) -> None:
     head = _load_runs(str(bench.kept / "messages" / "head.json"))
     assert isinstance(head[0].steps[0].output["messages"][0], AIMessage)
+
+
+# T242: each side reports the node names of the graph it ran, so a node only one side ran is
+# labelled by the other side's graph, and --keep-runs keeps them for --from-runs.
+def _kept_names(bench: _Run, row: str, side: str) -> object:
+    return json.loads((bench.kept / row / f"{side}-nodes.json").read_text(encoding="utf-8"))
+
+
+def _rescored(bench: _Run, row: str, tmp_path: Path) -> dict[str, Any]:
+    """The row scored again from what --keep-runs kept, as `lgcov bench --from-runs` does."""
+    rows, out = str(bench.kept.parent / "bench"), tmp_path / "r.json"
+    args = ["--only", row, "--from-runs", str(bench.kept), "--out", str(tmp_path / "b.md")]
+    assert main(["bench", rows, *args, "--json", str(out)]) == 0
+    [found] = json.loads(out.read_text(encoding="utf-8"))["benchmarks"]
+    assert isinstance(found, dict)
+    return found
+
+
+@pytest.mark.slow
+def test_each_side_reports_its_own_graph_so_a_swapped_node_is_root(
+    bench: _Run, tmp_path: Path
+) -> None:
+    row = bench.rows["swapped"]
+    assert not row["error"]
+    assert (row["found_root"], row["found_propagated"], row["inconclusive"]) == (["c", "d"], [], {})
+    assert _kept_names(bench, "swapped", "base") == ["__end__", "__start__", "a", "b", "c"]
+    assert _kept_names(bench, "swapped", "head") == ["__end__", "__start__", "a", "b", "d"]
+    again = _rescored(bench, "swapped", tmp_path)
+    assert (again["found_root"], again["inconclusive"]) == (["c", "d"], {})
+
+
+@pytest.mark.slow
+def test_head_s_code_writing_base_s_node_names_changes_no_label(
+    bench: _Run, tmp_path: Path
+) -> None:
+    # T238: base's names come from base's own process. Head's `d` wrote `d` into base's file as
+    # it replayed, which would make `d` propagated, so non-blocking, if lgcov read it.
+    assert "forged:d" in bench.calls  # the write happened
+    row = bench.rows["forged"]
+    assert not row["error"]
+    assert (row["found_root"], row["found_propagated"], row["inconclusive"]) == (["c", "d"], [], {})
+    assert _kept_names(bench, "forged", "base") == ["__end__", "__start__", "a", "b", "c"]
+    again = _rescored(bench, "forged", tmp_path)
+    assert (again["found_root"], again["inconclusive"]) == (["c", "d"], {})
 
 
 CRASHES_ON_TWO = """\

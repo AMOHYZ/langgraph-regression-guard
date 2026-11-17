@@ -2493,6 +2493,26 @@ def _bench_sides(b: Benchmark, tmp: Path) -> tuple[str, str, list[Path]]:
 
 
 _KEPT = ("base.json", "head.json")  # T169: what --keep-runs saves, per benchmark
+_NODES = ("base-nodes.json", "head-nodes.json")  # T242: and each side's graph's node names
+
+
+def _side_nodes(path: Path) -> frozenset[str] | None:
+    """T242: the node names a bench side saved, or None where it saved none: runs kept before."""
+    if not path.exists():
+        return None
+    names: object = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ValueError(f"{path.name} isn't a list of node names")
+    return frozenset(names)
+
+
+def _put_back(path: Path, names: frozenset[str] | None) -> None:
+    """T242, T238: base's node names as base's own process saved them, written again once head's
+    code has run: that code could write the file too, and `--from-runs` trusts it."""
+    if names is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(json.dumps(sorted(names)), encoding="utf-8")
 
 
 class _SideFailed(Exception):
@@ -2585,9 +2605,15 @@ def _bench_one(
     T173: with `live`, head serves nothing, so base against base measures the model's noise.
 
     T211: with `repeats`, a changed node that needs a live probe, and under `live` each run's
-    first drifted node, runs that many more times on each side: 2 x `repeats` calls per input."""
+    first drifted node, runs that many more times on each side: 2 x `repeats` calls per input.
+
+    T242: each side saves the node names of the graph it ran, base's as it records and head's as
+    it replays, so a node only one side ran is labelled by the other side's graph. T238: base's
+    are read before head's code runs again, and written back once it has, so head can't change
+    them, here or for `--from-runs`."""
     start = perf_counter()
     worktrees: list[Path] = []
+    base_saved: tuple[Path, frozenset[str] | None] | None = None  # T242: base's, as base saved
     try:
         with tempfile.TemporaryDirectory() as tmp:
             try:
@@ -2597,12 +2623,16 @@ def _bench_one(
                 probed = Path(tmp) / "probes"
                 here = Path(tmp) if keep is None else keep / b.name
                 saved, fresh = here / "base.json", here / "head.json"
+                base_names, head_names = (here / name for name in _NODES)
                 cases.write_text(json.dumps(list(b.cases)), encoding="utf-8")
                 _run_side(b, "head", head_root, "check", head_target)
-                _run_side(b, "base", base_root, "record", base_target, str(cases), str(saved))
+                recording = [base_target, str(cases), str(saved), f"--nodes={base_names}"]
+                _run_side(b, "base", base_root, "record", *recording)
+                base_saved = (base_names, _side_nodes(base_names))
                 replaying = [head_target, str(saved), str(drifted), str(fresh), str(probed)]
-                replaying += ["--live"] if live else []
+                replaying += [f"--nodes={head_names}", *(["--live"] if live else [])]
                 _run_side(b, "head", head_root, "replay", *replaying)
+                graphs = (base_saved[1], _side_nodes(head_names))
                 runs = _load_runs(str(saved))
                 heads = _load_runs(str(fresh))
                 nodes: list[list[str]] = json.loads(drifted.read_text(encoding="utf-8"))
@@ -2619,6 +2649,8 @@ def _bench_one(
                     sides = {"base": (base_root, base_target), "head": (head_root, head_target)}
                     noise = _repeats(b, Path(tmp), sides, saved, repeat, repeats)
             finally:
+                if base_saved is not None:  # T238: head's code has run since, and could write it
+                    _put_back(*base_saved)
                 for worktree in worktrees:
                     remove = ["git", "-C", str(worktree), "worktree", "remove", "--force", "."]
                     subprocess.run(remove, check=False, capture_output=True)
@@ -2630,15 +2662,17 @@ def _bench_one(
         failed = getattr(exc, "stderr", "") or str(exc)
         error = f"{type(exc).__name__}: {str(failed).strip()[:200]}"
         return _error_row(b, error, perf_counter() - start)
-    return _labelled(b, (runs, heads), drifts, probes, perf_counter() - start, noise)
+    return _labelled(b, (runs, heads), drifts, probes, perf_counter() - start, noise, graphs)
 
 
 def _bench_saved(b: Benchmark, folder: Path) -> Result:
     """T162: score the runs `--keep-runs` saved in <folder>/<benchmark>/, compared as replay
-    compares them. Nothing runs, so it costs nothing, whatever the row's `status`."""
+    compares them. Nothing runs, so it costs nothing, whatever the row's `status`. T242: with
+    each side's node names, where they were kept with the runs."""
     start = perf_counter()
     try:
         runs, fresh = (_load_runs(str(folder / b.name / name)) for name in _KEPT)
+        base_nodes, head_nodes = (_side_nodes(folder / b.name / name) for name in _NODES)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return _error_row(b, f"{type(exc).__name__}: {str(exc)[:200]}", perf_counter() - start)
     if len(runs) != len(fresh):
@@ -2646,7 +2680,8 @@ def _bench_saved(b: Benchmark, folder: Path) -> Result:
     drifts = [
         list(compared_run(r, f.steps, (), None).drifts) for r, f in zip(runs, fresh, strict=True)
     ]
-    return _labelled(b, (runs, fresh), drifts, {}, perf_counter() - start)
+    graphs = (base_nodes, head_nodes)
+    return _labelled(b, (runs, fresh), drifts, {}, perf_counter() - start, graphs=graphs)
 
 
 def _labelled(
@@ -2656,13 +2691,17 @@ def _labelled(
     probes: Mapping[str, Probe],
     seconds: float,
     noise: Mapping[str, NoiseCheck] | None = None,
+    graphs: tuple[Collection[str] | None, Collection[str] | None] = (None, None),
 ) -> Result:
     """T162: root by fingerprint and probe (`classify`); the first node to drift is kept too.
 
     T211: with `noise`, a changed node is root only when it drifts above its noise, and otherwise
     inconclusive: its code changed, and the check misses a shift smaller than the spread. An
     unchanged node under its noise explains its own drift, so it gets no label, and a run it was
-    first to drift in needs no other cause."""
+    first to drift in needs no other cause.
+
+    T242: `graphs`: base's and head's node names, each as that side saved them, None for one it
+    didn't save."""
     _, first = _drift_kinds(sides[0], drifts)
     base, head = ({s.node: s.code for r in side for s in r.steps} for side in sides)
     checks = dict(noise or {})
@@ -2670,7 +2709,7 @@ def _labelled(
     judged = {n: Probe(checks[n].drifted or None, checks[n].verdict) for n in changed}
     quiet = {n for n, c in checks.items() if not c.drifted} - changed
     fresh = [r.steps for r in sides[1]]
-    labels = _node_labels(sides[0], fresh, drifts, {**probes, **judged}, quiet=quiet)
+    labels = _node_labels(sides[0], fresh, drifts, {**probes, **judged}, quiet=quiet, graphs=graphs)
     return Result(
         b.name,
         labels.root,
@@ -2788,7 +2827,8 @@ def _bench_cmd(argv: list[str]) -> int:
     ap.add_argument(
         "--keep-runs",
         metavar="DIR",
-        help="save each side's runs in DIR/<benchmark>/{base,head}.json as each one finishes",
+        help="save each side's runs in DIR/<benchmark>/{base,head}.json as each one finishes, "
+        "and T242: its graph's node names in {base,head}-nodes.json",
     )
     ap.add_argument("--live", action="store_true", help="T173: head runs every node, serving none")
     ap.add_argument(

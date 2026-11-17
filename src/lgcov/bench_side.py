@@ -12,6 +12,9 @@ each side here, with that side's folders first on its path, and a run crosses ov
     repeat <target> <runs.json> <nodes> <out> <k>  T211: run each named node live, k times on each
                                                    input it was recorded with, and save the samples
 
+T242: `--nodes=<file>`, on any mode, first saves the graph's node names there, read as `lgcov ci`
+reads head's, so `lgcov bench` can tell a node the PR added or removed from one a run didn't reach.
+
 T169: runs are saved as each one finishes, so a crash can't lose what was already paid for.
 
 On failure the last line of stderr says why. Exit CANT_IMPORT: the graph couldn't be loaded, so
@@ -37,6 +40,7 @@ from lgcov.cassette import (
 )
 from lgcov.cli import CANT_IMPORT, _load_graph, _say_replay_notes
 from lgcov.messages import encode
+from lgcov.snapshot import snapshot_from_compiled
 
 
 def _save(path: Path, runs: list[Cassette]) -> None:
@@ -56,7 +60,9 @@ def _probes(graph: object, recorded: list[Cassette], drifted: list[list[str]]) -
 
 @fingerprint_session()  # one side is one run: its cases share each node's fingerprint
 def side_main(argv: list[str]) -> int:
-    mode, target, *paths = argv
+    mode, target, *args = argv
+    nodes = [a.removeprefix("--nodes=") for a in args if a.startswith("--nodes=")]  # T242
+    paths = [a for a in args if not a.startswith("--nodes=")]
     live = paths[-1:] == ["--live"]  # T173: run every node, serve none
     try:
         # Exception: importing user graph code can raise anything.
@@ -65,6 +71,9 @@ def side_main(argv: list[str]) -> int:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return CANT_IMPORT
     try:
+        for out in map(Path, nodes):  # T242: before any case runs, so a later crash leaves them
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(sorted(snapshot_from_compiled(graph).nodes)), "utf-8")
         if mode == "record":
             runs: list[Cassette] = []
             for case in json.loads(Path(paths[0]).read_text(encoding="utf-8")):

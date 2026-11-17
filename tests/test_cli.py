@@ -15,7 +15,7 @@ from fixtures.graphs import ASK, Ask, AskData, AskDataShorter, AskModel, AskMode
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from examples.synthetic_agents import AGENTS, SUPPORT, SUPPORT_CLIENT, SUPPORT_NESTED
-from lgcov.attribution import UNEXPLAINED, Benchmark, NodeLabels, NoiseCheck
+from lgcov.attribution import GRAPH_NOT_GIVEN, UNEXPLAINED, Benchmark, NodeLabels, NoiseCheck
 from lgcov.cassette import (
     SCHEME,
     Cassette,
@@ -27,6 +27,7 @@ from lgcov.cassette import (
     probe_nodes,
     record,
     replay_run,
+    runs_to_json,
 )
 from lgcov.cli import (
     _import_file,
@@ -3526,6 +3527,71 @@ def test_bench_synthetic_names_no_root_just_because_one_side_ran_it(tmp_path: Pa
     every = json.loads(results.read_text(encoding="utf-8"))["per_node"][0]
     assert every["one_sided"]["hits"] == 0
     assert every["exact"] == every["recall"]  # each case names its one root, or none
+
+
+# T242: each bench side saves its graph's node names beside its runs, and `--from-runs` reads
+# them, so a node only one side ran gets the label ci gives it with both graphs. Head's names
+# never stand in for base's: without base's file, a node only the PR ran stays inconclusive.
+BASE_NODES = ["classify", "lookup", "respond"]
+HEAD_NODES = ["audit", "classify", "lookup", "respond"]
+
+
+def _kept_reroute(tmp_path: Path, names: dict[str, object]) -> Benchmark:
+    """Base reaches `lookup`; the PR's router skips it, and the PR runs an `audit` it added."""
+    kept = tmp_path / "rerouted"
+    kept.mkdir()
+    head = [*_route("r2", False), Step("audit", "logged", {"q": 1}, "c4")]
+    for side, steps in (("base", _route("r1", True)), ("head", head)):
+        (kept / f"{side}.json").write_text(runs_to_json([Cassette({}, steps)]), "utf-8")
+        if side in names:
+            (kept / f"{side}-nodes.json").write_text(json.dumps(names[side]), "utf-8")
+    return Benchmark("rerouted", "g.py:graph", ({},), frozenset(), frozenset(), tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("names", "root", "propagated", "inconclusive"),
+    [
+        (
+            {"base": BASE_NODES, "head": HEAD_NODES},
+            ("audit", "classify"),
+            ("lookup", "respond"),
+            {},
+        ),
+        (
+            {},
+            ("classify",),
+            ("respond",),
+            {"audit": GRAPH_NOT_GIVEN["base"], "lookup": GRAPH_NOT_GIVEN["head"]},
+        ),
+        (
+            {"head": HEAD_NODES},
+            ("classify",),
+            ("lookup", "respond"),
+            {"audit": GRAPH_NOT_GIVEN["base"]},
+        ),
+    ],
+    ids=["both sides saved", "kept before T242", "head's alone"],
+)
+def test_bench_from_runs_labels_a_one_sided_node_by_the_other_side_s_saved_graph(
+    tmp_path: Path,
+    names: dict[str, object],
+    root: tuple[str, ...],
+    propagated: tuple[str, ...],
+    inconclusive: dict[str, str],
+) -> None:
+    from lgcov.cli import _bench_saved
+
+    row = _bench_saved(_kept_reroute(tmp_path, names), tmp_path)
+    assert row.error == ""
+    assert (row.found_root, row.found_propagated) == (root, propagated)
+    assert dict(row.inconclusive) == inconclusive
+
+
+def test_bench_from_runs_a_node_file_that_isn_t_names_is_an_error_row(tmp_path: Path) -> None:
+    from lgcov.cli import _bench_saved
+
+    row = _bench_saved(_kept_reroute(tmp_path, {"base": {"lookup": 1}}), tmp_path)
+    assert "base-nodes.json" in row.error
 
 
 # T182: what `lgcov ci` ships on edits the diff can't pin to one node.
