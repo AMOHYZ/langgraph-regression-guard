@@ -8,16 +8,21 @@ does: paired_test, then decide() with one KPI (Holm with m = 1 is p <= alpha).
 Both arms use one rho. A rho the PR arm's rates can't reach is skipped, or clamped to the
 largest they allow (rho_policy), never changed for one arm only.
 
-Part 2 adds power arms (POWER_DELTAS), each run at the cell's rho or skipped with its reason.
+Part 2 adds power arms (POWER_DELTAS), each run at the cell's rho or skipped with its reason,
+and runs the M1 grid (grid()) over a process pool. Runs are seeded by index, so the result
+doesn't depend on the number of workers.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import math
 import random
 import sys
+import time
 from collections.abc import Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from statistics import NormalDist
 from typing import Literal
@@ -29,6 +34,7 @@ _GATE = GateConfig()
 RhoPolicy = Literal["skip", "clamp"]
 Cells = tuple[float, float, float, float]  # both pass, base only, PR only, both fail
 POWER_DELTAS = (-0.10, 0.05)  # T151 part 2: BLOCK is right at -0.10, SHIP at +0.05
+GRID_N = (50, 100, 200, 800)
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,18 @@ def simulate_arm(
     )
 
 
+def merge(parts: Sequence[ArmResult]) -> ArmResult:
+    """One arm's blocks, added up."""
+    return ArmResult(
+        delta=parts[0].delta,
+        reps=sum(p.reps for p in parts),
+        ship=sum(p.ship for p in parts),
+        block=sum(p.block for p in parts),
+        inconclusive=sum(p.inconclusive for p in parts),
+        no_drop_ship=sum(p.no_drop_ship for p in parts),
+    )
+
+
 def simulate(resolved: Resolved, reps: int, seed: int = 0) -> tuple[ArmResult, ...]:
     """reps runs per arm; each arm's run seeds are spawned from that arm's own seed."""
     return tuple(
@@ -201,6 +219,71 @@ def sweep(
     for cell in cells:
         r = resolve(cell, rho_policy)
         out.append(r if isinstance(r, Skipped) else CellResult(r, simulate(r, reps, seed)))
+    return out
+
+
+def grid() -> list[tuple[Cell, RhoPolicy]]:
+    """The M1 grid, which skips a cell its rho can't reach, then part 1's own cell (p 0.95, rho
+    clamped from 0.7) at each N, as a labelled extra row."""
+    m1: list[tuple[Cell, RhoPolicy]] = [
+        (Cell(n=n, rho=rho, p_base=p), "skip")
+        for p in (0.80, 0.95)
+        for rho in (0.3, 0.7)
+        for n in GRID_N
+    ]
+    return m1 + [(Cell(n=n, rho=0.7, p_base=0.95), "clamp") for n in GRID_N]
+
+
+@dataclass(frozen=True)
+class Block:
+    """A slice of one arm's runs: what one worker runs at a time."""
+
+    key: tuple[int, int]  # (cell, arm) it adds to
+    cell: Cell
+    delta: float
+    cells: Cells
+    arm_seed: int
+    start: int
+    stop: int
+
+
+def _run_block(b: Block) -> ArmResult:
+    return simulate_arm(b.cell, b.delta, b.cells, b.arm_seed, b.start, b.stop)
+
+
+def run_grid(
+    plan: Sequence[Resolved | Skipped],
+    reps: int,
+    seed: int = 0,
+    workers: int = 1,
+    block: int = 250,
+) -> list[CellResult | Skipped]:
+    """simulate() for every resolved cell, its arms cut into blocks of runs. With workers > 1
+    the blocks run in a process pool. Each run's seed comes from its index, so the result is
+    the same for any number of workers and any block size."""
+    blocks = [
+        Block((i, j), r.cell, delta, cells, arm_seed, start, min(start + block, reps))
+        for i, r in enumerate(plan)
+        if not isinstance(r, Skipped)
+        for j, (delta, cells, arm_seed) in enumerate(arms_to_run(r, seed))
+        for start in range(0, reps, block)
+    ]
+    blocks.sort(key=lambda b: -b.cell.n)  # the longest first, so the workers end together
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            parts = list(pool.map(_run_block, blocks))
+    else:
+        parts = [_run_block(b) for b in blocks]
+    by_arm: dict[tuple[int, int], list[ArmResult]] = {}
+    for b, part in zip(blocks, parts, strict=True):
+        by_arm.setdefault(b.key, []).append(part)
+    out: list[CellResult | Skipped] = []
+    for i, r in enumerate(plan):
+        if isinstance(r, Skipped):
+            out.append(r)
+            continue
+        arms = range(len(arms_to_run(r, seed)))
+        out.append(CellResult(r, tuple(merge(by_arm[(i, j)]) for j in arms)))
     return out
 
 
@@ -254,8 +337,76 @@ def table(result: CellResult, seed: int) -> str:
     return "\n".join(lines)
 
 
+def grid_table(results: Sequence[CellResult | Skipped]) -> str:
+    """One Markdown row per arm: its calls, the wrong call's rate with its MC error, and the
+    right call's rate next to the predicted one. Skipped cells and arms follow the table."""
+    lines = [
+        "| p | ρ | N | Δ | SHIP / BLOCK / INCONCLUSIVE | No-drop SHIPs | Wrong call "
+        "| Rate (MC SE) | Wilson 95% | Right call | Rate | Predicted |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    skips = []
+    for out in results:
+        c = out.cell if isinstance(out, Skipped) else out.resolved.cell
+        where = f"N={c.n}, ρ={c.rho:g}, p={c.p_base:g}"
+        if isinstance(out, Skipped):
+            skips.append(f"- Skipped {where}: {out.reason}")
+            continue
+        r = out.resolved
+        rho = f"{r.rho:.3f}" + (f" (clamped from {c.rho:g})" if r.clamped else "")
+        for a in out.arms:
+            wrong, k = ("SHIP", a.ship) if a.delta < -c.margin + 1e-9 else ("BLOCK", a.block)
+            rate, se, (lo, hi) = mc_error(k, a.reps)
+            right = "— | — | —"
+            p = predicted(c, r.rho, a.delta)
+            if p is not None:
+                name, n_right = ("SHIP", a.ship) if a.delta > -c.margin else ("BLOCK", a.block)
+                right = f"{name} | {_pct(n_right / a.reps)} | {_pct(p)}"
+            lines.append(
+                f"| {c.p_base:g} | {rho} | {c.n} | {a.delta:+g} "
+                f"| {a.ship} / {a.block} / {a.inconclusive} | {a.no_drop_ship} | {wrong} "
+                f"| {_pct(rate)} ({_pct(se)}) | {_pct(lo)}–{_pct(hi)} | {right} |"
+            )
+        skips += [
+            f"- Skipped arm Δ={d:+g} at {where}: {w}" for d, w in r.power if isinstance(w, str)
+        ]
+    return "\n".join([*lines, "", *skips] if skips else lines)
+
+
+def _grid_main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(prog="python -m lgcov.gate_sim grid")
+    parser.add_argument("reps", type=int, nargs="?", default=5000, help="runs per arm")
+    parser.add_argument("seed", type=int, nargs="?", default=0, help="base seed")
+    parser.add_argument("--workers", type=int, default=1, help="worker processes")
+    args = parser.parse_args(argv)
+    reps: int = args.reps
+    seed: int = args.seed
+    workers: int = args.workers
+    plan = [resolve(cell, policy, POWER_DELTAS) for cell, policy in grid()]
+    for r in plan:  # the logged reasons, before the long part
+        if isinstance(r, Skipped):
+            print(f"skipped {r.cell}: {r.reason}", file=sys.stderr)
+            continue
+        for d, why in r.power:
+            if isinstance(why, str):
+                print(f"skipped arm delta={d:+g} of {r.cell}: {why}", file=sys.stderr)
+    start = time.perf_counter()
+    results = run_grid(plan, reps, seed, workers)
+    print(
+        f"M1 grid, binary K=1, one KPI: R={reps} per arm, seed={seed}, "
+        f"margin m={_GATE.margin:g}, alpha={_GATE.alpha:g}\n"
+    )
+    print(grid_table(results))
+    took = time.perf_counter() - start
+    print(f"grid: R={reps}, seed={seed}, {workers} workers, {took:.1f} s", file=sys.stderr)
+    return 0
+
+
 def main(argv: Sequence[str]) -> int:
-    """python -m lgcov.gate_sim [reps] [seed]: T151's one cell, N=100, rho=0.7, p=0.95."""
+    """python -m lgcov.gate_sim [reps] [seed]: T151's one cell, N=100, rho=0.7, p=0.95.
+    python -m lgcov.gate_sim grid [reps] [seed] [--workers W]: part 2's grid."""
+    if argv and argv[0] == "grid":
+        return _grid_main(argv[1:])
     reps = int(argv[0]) if argv else 2000
     seed = int(argv[1]) if len(argv) > 1 else 0
     for out in sweep([Cell(n=100, rho=0.7, p_base=0.95)], reps, seed, rho_policy="clamp"):

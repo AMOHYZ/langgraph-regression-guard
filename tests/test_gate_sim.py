@@ -10,10 +10,13 @@ from lgcov.gate_sim import (
     Cell,
     Resolved,
     Skipped,
+    grid,
+    grid_table,
     joint_cells,
     mc_error,
     predicted,
     resolve,
+    run_grid,
     simulate,
     spawn_seeds,
     sweep,
@@ -96,7 +99,7 @@ def test_sweep_skips_infeasible_cells_and_keeps_going() -> None:
     assert not isinstance(out[1], Skipped) and len(out[1].arms) == 2
 
 
-# T151 part 2: power arms and predicted power
+# T151 part 2: power arms, predicted power, the grid and its workers
 
 
 def test_power_arms_keep_the_cells_rho_and_say_why_one_is_out_of_reach() -> None:
@@ -135,3 +138,37 @@ def test_predicted_power_is_the_gates_sizing_turned_around() -> None:
     assert block is not None and 0.80 <= block < 0.81
     assert ship is not None and 0.80 <= ship < 0.81
     assert predicted(Cell(n=100, rho=0.3, p_base=0.80), 0.3, -0.05) is None  # at the margin
+
+
+def test_the_grid_is_m1_then_part_1s_clamped_cell_at_each_n() -> None:
+    cells = grid()
+    ns = (50, 100, 200, 800)
+    m1 = {(n, rho, p) for p in (0.80, 0.95) for rho in (0.3, 0.7) for n in ns}
+    assert {(c.n, c.rho, c.p_base) for c, policy in cells[:16] if policy == "skip"} == m1
+    assert [(c.n, c.rho, c.p_base, policy) for c, policy in cells[16:]] == [
+        (n, 0.7, 0.95, "clamp") for n in ns
+    ]
+
+
+def test_blocks_and_workers_never_change_the_result() -> None:
+    plan = [
+        resolve(Cell(n=20, rho=0.3, p_base=0.80), power=POWER_DELTAS),
+        resolve(Cell(n=20, rho=0.7, p_base=0.95), power=POWER_DELTAS),
+    ]
+    one = run_grid(plan, reps=6, seed=0, workers=1, block=6)
+    assert run_grid(plan, reps=6, seed=0, workers=2, block=2) == one
+    first, second = one
+    assert not isinstance(first, Skipped) and isinstance(second, Skipped)
+    assert first.arms == simulate(first.resolved, reps=6, seed=0)
+
+
+def test_grid_table_names_each_arms_calls_and_every_skip() -> None:
+    plan = [
+        resolve(Cell(n=20, rho=0.3, p_base=0.95), power=POWER_DELTAS),
+        resolve(Cell(n=20, rho=0.7, p_base=0.95), power=POWER_DELTAS),
+    ]
+    text = grid_table(run_grid(plan, reps=4, seed=0))
+    rows = [line for line in text.splitlines() if line.startswith("| 0.95 ")]
+    assert len(rows) == 3  # Δ = 0, -m and -0.10; +0.05 is out of reach
+    assert "| — | — | — |" in rows[1]  # at -m no decisive call is the right one
+    assert "PR rate 1 not in (0, 1)" in text and "the reachable rho is 0.688" in text
