@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 
 Action = Literal["accept", "reject", "override"]
@@ -74,3 +75,40 @@ def apply_decision(
         with calibration_file.open("a") as f:
             f.write(json.dumps(example, sort_keys=True) + "\n")
     return baseline  # reject / override keep the baseline
+
+
+@dataclass(frozen=True)
+class Changes:
+    """T186: what makes a folder of the PR's the base's again, by each file's path under it: the
+    files to write, with the base's bytes, and the files to remove."""
+
+    write: Mapping[str, bytes]
+    remove: tuple[str, ...]
+
+    @property
+    def empty(self) -> bool:
+        return not self.write and not self.remove
+
+
+def reject_changes(pr: Mapping[str, bytes], base: Mapping[str, bytes]) -> Changes:
+    """T186: `reject` on cassette_dir: every file the base has, as the base has it, and none that
+    it doesn't. Each side maps a file's path under the folder to its bytes."""
+    write = {path: data for path, data in sorted(base.items()) if pr.get(path) != data}
+    return Changes(write, tuple(sorted(set(pr) - set(base))))
+
+
+_ACTION_FILES = ("action.yml", "action.yaml")
+
+
+def unwritable(path: str) -> str | None:
+    """T186: why no review command may write this path, given from the repo's root; None when one
+    may. Nothing outside the repo, nothing in a .github folder and no file named action.yml or
+    action.yaml, at any depth (docs/review.md)."""
+    pure = PurePosixPath(path)
+    if not pure.parts or pure.is_absolute() or ".." in pure.parts:
+        return f"`{path}` isn't a path inside the repo"
+    if ".github" in pure.parts:
+        return f"`{path}` is in a .github folder"
+    if pure.name in _ACTION_FILES:
+        return f"`{path}` is an action file"
+    return None
