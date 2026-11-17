@@ -11,8 +11,8 @@ largest they allow (rho_policy), never changed for one arm only.
 Part 2 adds power arms (POWER_DELTAS), each run at the cell's rho or skipped with its reason,
 and runs the M1 grid (grid()) over a process pool. Runs are seeded by index, so the result
 doesn't depend on the number of workers. A Scenario loses pairs (at random, or only the PR's
-failures); every run is decided by the gate's own gate_kpis and gate_findings (the PR's
-verdict).
+failures) or adds KPIs; every run is decided by the gate's own gate_kpis (Holm across the
+KPIs) and gate_findings (the PR's verdict).
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ class Scenario:
     """What a run's data look like beyond part 1's one binary KPI with every pair."""
 
     name: str = "binary, one KPI, every pair"
+    kpis: int = 1  # blocking KPIs on the same cases: KPI 1 takes the arm's delta, the rest 0
     missing: float = 0.0  # the chance a pair is lost
     informative: bool = False  # lose only pairs whose PR result fails, as a PR's bad outputs can
 
@@ -54,6 +55,8 @@ MAIN = Scenario()
 SCENARIOS = (
     Scenario("10% of pairs lost at random", missing=0.10),
     Scenario("half of the PR's failing results lost", missing=0.5, informative=True),
+    Scenario("2 KPIs, Holm", kpis=2),
+    Scenario("4 KPIs, Holm", kpis=4),
 )
 
 
@@ -89,14 +92,18 @@ class ArmResult:
     block: int
     inconclusive: int
     no_drop_ship: int  # SHIPs with no discordant pair: decide()'s no-drop path
-    lost: int = 0  # pairs lost to missing results, over all runs
+    lost: int = 0  # pairs lost to missing results, over all runs and KPIs
+    first_block: int = 0  # runs that BLOCKed KPI 1, the one at the arm's delta
+    other_block: int = 0  # runs that BLOCKed a KPI at delta 0: a false alarm
 
 
 @dataclass(frozen=True)
 class Run:
     decision: Decision  # the PR's verdict, as gate_findings gives it
-    no_drop: bool  # no discordant pair
+    no_drop: bool  # KPI 1 had no discordant pair
     lost: int
+    first_block: bool
+    other_block: bool
 
 
 @dataclass(frozen=True)
@@ -208,20 +215,27 @@ def _kpi(name: str, r: PairedResult | None, cell: Cell) -> KpiStats:
     )
 
 
-def _run(cell: Cell, cells: Cells, seed: int, scenario: Scenario) -> Run:
-    """N pairs from the arm's table, less the lost ones, judged by the gate's own paired_test,
-    then gate_kpis and gate_findings."""
-    data_seed, boot_seed, loss_seed = spawn_seeds(seed, 3)  # each on its own stream
-    losses = random.Random(loss_seed)
-    pairs = _pairs(random.Random(data_seed), cells, cell.n)
-    kept = [pair for pair in pairs if not _lost(losses, pair, scenario)]
-    r = None
-    if kept:
-        base, new = [[b] for b, _ in kept], [[p] for _, p in kept]
-        r = paired_test(base, new, alpha=cell.alpha, seed=boot_seed)
-    gated = gate_kpis([_kpi("kpi1", r, cell)], alpha=cell.alpha)
+def _run(cell: Cell, cells: Cells, null: Cells, seed: int, scenario: Scenario) -> Run:
+    """Each KPI's N pairs (KPI 1 from the arm's table, the rest from delta 0's), less the lost
+    ones, judged by the gate's own paired_test, then gate_kpis and gate_findings."""
+    seeds = spawn_seeds(seed, 3 + 2 * (scenario.kpis - 1))  # data, bootstrap, losses, more KPIs
+    losses = random.Random(seeds[2])
+    streams = [(seeds[0], seeds[1]), *zip(seeds[3::2], seeds[4::2], strict=True)]
+    stats, lost, no_drop = [], 0, False
+    for j, (data_seed, boot_seed) in enumerate(streams):
+        pairs = _pairs(random.Random(data_seed), cells if j == 0 else null, cell.n)
+        kept = [pair for pair in pairs if not _lost(losses, pair, scenario)]
+        lost += len(pairs) - len(kept)
+        r = None
+        if kept:
+            base, new = [[b] for b, _ in kept], [[p] for _, p in kept]
+            r = paired_test(base, new, alpha=cell.alpha, seed=boot_seed)
+        no_drop = no_drop or (j == 0 and r is not None and r.discordant == 0)
+        stats.append(_kpi(f"kpi{j + 1}", r, cell))
+    gated = gate_kpis(stats, alpha=cell.alpha)
     verdict = gate_findings(gated).statistical or "INCONCLUSIVE"
-    return Run(verdict, r is not None and r.discordant == 0, len(pairs) - len(kept))
+    blocked = [g.decision == "BLOCK" for g in gated]
+    return Run(verdict, no_drop, lost, blocked[0], any(blocked[1:]))
 
 
 def arms_to_run(resolved: Resolved, seed: int) -> list[tuple[float, Cells, int]]:
@@ -236,13 +250,16 @@ def simulate_arm(
     cell: Cell,
     delta: float,
     cells: Cells,
+    null: Cells,
     arm_seed: int,
     start: int,
     stop: int,
     scenario: Scenario = MAIN,
 ) -> ArmResult:
-    """Runs start to stop - 1 of one arm, so a pool can cut an arm into blocks."""
-    runs = [_run(cell, cells, s, scenario) for s in spawn_seeds(arm_seed, stop)[start:stop]]
+    """Runs start to stop - 1 of one arm, so a pool can cut an arm into blocks. null is delta
+    0's table, which KPIs after the first draw from."""
+    seeds = spawn_seeds(arm_seed, stop)[start:stop]
+    runs = [_run(cell, cells, null, s, scenario) for s in seeds]
     verdicts = [run.decision for run in runs]
     return ArmResult(
         delta=delta,
@@ -252,6 +269,8 @@ def simulate_arm(
         inconclusive=verdicts.count("INCONCLUSIVE"),
         no_drop_ship=sum(1 for run in runs if run.decision == "SHIP" and run.no_drop),
         lost=sum(run.lost for run in runs),
+        first_block=sum(run.first_block for run in runs),
+        other_block=sum(run.other_block for run in runs),
     )
 
 
@@ -265,6 +284,8 @@ def merge(parts: Sequence[ArmResult]) -> ArmResult:
         inconclusive=sum(p.inconclusive for p in parts),
         no_drop_ship=sum(p.no_drop_ship for p in parts),
         lost=sum(p.lost for p in parts),
+        first_block=sum(p.first_block for p in parts),
+        other_block=sum(p.other_block for p in parts),
     )
 
 
@@ -272,8 +293,9 @@ def simulate(
     resolved: Resolved, reps: int, seed: int = 0, scenario: Scenario = MAIN
 ) -> tuple[ArmResult, ...]:
     """reps runs per arm; each arm's run seeds are spawned from that arm's own seed."""
+    null = resolved.arms[0][1]
     return tuple(
-        simulate_arm(resolved.cell, delta, cells, arm_seed, 0, reps, scenario)
+        simulate_arm(resolved.cell, delta, cells, null, arm_seed, 0, reps, scenario)
         for delta, cells, arm_seed in arms_to_run(resolved, seed)
     )
 
@@ -309,6 +331,7 @@ class Block:
     cell: Cell
     delta: float
     cells: Cells
+    null: Cells
     arm_seed: int
     start: int
     stop: int
@@ -316,7 +339,7 @@ class Block:
 
 
 def _run_block(b: Block) -> ArmResult:
-    return simulate_arm(b.cell, b.delta, b.cells, b.arm_seed, b.start, b.stop, b.scenario)
+    return simulate_arm(b.cell, b.delta, b.cells, b.null, b.arm_seed, b.start, b.stop, b.scenario)
 
 
 def run_grid(
@@ -331,7 +354,17 @@ def run_grid(
     the blocks run in a process pool. Each run's seed comes from its index, so the result is
     the same for any number of workers and any block size."""
     blocks = [
-        Block((i, j), r.cell, delta, cells, arm_seed, start, min(start + block, reps), scenario)
+        Block(
+            (i, j),
+            r.cell,
+            delta,
+            cells,
+            r.arms[0][1],
+            arm_seed,
+            start,
+            min(start + block, reps),
+            scenario,
+        )
         for i, r in enumerate(plan)
         if not isinstance(r, Skipped)
         for j, (delta, cells, arm_seed) in enumerate(arms_to_run(r, seed))
@@ -365,17 +398,22 @@ def mc_error(k: int, reps: int) -> tuple[float, float, tuple[float, float]]:
 _NORMAL = NormalDist()
 
 
-def predicted(cell: Cell, rho: float, delta: float) -> float | None:
+def _power(cell: Cell, rho: float, delta: float, gap: float, alpha: float) -> float:
+    se = sigma_d(cell.p_base, cell.p_base + delta, rho) / math.sqrt(cell.n)
+    return 1.0 if se <= 0 else _NORMAL.cdf(gap / se - _NORMAL.inv_cdf(1 - alpha / 2))
+
+
+def predicted(cell: Cell, rho: float, delta: float, kpis: int = 1) -> float | None:
     """The chance of the right call by the normal approximation the gate sizes N with: SHIP
     above -margin (ni_required_n's), BLOCK below it (required_n's, detection). None at the
-    margin, where neither decisive call is the right one."""
+    margin, where neither decisive call is the right one. With more KPIs, all but KPI 1 at
+    delta 0: BLOCK is KPI 1's at alpha / kpis, as the gate sizes N*, and SHIP needs them all."""
     if abs(delta + cell.margin) < 1e-9:
         return None
-    se = sigma_d(cell.p_base, cell.p_base + delta, rho) / math.sqrt(cell.n)
-    if se <= 0:
-        return 1.0
-    gap = delta + cell.margin if delta > -cell.margin else -delta
-    return _NORMAL.cdf(gap / se - _NORMAL.inv_cdf(1 - cell.alpha / 2))
+    if delta < -cell.margin:
+        return _power(cell, rho, delta, -delta, cell.alpha / kpis)
+    rest = _power(cell, rho, 0.0, cell.margin, cell.alpha) ** (kpis - 1)
+    return _power(cell, rho, delta, delta + cell.margin, cell.alpha) * rest
 
 
 def _pct(x: float) -> str:
@@ -409,8 +447,10 @@ def table(result: CellResult, seed: int) -> str:
 def grid_table(results: Sequence[CellResult | Skipped], scenario: Scenario = MAIN) -> str:
     """One Markdown row per arm: its calls, the wrong call's rate with its MC error, and the
     right call's rate next to the predicted one. Skipped cells and arms follow the table.
-    With lost pairs, the share lost."""
-    extra = ["Pairs lost"] if scenario.missing else []
+    With lost pairs, the share lost; with more KPIs, how often one at delta 0 was BLOCKed."""
+    extra = (["Pairs lost"] if scenario.missing else []) + (
+        ["BLOCK on a KPI at Δ=0 (Wilson 95%)"] if scenario.kpis > 1 else []
+    )
     head = ["p", "ρ", "N", "Δ", "SHIP / BLOCK / INCONCLUSIVE", "No-drop SHIPs", "Wrong call"]
     head += ["Rate (MC SE)", "Wilson 95%", "Right call", "Rate", "Predicted", *extra]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
@@ -427,11 +467,16 @@ def grid_table(results: Sequence[CellResult | Skipped], scenario: Scenario = MAI
             wrong, k = ("SHIP", a.ship) if a.delta < -c.margin + 1e-9 else ("BLOCK", a.block)
             rate, se, (lo, hi) = mc_error(k, a.reps)
             right = "— | — | —"
-            p = predicted(c, r.rho, a.delta)
+            p = predicted(c, r.rho, a.delta, scenario.kpis)
             if p is not None:
-                name, n_right = ("SHIP", a.ship) if a.delta > -c.margin else ("BLOCK", a.block)
+                name, n_right = (
+                    ("SHIP", a.ship) if a.delta > -c.margin else ("BLOCK", a.first_block)
+                )
                 right = f"{name} | {_pct(n_right / a.reps)} | {_pct(p)}"
-            more = [_pct(a.lost / (a.reps * c.n))] if scenario.missing else []
+            more = [_pct(a.lost / (a.reps * c.n * scenario.kpis))] if scenario.missing else []
+            if scenario.kpis > 1:
+                rate_other, _, (lo_o, hi_o) = mc_error(a.other_block, a.reps)
+                more.append(f"{_pct(rate_other)} ({_pct(lo_o)}–{_pct(hi_o)})")
             lines.append(
                 f"| {c.p_base:g} | {rho} | {c.n} | {a.delta:+g} "
                 f"| {a.ship} / {a.block} / {a.inconclusive} | {a.no_drop_ship} | {wrong} "
