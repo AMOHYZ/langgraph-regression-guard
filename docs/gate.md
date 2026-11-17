@@ -42,6 +42,8 @@ or slice group never goes further than its KPIs' own verdicts.
     name the base's runs have and the PR dropped is judged, so it fails.
 - **The 2.5%** is at the default α = 0.05. With no discordant pair, SHIP reads the no-drop
   bound at α/2 instead of the CI. That is the same 2.5% at α = 0.05, and more if α is set
-  higher, as the PR comment then says.
+  higher, as the PR comment then says. Simulated, it holds from N = 200 cases up; at N = 50 a
+  drop of δ SHIPped 3.7% to 6.1% of the time, and up to 99.6% when half of a PR's failing
+  results went missing ([gate simulations](validation/gate-simulations.md)).
 - **On a PR, these settings come from the base commit,** so a PR can't change what grades it. What
   that does and doesn't stop is in [the trust boundary](trust-boundary.md).
