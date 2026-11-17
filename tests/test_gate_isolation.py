@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from fixtures.replay_audit import send_fanout
 
-from lgcov.cassette import record, runs_to_json
+from lgcov.cassette import SCHEME, record, runs_to_json
 from lgcov.ci_report import CiResult, render_ci_report
 from lgcov.cli import main
 from lgcov.verdict_actions import BOOTSTRAP_HEADLINE
@@ -183,6 +183,24 @@ def test_cassettes_a_pr_edits_are_honoured_and_flagged(
     assert report.splitlines()[1] == "## ⚠️ No decision: needs_human"
     assert seen[-1].cassettes_edited
     assert "⚠️ This PR changes `cassettes`, the expected outputs" in report
+
+
+# T193, 3a-1: a unit inside a step is an expected output too. A PR that edits only a unit in its
+# baseline is an edited cassette, so it can't read as SHIP. The check compares the folder byte for
+# byte, so lgcov 0.4.0 catches it already; 3a-2 serves units, and relies on it.
+def test_a_pr_that_edits_only_a_unit_is_an_edited_cassette(
+    pr: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = json.loads(BASELINE) | {"schema": 2, "scheme": SCHEME}
+    body["runs"][0]["steps"][0]["units"] = [{"node": "inner", "input": {}, "output": "base"}]
+    _write(pr.parent / "base", {"cassettes/baseline.json": json.dumps(body)})
+    body["runs"][0]["steps"][0]["units"][0]["output"] = "the PR's"
+    _write(pr, {"cassettes/baseline.json": json.dumps(body)})
+    seen = _results(monkeypatch)
+    code, report, outputs = _ci(taxonomy=False)
+    assert seen[-1].cassettes_edited
+    assert (code, outputs["verdict"]) == (0, "needs_human")
+    assert report.splitlines()[1] == "## ⚠️ No decision: needs_human"
 
 
 def test_the_first_adoption_pr_is_advisory_with_the_pr_s_own_policy(

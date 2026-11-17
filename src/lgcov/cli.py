@@ -734,7 +734,9 @@ def _record(argv: list[str]) -> int:
         default=1,
         help="the recording's schema: 1, the default, or 2, a preview of T193's "
         "(docs/design/cassette-schema.md). Every lgcov that reads a schema-2 file, the "
-        "Action's in both jobs included, must be 0.4.0 or later",
+        "Action's in both jobs included, must be 0.4.0 or later. Schema 2 also records the "
+        "nodes inside a subgraph, with their inputs and outputs unredacted until the redaction "
+        "PR (section 6, PR 5) lands",
     )
     args = ap.parse_args(argv)
     try:
@@ -747,7 +749,7 @@ def _record(argv: list[str]) -> int:
     except (OSError, ImportError, SyntaxError, ValueError) as exc:
         print(f"lgcov record: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    runs = [record(graph, i) for i in inputs]
+    runs = [record(graph, i, units=args.schema == 2) for i in inputs]
     out = Path(cfg.cassette_dir) / "baseline.json"
     if args.schema == 1:
         _write_runs(out, runs)
@@ -908,7 +910,7 @@ def _cassette_accept(argv: list[str]) -> int:
             fresh = fresh_cassettes(ran, runs)
         else:
             graph = _load_graph(cfg.graph_entrypoint)
-            fresh = [record(graph, run.inputs) for run in runs]
+            fresh = [record(graph, run.inputs, units=recording.schema != 1) for run in runs]
         if args.all_drifted:
             nodes = {
                 node

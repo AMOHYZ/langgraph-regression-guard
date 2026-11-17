@@ -629,6 +629,18 @@ def _parent_ns() -> tuple[str, ...]:
     return tuple(ns.split("|")[:-1]) if ns else ()
 
 
+def _within(update: Any, result: Any) -> bool:
+    """T193: is a step's update among the writes its task's result holds?"""
+    if update is None:
+        return True
+    try:
+        if isinstance(update, Mapping) and isinstance(result, Mapping):
+            return all(k in result and bool(result[k] == v) for k, v in update.items())
+        return bool(update == result)
+    except (TypeError, ValueError):  # a value whose == gives no bool, like an array's
+        return False
+
+
 @dataclass
 class _Unit:
     step: Step
@@ -639,8 +651,9 @@ class _Unit:
 class _Units:
     """T193: the units of one `record(units=True)` run, from `stream(subgraphs=True)` with the
     `tasks` mode. Each unit is filed under the namespace it streamed in and learns its task id from
-    the task result LangGraph emits right after its update. A unit goes inside the one whose task
-    its namespace names, in the order LangGraph started them."""
+    the task result that holds its update. LangGraph emits that result right after the update,
+    but parallel tasks can interleave, so the match is by content, then by order. A unit goes
+    inside the one whose task its namespace names, in the order LangGraph started them."""
 
     def __init__(self, graph: Any) -> None:
         self.graph = graph
@@ -667,8 +680,9 @@ class _Units:
         named = [
             u for u in self.filed.get(ns, []) if (u.task, u.step.node) == (None, event["name"])
         ]
-        if named:
-            named[0].task = str(event["id"])
+        held = [u for u in named if _within(u.step.output, event["result"])]
+        if held or named:
+            (held or named)[0].task = str(event["id"])
 
     def _start(self, ns: tuple[str, ...], unit: _Unit) -> int:
         return self.started.get((ns, unit.task or ""), len(self.started))

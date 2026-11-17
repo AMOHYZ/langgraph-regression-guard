@@ -25,6 +25,7 @@ from fixtures.graphs import (
     async_command_subgraph,
     conditional,
     fan_out_send,
+    fan_out_to_subgraph,
     graph_inside_node,
     linear,
     subgraph_in_loop,
@@ -46,6 +47,7 @@ from lgcov.cassette import (
     Step,
     _plain,
     _router_prints,
+    _Units,
     changed_nodes,
     compared_run,
     graph_shape,
@@ -828,6 +830,24 @@ def test_each_visit_to_a_subgraph_keeps_its_own_units() -> None:
     first, second = record(subgraph_in_loop(), {"x": 0}, units=True).steps
     assert [u.input for u in _units(first)] == [{"x": 0}]
     assert [u.input for u in _units(second)] == [{"x": 1}]
+
+
+def test_a_fan_out_to_a_subgraph_files_each_run_s_units_under_its_own_step() -> None:
+    _, *inner = record(fan_out_to_subgraph(), {"items": []}, units=True).steps
+    assert len(inner) == 3
+    for step in inner:
+        (unit,) = _units(step)
+        assert step.output == {"items": [unit.input["x"] * 10]}  # this run's own unit
+
+
+def test_a_unit_gets_the_task_whose_result_holds_its_update() -> None:
+    # Parallel tasks' results can arrive out of order: the one holding a unit's update names it.
+    units = _Units(with_subgraph())
+    units.file((), Step("inner", {"x": 1}))
+    units.file((), Step("inner", {"x": 2}))
+    units.task((), {"id": "t2", "name": "inner", "result": {"x": 2}})
+    units.task((), {"id": "t1", "name": "inner", "result": {"x": 1}})
+    assert [u.task for u in units.filed[()]] == ["t1", "t2"]
 
 
 def test_units_nest_a_subgraph_inside_a_subgraph() -> None:
