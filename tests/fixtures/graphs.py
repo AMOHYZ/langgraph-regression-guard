@@ -1,5 +1,6 @@
+import operator
 from dataclasses import dataclass
-from typing import Literal, TypedDict, cast
+from typing import Annotated, Literal, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -145,6 +146,41 @@ def subgraph_in_loop() -> CompiledStateGraph[S]:
     g.add_node("inner", sub.compile())
     g.add_edge(START, "inner")
     g.add_conditional_edges("inner", _again, {"again": "inner", "done": END})
+    return g.compile()
+
+
+class Items(TypedDict, total=False):
+    items: Annotated[list[int], operator.add]
+
+
+class Item(TypedDict, total=False):
+    x: int
+    items: Annotated[list[int], operator.add]
+
+
+def _times_ten(state: Item) -> Item:
+    return {"items": [state.get("x", 0) * 10]}
+
+
+def _plan(state: Items) -> Items:
+    return {}
+
+
+def _each(state: Items) -> list[Send]:
+    return [Send("inner", {"x": i}) for i in range(3)]
+
+
+def fan_out_to_subgraph() -> CompiledStateGraph[Items]:
+    sub = StateGraph(Item)
+    sub.add_node("times_ten", _times_ten)
+    sub.add_edge(START, "times_ten")
+    sub.add_edge("times_ten", END)
+    g = StateGraph(Items)
+    g.add_node("plan", _plan)
+    g.add_node("inner", sub.compile())
+    g.add_edge(START, "plan")
+    g.add_conditional_edges("plan", _each, ["inner"])
+    g.add_edge("inner", END)
     return g.compile()
 
 

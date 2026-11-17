@@ -373,6 +373,29 @@ def test_cli_record_schema_2_writes_schema_scheme_and_graph(tmp_path: Path) -> N
     assert main(["replay", "--config", str(cfg)]) == 0
 
 
+# T193, 3a-1: and the nodes inside a subgraph, as units of its step. T182's nested build runs
+# respond inside `answer`.
+SUPPORT_FILE = Path(__file__).resolve().parents[1] / "examples" / "synthetic_agents" / "support.py"
+
+
+def test_cli_record_schema_2_records_the_units_inside_a_subgraph(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = tmp_path / "lgcov.yaml"
+    cfg.write_text(f"graph_entrypoint: {SUPPORT_FILE}:nested_graph\ncassette_dir: {tmp_path}\n")
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text('[{"question": "Where is my order?"}]', encoding="utf-8")
+    assert main(["record", "--config", str(cfg), "--inputs", str(inputs), "--schema", "2"]) == 0
+    steps = json.loads((tmp_path / "baseline.json").read_text(encoding="utf-8"))["runs"][0]["steps"]
+    (answer,) = [s for s in steps if s["node"] == "answer"]
+    (respond,) = answer["units"]
+    assert respond["node"] == "respond" and respond["code"] is not None
+    assert respond["output"].items() <= answer["output"].items()  # answer returns its whole state
+    with pytest.raises(SystemExit):
+        main(["record", "--help"])
+    assert "unredacted until the redaction PR" in " ".join(capsys.readouterr().out.split())
+
+
 @pytest.mark.parametrize("body", ['{"question": "x"}', "[1, 2]", "not json"])
 def test_cli_record_bad_inputs_exits_two(
     tmp_path: Path, body: str, capsys: pytest.CaptureFixture[str]
@@ -538,6 +561,47 @@ def test_cli_accept_keeps_what_record_schema_2_wrote(tmp_path: Path) -> None:
         k: before[k] for k in ("schema", "scheme", "graph")
     }
     assert [r["steps"][1]["output"] for r in after["runs"]] == [{"b": "B2"}] * 2
+
+
+BOX_GRAPH = """\
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+
+class S(TypedDict, total=False):
+    a: str
+
+
+def inside(state: S) -> S:
+    return {"a": "A1"}
+
+
+sub = StateGraph(S)
+sub.add_node("inside", inside)
+sub.add_edge(START, "inside")
+sub.add_edge("inside", END)
+g = StateGraph(S)
+g.add_node("box", sub.compile())
+g.add_edge(START, "box")
+g.add_edge("box", END)
+graph = g.compile()
+"""
+
+
+# T193, 3a-1: accept re-records a step of a schema-2 file with the units inside it.
+def test_cli_accept_re_records_the_units_of_a_step_it_accepts(tmp_path: Path) -> None:
+    graph = tmp_path / "graph.py"
+    graph.write_text(BOX_GRAPH, encoding="utf-8")
+    cfg = tmp_path / "lgcov.yaml"
+    cfg.write_text(f"graph_entrypoint: {graph}:graph\ncassette_dir: {tmp_path}\n")
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text("[{}]", encoding="utf-8")
+    assert main(["record", "--config", str(cfg), "--inputs", str(inputs), "--schema", "2"]) == 0
+    graph.write_text(BOX_GRAPH.replace("A1", "A2"), encoding="utf-8")
+    assert main(["cassette", "accept", "--nodes", "box", "--config", str(cfg)]) == 0
+    (box,) = json.loads((tmp_path / "baseline.json").read_text())["runs"][0]["steps"]
+    assert box["output"] == box["units"][0]["output"] == {"a": "A2"}
 
 
 def test_cli_accept_cassette_dir_flag_overrides_config(
