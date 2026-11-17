@@ -175,7 +175,7 @@ def test_grid_table_names_each_arms_calls_and_every_skip() -> None:
     assert "PR rate 1 not in (0, 1)" in text and "the reachable rho is 0.688" in text
 
 
-# T151 part 2: missing pairs, judged by the gate's own KPI aggregation
+# T151 part 2: missing pairs and more KPIs, judged by the gate's own KPI aggregation
 
 
 def test_part_1s_tallies_hold_through_the_gates_own_aggregation() -> None:
@@ -203,6 +203,17 @@ def test_informative_loss_can_hide_every_pr_failure_so_nothing_blocks() -> None:
     assert margin.block == 0  # with no PR failure left, no pair shows a drop
 
 
+def test_a_second_kpi_only_makes_kpi_1_harder_to_block_and_the_pr_to_ship() -> None:
+    r = resolve(Cell(n=100, rho=0.7, p_base=0.80), power=POWER_DELTAS)
+    assert not isinstance(r, Skipped)
+    one = simulate(r, reps=16, seed=0)
+    two = simulate(r, reps=16, seed=0, scenario=Scenario(kpis=2))
+    for a, b in zip(one, two, strict=True):  # KPI 1 sees the same pairs in both
+        assert (a.first_block, a.other_block) == (a.block, 0)
+        assert b.first_block <= a.block and b.ship <= a.ship
+    assert two[2].first_block > 0  # Δ = -0.10 still BLOCKs KPI 1 under Holm
+
+
 def test_run_grid_carries_the_scenario() -> None:
     plan = [resolve(Cell(n=20, rho=0.3, p_base=0.80), power=POWER_DELTAS)]
     lossy = Scenario(missing=0.1)
@@ -216,3 +227,18 @@ def test_grid_table_adds_the_share_lost_for_a_lossy_scenario() -> None:
     lossy = Scenario(missing=0.1)
     assert "Pairs lost" in grid_table(run_grid(plan, reps=4, seed=0, scenario=lossy), lossy)
     assert "Pairs lost" not in grid_table(run_grid(plan, reps=4, seed=0))
+
+
+def test_run_grid_draws_the_other_kpis_from_delta_0s_table_too() -> None:
+    plan = [resolve(Cell(n=20, rho=0.3, p_base=0.80), power=POWER_DELTAS)]
+    kpis = Scenario(kpis=2)
+    (out,) = run_grid(plan, reps=4, seed=0, scenario=kpis)
+    assert not isinstance(out, Skipped)
+    assert out.arms == simulate(out.resolved, reps=4, seed=0, scenario=kpis)
+
+
+def test_grid_table_adds_the_false_blocks_on_kpis_at_zero() -> None:
+    plan = [resolve(Cell(n=20, rho=0.3, p_base=0.80))]
+    kpis = Scenario(kpis=2)
+    assert "BLOCK on a KPI at Δ=0" in grid_table(run_grid(plan, 4, 0, scenario=kpis), kpis)
+    assert "BLOCK on a KPI" not in grid_table(run_grid(plan, reps=4, seed=0))
