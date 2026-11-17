@@ -10,7 +10,9 @@ largest they allow (rho_policy), never changed for one arm only.
 
 Part 2 adds power arms (POWER_DELTAS), each run at the cell's rho or skipped with its reason,
 and runs the M1 grid (grid()) over a process pool. Runs are seeded by index, so the result
-doesn't depend on the number of workers.
+doesn't depend on the number of workers. A Scenario loses pairs (at random, or only the PR's
+failures); every run is decided by the gate's own gate_kpis and gate_findings (the PR's
+verdict).
 """
 
 from __future__ import annotations
@@ -28,13 +30,31 @@ from statistics import NormalDist
 from typing import Literal
 
 from lgcov.config import GateConfig
-from lgcov.stats import decide, paired_test, sigma_d, wilson
+from lgcov.sampling import KpiStats, gate_kpis
+from lgcov.stats import Decision, PairedResult, paired_test, sigma_d, wilson
+from lgcov.verdict_actions import gate_findings
 
 _GATE = GateConfig()
 RhoPolicy = Literal["skip", "clamp"]
 Cells = tuple[float, float, float, float]  # both pass, base only, PR only, both fail
 POWER_DELTAS = (-0.10, 0.05)  # T151 part 2: BLOCK is right at -0.10, SHIP at +0.05
 GRID_N = (50, 100, 200, 800)
+
+
+@dataclass(frozen=True)
+class Scenario:
+    """What a run's data look like beyond part 1's one binary KPI with every pair."""
+
+    name: str = "binary, one KPI, every pair"
+    missing: float = 0.0  # the chance a pair is lost
+    informative: bool = False  # lose only pairs whose PR result fails, as a PR's bad outputs can
+
+
+MAIN = Scenario()
+SCENARIOS = (
+    Scenario("10% of pairs lost at random", missing=0.10),
+    Scenario("half of the PR's failing results lost", missing=0.5, informative=True),
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +89,14 @@ class ArmResult:
     block: int
     inconclusive: int
     no_drop_ship: int  # SHIPs with no discordant pair: decide()'s no-drop path
+    lost: int = 0  # pairs lost to missing results, over all runs
+
+
+@dataclass(frozen=True)
+class Run:
+    decision: Decision  # the PR's verdict, as gate_findings gives it
+    no_drop: bool  # no discordant pair
+    lost: int
 
 
 @dataclass(frozen=True)
@@ -141,30 +169,59 @@ def spawn_seeds(base: int, count: int) -> list[int]:
     ]
 
 
-def _run(cell: Cell, cells: Cells, seed: int) -> tuple[str, bool]:
-    data_seed, boot_seed = spawn_seeds(seed, 2)  # the bootstrap gets its own stream
-    rng = random.Random(data_seed)
+def _pairs(rng: random.Random, cells: Cells, n: int) -> list[tuple[float, float]]:
+    """n (base, PR) results from the 2x2 table, one uniform each."""
     p11, p10, p01, _ = cells
-    base: list[list[float]] = []
-    new: list[list[float]] = []
-    for _ in range(cell.n):
+    out = []
+    for _ in range(n):
         u = rng.random()
         both, base_only = u < p11, p11 <= u < p11 + p10
         pr_only = p11 + p10 <= u < p11 + p10 + p01
-        pair = (1.0, 1.0) if both else (1.0, 0.0) if base_only else (0.0, float(pr_only))
-        base.append([pair[0]])
-        new.append([pair[1]])
-    r = paired_test(base, new, alpha=cell.alpha, seed=boot_seed)
-    decision = decide(
-        r.delta,
-        r.ci,
-        cell.margin,
-        r.p <= cell.alpha,
-        discordant=r.discordant,
-        n=r.n,
-        alpha=cell.alpha,
+        out.append((1.0, 1.0) if both else (1.0, 0.0) if base_only else (0.0, float(pr_only)))
+    return out
+
+
+def _lost(rng: random.Random, pair: tuple[float, float], scenario: Scenario) -> bool:
+    """One uniform per pair, so the at-random and the informative arms lose on the same draws."""
+    u = rng.random()
+    return u < scenario.missing and (not scenario.informative or pair[1] == 0.0)
+
+
+def _kpi(name: str, r: PairedResult | None, cell: Cell) -> KpiStats:
+    """A blocking KPI as gate_kpis takes it: this run's paired result and a sure judge."""
+    return KpiStats(
+        kpi=name,
+        n=r.n if r else 0,
+        k=1,
+        pass_at_k=0.0,
+        pass_hat_k=0.0,
+        infra=0,
+        outcome="needs_human",
+        paired=r,
+        ms_total=0.0,
+        ms_mean=0.0,
+        tokens_total=0,
+        tokens_mean=0.0,
+        flaky_cases=(),
+        confidence=1.0,
+        margin=cell.margin,
     )
-    return decision, r.discordant == 0
+
+
+def _run(cell: Cell, cells: Cells, seed: int, scenario: Scenario) -> Run:
+    """N pairs from the arm's table, less the lost ones, judged by the gate's own paired_test,
+    then gate_kpis and gate_findings."""
+    data_seed, boot_seed, loss_seed = spawn_seeds(seed, 3)  # each on its own stream
+    losses = random.Random(loss_seed)
+    pairs = _pairs(random.Random(data_seed), cells, cell.n)
+    kept = [pair for pair in pairs if not _lost(losses, pair, scenario)]
+    r = None
+    if kept:
+        base, new = [[b] for b, _ in kept], [[p] for _, p in kept]
+        r = paired_test(base, new, alpha=cell.alpha, seed=boot_seed)
+    gated = gate_kpis([_kpi("kpi1", r, cell)], alpha=cell.alpha)
+    verdict = gate_findings(gated).statistical or "INCONCLUSIVE"
+    return Run(verdict, r is not None and r.discordant == 0, len(pairs) - len(kept))
 
 
 def arms_to_run(resolved: Resolved, seed: int) -> list[tuple[float, Cells, int]]:
@@ -176,18 +233,25 @@ def arms_to_run(resolved: Resolved, seed: int) -> list[tuple[float, Cells, int]]
 
 
 def simulate_arm(
-    cell: Cell, delta: float, cells: Cells, arm_seed: int, start: int, stop: int
+    cell: Cell,
+    delta: float,
+    cells: Cells,
+    arm_seed: int,
+    start: int,
+    stop: int,
+    scenario: Scenario = MAIN,
 ) -> ArmResult:
     """Runs start to stop - 1 of one arm, so a pool can cut an arm into blocks."""
-    runs = [_run(cell, cells, s) for s in spawn_seeds(arm_seed, stop)[start:stop]]
-    decisions = [d for d, _ in runs]
+    runs = [_run(cell, cells, s, scenario) for s in spawn_seeds(arm_seed, stop)[start:stop]]
+    verdicts = [run.decision for run in runs]
     return ArmResult(
         delta=delta,
         reps=stop - start,
-        ship=decisions.count("SHIP"),
-        block=decisions.count("BLOCK"),
-        inconclusive=decisions.count("INCONCLUSIVE"),
-        no_drop_ship=sum(1 for d, none in runs if d == "SHIP" and none),
+        ship=verdicts.count("SHIP"),
+        block=verdicts.count("BLOCK"),
+        inconclusive=verdicts.count("INCONCLUSIVE"),
+        no_drop_ship=sum(1 for run in runs if run.decision == "SHIP" and run.no_drop),
+        lost=sum(run.lost for run in runs),
     )
 
 
@@ -200,13 +264,16 @@ def merge(parts: Sequence[ArmResult]) -> ArmResult:
         block=sum(p.block for p in parts),
         inconclusive=sum(p.inconclusive for p in parts),
         no_drop_ship=sum(p.no_drop_ship for p in parts),
+        lost=sum(p.lost for p in parts),
     )
 
 
-def simulate(resolved: Resolved, reps: int, seed: int = 0) -> tuple[ArmResult, ...]:
+def simulate(
+    resolved: Resolved, reps: int, seed: int = 0, scenario: Scenario = MAIN
+) -> tuple[ArmResult, ...]:
     """reps runs per arm; each arm's run seeds are spawned from that arm's own seed."""
     return tuple(
-        simulate_arm(resolved.cell, delta, cells, arm_seed, 0, reps)
+        simulate_arm(resolved.cell, delta, cells, arm_seed, 0, reps, scenario)
         for delta, cells, arm_seed in arms_to_run(resolved, seed)
     )
 
@@ -245,10 +312,11 @@ class Block:
     arm_seed: int
     start: int
     stop: int
+    scenario: Scenario
 
 
 def _run_block(b: Block) -> ArmResult:
-    return simulate_arm(b.cell, b.delta, b.cells, b.arm_seed, b.start, b.stop)
+    return simulate_arm(b.cell, b.delta, b.cells, b.arm_seed, b.start, b.stop, b.scenario)
 
 
 def run_grid(
@@ -257,12 +325,13 @@ def run_grid(
     seed: int = 0,
     workers: int = 1,
     block: int = 250,
+    scenario: Scenario = MAIN,
 ) -> list[CellResult | Skipped]:
     """simulate() for every resolved cell, its arms cut into blocks of runs. With workers > 1
     the blocks run in a process pool. Each run's seed comes from its index, so the result is
     the same for any number of workers and any block size."""
     blocks = [
-        Block((i, j), r.cell, delta, cells, arm_seed, start, min(start + block, reps))
+        Block((i, j), r.cell, delta, cells, arm_seed, start, min(start + block, reps), scenario)
         for i, r in enumerate(plan)
         if not isinstance(r, Skipped)
         for j, (delta, cells, arm_seed) in enumerate(arms_to_run(r, seed))
@@ -337,14 +406,14 @@ def table(result: CellResult, seed: int) -> str:
     return "\n".join(lines)
 
 
-def grid_table(results: Sequence[CellResult | Skipped]) -> str:
+def grid_table(results: Sequence[CellResult | Skipped], scenario: Scenario = MAIN) -> str:
     """One Markdown row per arm: its calls, the wrong call's rate with its MC error, and the
-    right call's rate next to the predicted one. Skipped cells and arms follow the table."""
-    lines = [
-        "| p | ρ | N | Δ | SHIP / BLOCK / INCONCLUSIVE | No-drop SHIPs | Wrong call "
-        "| Rate (MC SE) | Wilson 95% | Right call | Rate | Predicted |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
-    ]
+    right call's rate next to the predicted one. Skipped cells and arms follow the table.
+    With lost pairs, the share lost."""
+    extra = ["Pairs lost"] if scenario.missing else []
+    head = ["p", "ρ", "N", "Δ", "SHIP / BLOCK / INCONCLUSIVE", "No-drop SHIPs", "Wrong call"]
+    head += ["Rate (MC SE)", "Wilson 95%", "Right call", "Rate", "Predicted", *extra]
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     skips = []
     for out in results:
         c = out.cell if isinstance(out, Skipped) else out.resolved.cell
@@ -362,10 +431,12 @@ def grid_table(results: Sequence[CellResult | Skipped]) -> str:
             if p is not None:
                 name, n_right = ("SHIP", a.ship) if a.delta > -c.margin else ("BLOCK", a.block)
                 right = f"{name} | {_pct(n_right / a.reps)} | {_pct(p)}"
+            more = [_pct(a.lost / (a.reps * c.n))] if scenario.missing else []
             lines.append(
                 f"| {c.p_base:g} | {rho} | {c.n} | {a.delta:+g} "
                 f"| {a.ship} / {a.block} / {a.inconclusive} | {a.no_drop_ship} | {wrong} "
                 f"| {_pct(rate)} ({_pct(se)}) | {_pct(lo)}–{_pct(hi)} | {right} |"
+                + "".join(f" {m} |" for m in more)
             )
         skips += [
             f"- Skipped arm Δ={d:+g} at {where}: {w}" for d, w in r.power if isinstance(w, str)
@@ -378,10 +449,14 @@ def _grid_main(argv: Sequence[str]) -> int:
     parser.add_argument("reps", type=int, nargs="?", default=5000, help="runs per arm")
     parser.add_argument("seed", type=int, nargs="?", default=0, help="base seed")
     parser.add_argument("--workers", type=int, default=1, help="worker processes")
+    parser.add_argument(
+        "--scenario-reps", type=int, default=1000, help="runs per arm for the other scenarios"
+    )
     args = parser.parse_args(argv)
     reps: int = args.reps
     seed: int = args.seed
     workers: int = args.workers
+    scenario_reps: int = args.scenario_reps
     plan = [resolve(cell, policy, POWER_DELTAS) for cell, policy in grid()]
     for r in plan:  # the logged reasons, before the long part
         if isinstance(r, Skipped):
@@ -390,15 +465,14 @@ def _grid_main(argv: Sequence[str]) -> int:
         for d, why in r.power:
             if isinstance(why, str):
                 print(f"skipped arm delta={d:+g} of {r.cell}: {why}", file=sys.stderr)
-    start = time.perf_counter()
-    results = run_grid(plan, reps, seed, workers)
-    print(
-        f"M1 grid, binary K=1, one KPI: R={reps} per arm, seed={seed}, "
-        f"margin m={_GATE.margin:g}, alpha={_GATE.alpha:g}\n"
-    )
-    print(grid_table(results))
-    took = time.perf_counter() - start
-    print(f"grid: R={reps}, seed={seed}, {workers} workers, {took:.1f} s", file=sys.stderr)
+    print(f"M1 grid: seed={seed}, margin m={_GATE.margin:g}, alpha={_GATE.alpha:g}", flush=True)
+    for scenario, r_ in ((MAIN, reps), *((s, scenario_reps) for s in SCENARIOS)):
+        start = time.perf_counter()
+        results = run_grid(plan, r_, seed, workers, scenario=scenario)
+        took = time.perf_counter() - start
+        print(f"\n## {scenario.name}: R={r_} per arm, {took:.0f} s on {workers} workers\n")
+        print(grid_table(results, scenario), flush=True)
+        print(f"{scenario.name}: R={r_}, {workers} workers, {took:.1f} s", file=sys.stderr)
     return 0
 
 

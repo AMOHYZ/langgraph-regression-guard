@@ -9,6 +9,7 @@ from lgcov.gate_sim import (
     POWER_DELTAS,
     Cell,
     Resolved,
+    Scenario,
     Skipped,
     grid,
     grid_table,
@@ -172,3 +173,46 @@ def test_grid_table_names_each_arms_calls_and_every_skip() -> None:
     assert len(rows) == 3  # Δ = 0, -m and -0.10; +0.05 is out of reach
     assert "| — | — | — |" in rows[1]  # at -m no decisive call is the right one
     assert "PR rate 1 not in (0, 1)" in text and "the reachable rho is 0.688" in text
+
+
+# T151 part 2: missing pairs, judged by the gate's own KPI aggregation
+
+
+def test_part_1s_tallies_hold_through_the_gates_own_aggregation() -> None:
+    r = resolve(Cell(n=100, rho=0.7, p_base=0.95), rho_policy="clamp")
+    assert not isinstance(r, Skipped)
+    arms = simulate(r, reps=50, seed=0)
+    tallies = [(a.ship, a.block, a.inconclusive, a.no_drop_ship) for a in arms]
+    assert tallies == [(29, 0, 21, 2), (1, 17, 32, 1)]  # what part 1's code gave
+
+
+def test_missing_at_random_loses_about_the_asked_share() -> None:
+    r = resolve(Cell(n=100, rho=0.3, p_base=0.80))
+    assert not isinstance(r, Skipped)
+    every = simulate(r, reps=20, seed=0)
+    lossy = simulate(r, reps=20, seed=0, scenario=Scenario(missing=0.10))
+    assert every[0].lost == 0
+    assert 0.07 < lossy[0].lost / (20 * 100) < 0.13
+
+
+def test_informative_loss_can_hide_every_pr_failure_so_nothing_blocks() -> None:
+    r = resolve(Cell(n=100, rho=0.3, p_base=0.80))
+    assert not isinstance(r, Skipped)
+    _, margin = simulate(r, reps=20, seed=0, scenario=Scenario(missing=1.0, informative=True))
+    assert 0.20 < margin.lost / (20 * 100) < 0.30  # at Δ = -m the PR fails a quarter of cases
+    assert margin.block == 0  # with no PR failure left, no pair shows a drop
+
+
+def test_run_grid_carries_the_scenario() -> None:
+    plan = [resolve(Cell(n=20, rho=0.3, p_base=0.80), power=POWER_DELTAS)]
+    lossy = Scenario(missing=0.1)
+    (out,) = run_grid(plan, reps=4, seed=0, scenario=lossy)
+    assert not isinstance(out, Skipped)
+    assert out.arms == simulate(out.resolved, reps=4, seed=0, scenario=lossy)
+
+
+def test_grid_table_adds_the_share_lost_for_a_lossy_scenario() -> None:
+    plan = [resolve(Cell(n=20, rho=0.3, p_base=0.80))]
+    lossy = Scenario(missing=0.1)
+    assert "Pairs lost" in grid_table(run_grid(plan, reps=4, seed=0, scenario=lossy), lossy)
+    assert "Pairs lost" not in grid_table(run_grid(plan, reps=4, seed=0))
