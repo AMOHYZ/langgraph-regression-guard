@@ -355,12 +355,24 @@ def test_cli_record_then_replay_round_trips(
     assert main(["record", "--config", str(cfg), "--inputs", str(inputs)]) == 0
     written = (tmp_path / "cassettes" / "baseline.json").read_text(encoding="utf-8")
     assert written == Path(DEMO_BASELINE).read_text(encoding="utf-8")
+    body = json.loads(written)
+    assert (body["schema"], body["scheme"]) == (2, "ast")
+    assert "graph" in body
     assert "recorded 2 runs" in capsys.readouterr().out
     assert main(["replay", "--config", str(cfg)]) == 0
 
 
-# T193, PR 2: --schema 2 writes the recording's fields beside the runs schema 1 writes. A preview:
-# without it `lgcov record` writes schema 1, byte for byte as before (the test above).
+def test_cli_record_schema_1_writes_runs_only(tmp_path: Path) -> None:
+    cfg = _demo_config(tmp_path)
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text('[{"question": "Where is my order?"}, {"question": "What are your hours?"}]')
+    assert main(["record", "--config", str(cfg), "--inputs", str(inputs), "--schema", "1"]) == 0
+    body = json.loads((tmp_path / "cassettes" / "baseline.json").read_text(encoding="utf-8"))
+    assert set(body) == {"runs"}
+    assert body["runs"] == json.loads(Path(DEMO_BASELINE).read_text(encoding="utf-8"))["runs"]
+
+
+# T193: --schema 2 is the default. The flag still writes the same file. Schema 1 is --schema 1.
 def test_cli_record_schema_2_writes_schema_scheme_and_graph(tmp_path: Path) -> None:
     cfg = _demo_config(tmp_path)
     inputs = tmp_path / "inputs.json"
@@ -469,12 +481,12 @@ def test_cli_accept_b_leaves_a_byte_identical(
     assert "| `b` |" in out
     assert str(baseline) in out
     after = baseline.read_text(encoding="utf-8")
-    runs = json.loads(before)["runs"]
-    for run, new in zip(runs, json.loads(after)["runs"], strict=True):
+    expected, got = json.loads(before), json.loads(after)
+    for run, new in zip(expected["runs"], got["runs"], strict=True):
         assert new["steps"][1]["output"] == {"b": "B2"}
         run["steps"][1] = new["steps"][1]  # b's steps are re-recorded whole (output, input, code)
-    # ...and every other byte, a's entries included, is untouched.
-    assert after == json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n"
+    # ...and every other field, a's entries and the schema-2 recording included, is untouched.
+    assert got == expected
     summary = baseline.parent / "accept.md"
     assert summary.is_file()
     assert "| `b` |" in summary.read_text(encoding="utf-8")

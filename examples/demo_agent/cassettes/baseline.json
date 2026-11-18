@@ -1,4 +1,11 @@
 {
+  "graph": {
+    "nodes": {
+      "classify": {},
+      "lookup_order": {},
+      "respond": {}
+    }
+  },
   "runs": [
     {
       "inputs": {
@@ -70,5 +77,7 @@
         }
       ]
     }
-  ]
+  ],
+  "schema": 2,
+  "scheme": "ast"
 }

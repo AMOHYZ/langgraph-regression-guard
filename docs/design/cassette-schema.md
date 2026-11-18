@@ -1,8 +1,8 @@
 # The cassette schema (design, T193)
 
-**Status:** PR 1 in section 6, the reader, is built (#158, #159) and shipped in lgcov 0.4.0,
-release R1. It reads every field on this page, and no label uses one yet. The writers are off:
-lgcov still writes recording 1 and candidate 2. The rest of the page is design only. The rulings in
+**Status:** `lgcov record` writes schema 2 by default (`--schema 1` still writes schema 1).
+The reader shipped in lgcov 0.4.0 (#158, #159). Units inside a subgraph are recorded and labelled.
+Their inputs and outputs are unredacted until section 6, PR 5. Tool calls stay out. The rulings in
 section 7 were decided on 17 November 2026.
 
 lgcov records a baseline once and replays each PR against it. Several planned tasks need the
@@ -283,9 +283,8 @@ field after the flip is optional.
    in [`test_cli.py`](../../tests/test_cli.py). On its nested build there is no root today, and
    `answer` is inconclusive. After 3b `answer.respond` is root, and `answer` gets no label (the
    container rule).
-4. **Flip:** `lgcov record` writes schema 2. The demo baselines and the fixtures tests compare byte
-   for byte are re-recorded once ([`test_demo_agent.py`](../../tests/test_demo_agent.py) requires
-   it), with docs and changelog. Then release R2.
+4. **Flip:** `lgcov record` writes schema 2 by default. `--schema 1` writes schema 1. The demo
+   baselines are re-recorded. Then release R2, which is a separate task.
 5. **Redaction** at write time.
 6. **Tool units**, after 5.
 7. **Units of a graph started inside a node or a tool**, served only whole.

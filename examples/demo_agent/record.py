@@ -6,7 +6,7 @@ Two inputs so both branches of the conditional edge are covered.
 from pathlib import Path
 
 from examples.demo_agent.graph import graph
-from lgcov.cassette import record, runs_to_json
+from lgcov.cassette import SCHEME, Recording, graph_shape, record, recording_to_json
 
 INPUTS = [
     {"question": "Where is my order?"},  # goes through lookup_order
@@ -16,7 +16,9 @@ BASELINE = Path(__file__).parent / "cassettes" / "baseline.json"
 
 
 def baseline_json() -> str:
-    return runs_to_json([record(graph, inputs) for inputs in INPUTS])
+    """Schema 2, the same bytes `lgcov record` writes for this graph."""
+    runs = [record(graph, inputs, units=True) for inputs in INPUTS]
+    return recording_to_json(Recording(runs, 2, SCHEME, graph_shape(graph)))
 
 
 def main() -> None:
