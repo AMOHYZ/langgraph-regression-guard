@@ -371,7 +371,9 @@ Binary KPIs are drawn from a 2×2 table with one ρ per cell, and graded ones fr
 model with σ = 1. KPIs are independent, which makes "every KPI SHIPs" as hard as it gets;
 correlated KPIs would SHIP more often. Not simulated: samples lost inside a K > 1 case, missing
 pairs with graded scores or several KPIs, Benjamini-Hochberg for advisory KPIs, flag bands and
-an unsure judge. Tango's and the SCAS-style bound are comparators here; the gate reads BCa.
+an unsure judge. Tango's and the SCAS-style bound are comparators here; the gate read BCa. Since then a binary
+KPI's CI is Tango's ([the fixes](../design/gate-false-ship.md)), and gate_sim still asks for
+BCa, so these tables rerun as printed.
 
 ## Rerun
 

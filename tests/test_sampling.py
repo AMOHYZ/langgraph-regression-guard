@@ -261,7 +261,7 @@ def test_gate_table_row_has_n_rates_delta_ci_p_margin_mde_n_star_verdict_and_roo
     assert lines[:3] == [
         "| KPI | n | base | PR | Δ (95% CI) | p adj. | δ | MDE | N* | verdict | root |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
-        "| grounded | 200 | 100% | 90% | -0.10 [-0.14, -0.06] | <0.001 | 0.05 | 0.06 | 71 "
+        "| grounded | 200 | 100% | 90% | -0.10 [-0.15, -0.07] | <0.001 | 0.05 | 0.06 | 71 "
         "| 🔴 BLOCK | `respond` |",  # run-50 didn't change: its root isn't this KPI's
     ]
 

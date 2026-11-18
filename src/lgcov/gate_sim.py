@@ -318,7 +318,9 @@ def _run(cell: Cell, delta: float, cells: Cells, null: Cells, seed: int, scenari
         r = None
         if kept:
             base, new = [[b] for b, _ in kept], [[p] for _, p in kept]
-            r = paired_test(base, new, alpha=cell.alpha, seed=boot_seed)
+            # T151 measured the gate's BCa interval; binary KPIs now read Tango's, so the
+            # runs ask for BCa to keep part 1's and part 2's tables reproducible
+            r = paired_test(base, new, alpha=cell.alpha, seed=boot_seed, interval="bca")
         no_drop = no_drop or (j == 0 and r is not None and r.discordant == 0)
         if scenario.kpis == 1 and r is not None and len(kept) > 1:
             bounds = _bounds(cell, delta, r, kept)

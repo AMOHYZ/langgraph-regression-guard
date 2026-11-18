@@ -42,8 +42,12 @@ or slice group never goes further than its KPIs' own verdicts.
     name the base's runs have and the PR dropped is judged, so it fails.
 - **The 2.5%** is at the default α = 0.05. With no discordant pair, SHIP reads the no-drop
   bound at α/2 instead of the CI. That is the same 2.5% at α = 0.05, and more if α is set
-  higher, as the PR comment then says. Simulated, it holds from N = 200 cases up; at N = 50 a
-  drop of δ SHIPped 3.7% to 6.1% of the time, and up to 99.6% when half of a PR's failing
-  results went missing ([gate simulations](validation/gate-simulations.md)).
+  higher, as the PR comment then says. Simulated with a BCa interval, it held from N = 200
+  cases up: at N = 50 a drop of δ SHIPped 3.7% to 6.1% of the time. So binary KPIs read
+  Tango's score interval, which stayed within 2.5% at every N simulated, 50 to 800. Graded KPIs
+  still read BCa, and below N = 200 they aren't simulation-checked: there the one graded model
+  simulated SHIPped a drop of δ up to 4.4% of the time. When half of a PR's failing results
+  went missing, a drop of δ SHIPped up to 99.6% of the time
+  ([gate simulations](validation/gate-simulations.md), [the fixes](design/gate-false-ship.md)).
 - **On a PR, these settings come from the base commit,** so a PR can't change what grades it. What
   that does and doesn't stop is in [the trust boundary](trust-boundary.md).
