@@ -438,7 +438,7 @@ jobs:
 A maintainer can answer the report with a comment, and a workflow turns it into one commit on the
 PR's branch. [docs/review.md](docs/review.md) has the workflow, who can run it and every refusal.
 
-1. **Require the check of the job that decides first.** The bot's commit starts no workflow, so it
+1. **Require the check of the job that decides first.** No workflow runs on the bot's commit, so it
    has no lgcov result until someone pushes. Without the required check, it can be merged ungated.
 2. `/lgcov accept respond` makes the node's outputs on this PR the baseline, from the candidate
    job's file for the head, so you accept what the report showed. `/lgcov accept all` takes every
