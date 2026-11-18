@@ -47,6 +47,7 @@ class Sample:
     tokens_out: int | None = None
     score: float | None = None  # T091: the judge's score, in [0, 1]; None on an infra error
     error: str = ""  # T195: why an infra sample didn't run; "" for a sample that did
+    label: str = ""  # T186: the judge's label; "" on an infra error
 
 
 def usage_tokens(raw: Mapping[str, object]) -> tuple[int, int] | None:
@@ -85,7 +86,9 @@ def judge_samples(
             continue
         ms = (clock() - start) * 1000
         t_in, t_out = usage_tokens(v.raw) or (None, None)
-        samples.append(Sample(v.score >= 0.5, v.confidence, ms, t_in, t_out, v.score))
+        samples.append(
+            Sample(v.score >= 0.5, v.confidence, ms, t_in, t_out, v.score, label=v.label)
+        )
     return tuple(samples)
 
 
@@ -149,6 +152,8 @@ class KpiStats:
     new_failures: tuple[str, ...] = ()  # code judges: cases that passed on base, fail here
     worse: tuple[str, ...] = ()  # T199, every judge: cases this PR scores lower than the base
     infra_reasons: tuple[tuple[str, int], ...] = ()  # T195: why, and how often; most first
+    # T186, model judges only: each PR-side case, with the labels it got on the base and the PR
+    case_labels: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = ()
 
     @property
     def flakiness(self) -> float:
@@ -158,6 +163,10 @@ class KpiStats:
     def judge_unreliable(self) -> bool:
         """T074: more than half the judgments didn't run, even if the rest passed."""
         return self.samples > 0 and self.infra * 2 > self.samples
+
+
+def _labels(samples: Sequence[Sample]) -> tuple[str, ...]:
+    return tuple(s.label for s in samples if s.passed is not None and s.label)
 
 
 def _scores(samples: Sequence[Sample]) -> list[float]:
@@ -234,6 +243,9 @@ def kpi_stats(
         worse=tuple(worse),
         score_range=max(kpi.score_map.values()) - min(kpi.score_map.values()),
         infra_reasons=tuple(Counter(s.error for s in samples if s.error).most_common()),
+        case_labels=()
+        if code
+        else tuple((c, _labels(base.get(c, ())), _labels(new[c])) for c in sorted(new)),
     )
     return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence, power=power)[0]
 
@@ -336,6 +348,27 @@ def named_cases(cases: Sequence[str], shown: int = 3) -> str:
     """The first few of these cases, in code spans: `a`, `b`, `c` and 2 more."""
     named = ", ".join(f"`{c}`" for c in cases[:shown])
     return f"{named} and {len(cases) - shown} more" if len(cases) > shown else named
+
+
+WORSE_SHOWN = 10  # T186: cases the report names per KPI before "+N more"
+
+
+def worse_case_lines(stats: Sequence[KpiStats], shown: int = WORSE_SHOWN) -> list[str]:
+    """T186: per model-judged KPI, the cases this PR scored lower than the base, with what the
+    judge said on each side, so a maintainer can answer with `/lgcov override`."""
+    lines = []
+    for s in stats:
+        labels = {case: (base, pr) for case, base, pr in s.case_labels}
+        worse = [case for case in s.worse if case in labels]
+        if not worse:
+            continue
+        named = ", ".join(
+            f"`{case}` (judge: {', '.join(labels[case][1])}; base: {', '.join(labels[case][0])})"
+            for case in worse[:shown]
+        )
+        more = f" +{len(worse) - shown} more" if len(worse) > shown else ""
+        lines.append(f"Cases this PR scored lower than the base, `{s.kpi}`: {named}{more}.")
+    return lines
 
 
 def _verdict(s: KpiStats) -> str:

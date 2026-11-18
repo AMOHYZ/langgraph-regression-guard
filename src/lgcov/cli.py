@@ -110,7 +110,7 @@ from lgcov.cassette import (
     unservable,
     with_units,
 )
-from lgcov.ci_report import CiResult, Tally, Timing, render_ci_report
+from lgcov.ci_report import CiResult, Tally, Timing, cases_copy, render_ci_report
 from lgcov.code_judges import code_judge, unknown_names
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
 from lgcov.config import (
@@ -192,6 +192,7 @@ from lgcov.sampling import (
     named_cases,
     render_gate_table,
     render_kpi_table,
+    worse_case_lines,
 )
 from lgcov.slices import Group, group_kpis, groups_exit, render_groups
 from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
@@ -1407,6 +1408,12 @@ def _evaluate(
             *policy.calibration,
             *([""] if policy.calibration and stats else []),
             *(_l2_tables(stats, groups, gate) if stats else ()),
+            *(["", *lowered] if (lowered := worse_case_lines(stats)) else []),
+        ),
+        # T186: what each model judge said on the PR, for `/lgcov override` to read
+        cases_copy=cases_copy(
+            _pr_head(),
+            {s.kpi: {c: pr for c, _, pr in s.case_labels} for s in stats if s.case_labels},
         ),
         timing=replace(judged, total=run.seconds + perf_counter() - start),
         calibration_lines=(*changes, *_rejudge(saved, l2[0], l2[1])),
