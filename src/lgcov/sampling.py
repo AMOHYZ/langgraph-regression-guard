@@ -257,6 +257,23 @@ def kpi_stats(
     return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence, power=power)[0]
 
 
+LOST_FLOOR = 2  # the interim rule's smallest tolerance, in cases
+
+
+def lost_tolerance(s: KpiStats) -> float:
+    """The interim rule's tolerance (docs/design/gate-false-ship.md, ruling 4): half the
+    margin's worth of the cases both sides ran, at least LOST_FLOOR. A lost case can hide a
+    drop of up to score_range / n, so this many can hide half the margin."""
+    ran = (s.paired.n if s.paired else 0) + s.lost_pr + s.lost_base
+    return max(float(LOST_FLOOR), s.margin / 2 / s.score_range * ran)
+
+
+def lost_too_many(s: KpiStats) -> bool:
+    """The PR side lost more results than the base by over the tolerance, so its failures may
+    be what went missing: until a fix is decided, such a KPI can't SHIP."""
+    return s.lost_pr - s.lost_base > lost_tolerance(s)
+
+
 def k_gate(stats: Sequence[KpiStats]) -> int:
     """T114: the blocking KPIs the run judges, as lgcov.yaml and the bands leave them; Holm
     runs across exactly these, so one with no paired case still counts, as p = 1."""
@@ -306,6 +323,8 @@ def gate_kpis(
                 scale=s.score_range,
                 alpha=alpha,
             )
+            if decision == "SHIP" and lost_too_many(s):
+                decision = "INCONCLUSIVE"
             capped = s.band == "flag"
             outcome = gate_outcome(decision, s.confidence, min_confidence, blocking, capped)
             gated[i] = replace(s, p_adjusted=p_adj, decision=decision, outcome=outcome)
@@ -407,7 +426,9 @@ def render_gate_table(
         lost = []
         if s.lost_pr or s.lost_base:
             sides = f"{s.lost_pr} on the PR side and {s.lost_base} on the base side"
-            lost = [f"| ⚠️ lost results: {s.kpi}, {sides}, left out of Δ |" + " |" * 10]
+            why = f"; over the tolerance of {lost_tolerance(s):g}, so it can't SHIP"
+            why = why if lost_too_many(s) else ""
+            lost = [f"| ⚠️ lost results: {s.kpi}, {sides}, left out of Δ{why} |" + " |" * 10]
         if r is None:
             lines.append(
                 f"| {name} | 0 | — | — | — | — | {s.margin:.2f} | — | — | {_verdict(s)} | — |"

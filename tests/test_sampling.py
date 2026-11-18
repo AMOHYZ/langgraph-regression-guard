@@ -13,6 +13,7 @@ from lgcov.sampling import (
     judge_samples,
     k_gate,
     kpi_stats,
+    lost_too_many,
     render_gate_table,
     usage_tokens,
     worse_case_lines,
@@ -220,6 +221,49 @@ def test_the_gate_table_names_each_sides_lost_results() -> None:
     assert not any(
         "lost results" in line for line in render_gate_table([kpi_stats(KPI_, 1, *_drop(200, 20))])
     )
+
+
+def _losing(
+    n: int, pr_lost: int, base_lost: int = 0
+) -> tuple[dict[str, tuple[Sample, ...]], dict[str, tuple[Sample, ...]]]:
+    """n cases that pass on both sides, but the PR side lost the first pr_lost results and the
+    base side the last base_lost."""
+    base = _cases(*[["pass"]] * (n - base_lost), *[["infra"]] * base_lost)
+    new = _cases(*[["infra"]] * pr_lost, *[["pass"]] * (n - pr_lost))
+    return base, new
+
+
+def test_a_pr_side_that_lost_too_many_more_results_cant_ship() -> None:
+    """The interim rule (docs/design/gate-false-ship.md, ruling 4): more PR-side losses than
+    base-side ones by over half the margin's worth of the cases both sides ran, at least 2,
+    and the KPI can't SHIP. 200 cases: the tolerance is 5."""
+    assert kpi_stats(KPI_, 1, *_losing(200, 0)).decision == "SHIP"
+    assert kpi_stats(KPI_, 1, *_losing(200, 5)).decision == "SHIP"
+    stats = kpi_stats(KPI_, 1, *_losing(200, 6))
+    assert (stats.decision, stats.outcome) == ("INCONCLUSIVE", "needs_human")
+    assert lost_too_many(stats)
+
+
+def test_losses_on_both_sides_cancel_and_the_floor_is_two_cases() -> None:
+    assert kpi_stats(KPI_, 1, *_losing(200, 8, base_lost=4)).decision == "SHIP"  # excess 4
+    assert kpi_stats(KPI_, 1, *_losing(100, 2)).decision == "SHIP"  # 98 identical cases
+    assert kpi_stats(KPI_, 1, *_losing(100, 3)).decision == "INCONCLUSIVE"  # over 2.5
+
+
+def test_the_interim_rule_never_touches_a_block() -> None:
+    base, new = _drop(200, 20)
+    for i in range(190, 200):
+        new[f"run-{i}"] = judge_samples(Scripted(["infra"]), {}, {}, 1)
+    assert kpi_stats(KPI_, 1, base, new).decision == "BLOCK"
+
+
+def test_the_lost_results_row_says_when_the_kpi_cant_ship() -> None:
+    lines = render_gate_table([kpi_stats(KPI_, 1, *_losing(200, 6))])
+    row = (
+        "| ⚠️ lost results: grounded, 6 on the PR side and 0 on the base side, left out of Δ;"
+        " over the tolerance of 5, so it can't SHIP |"
+    )
+    assert row + " |" * 10 in lines
 
 
 # T091 PR B: the paired gate. Holm across blocking KPIs, Benjamini-Hochberg across advisory.
