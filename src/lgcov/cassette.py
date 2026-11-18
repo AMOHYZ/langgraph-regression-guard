@@ -36,7 +36,7 @@ from lgcov.attribution import (
 )
 from lgcov.fingerprint import fingerprint
 from lgcov.messages import decode, encode
-from lgcov.normalize import key_view, normalize
+from lgcov.normalize import key_view, normalize, redact_secrets
 from lgcov.rebind import Ambiguous, rebind
 from lgcov.snapshot import node_tools
 
@@ -96,6 +96,9 @@ _ALWAYS = {"node", "output", "input", "code"}
 def _saved(step: dict[str, Any]) -> dict[str, Any]:
     if step["units"] is not None:
         step["units"] = [_saved(u) for u in step["units"]]
+    for key in ("input", "output", "goto", "router_state", "routed"):
+        if step.get(key) is not None:
+            step[key] = redact_secrets(step[key])
     return {k: v for k, v in step.items() if v is not None or k in _ALWAYS}
 
 
@@ -115,6 +118,7 @@ class Cassette:
         it saves byte for byte as it did before goto was kept. T175: the same for router, and
         T193: for each of a unit's fields, in the units inside a step too."""
         body = asdict(self)
+        body["inputs"] = redact_secrets(body["inputs"])
         body["steps"] = [_saved(s) for s in body["steps"]]
         return body
 

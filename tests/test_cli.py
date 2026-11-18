@@ -408,7 +408,7 @@ def test_cli_record_schema_2_records_the_units_inside_a_subgraph(
     assert respond["output"].items() <= answer["output"].items()  # answer returns its whole state
     with pytest.raises(SystemExit):
         main(["record", "--help"])
-    assert "unredacted until the redaction PR" in " ".join(capsys.readouterr().out.split())
+    assert "stored as <redacted>" in " ".join(capsys.readouterr().out.split())
 
 
 @pytest.mark.parametrize("body", ['{"question": "x"}', "[1, 2]", "not json"])

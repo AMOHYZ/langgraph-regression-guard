@@ -28,6 +28,16 @@ def test_plain_dates_and_other_text_are_kept() -> None:
     assert normalize("shipped 2026-10-27, order #42") == "shipped 2026-10-27, order #42"
 
 
+def test_a_secret_named_key_is_redacted_and_max_tokens_is_kept() -> None:
+    raw = {"api_key": "s3cret", "max_tokens": 8, "nested": [{"password": "p"}]}
+    assert normalize(raw) == {
+        "api_key": "<redacted>",
+        "max_tokens": 8,
+        "nested": [{"password": "<redacted>"}],
+    }
+    assert key_view(raw) == normalize(raw)
+
+
 def test_volatile_id_keys_are_masked_but_other_keys_are_not() -> None:
     raw = {"id": "msg_01ABC", "tool_call_id": 7, "order_id": "42", "needs_tool": True}
     assert normalize(raw) == {

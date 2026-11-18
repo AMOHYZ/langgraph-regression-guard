@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `lgcov record` redacts a secret-named key before it writes the value, in the run inputs and in every step's input and output, including a unit inside a subgraph. The name rule is the fingerprint's: a whole word of the key, split on `_` and camelCase, is `key`, `apikey`, `token`, `secret`, `password`, `passwd`, `credential`, `credentials` or `auth`. The stored value is `<redacted>`, and matching redacts the live value the same way, so a redacted input still matches. `max_tokens` and `author` stay. A node that needs the secret from state sees the marker and drifts: a secret does not belong in state. **Re-record** to take secrets out of a baseline. A file recorded before this still loads, and its saved secret is what a served output returns until you re-record. Tool calls stay out.
+
 ## 0.6.0 (2026-11-18)
 
 Release R2. Docs-only and simulator PRs since 0.5.0 have no line: #204, #205, #206.

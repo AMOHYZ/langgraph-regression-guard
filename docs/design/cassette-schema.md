@@ -2,7 +2,7 @@
 
 **Status:** `lgcov record` writes schema 2 by default (`--schema 1` still writes schema 1).
 The reader shipped in lgcov 0.4.0 (#158, #159). Units inside a subgraph are recorded and labelled.
-Their inputs and outputs are unredacted until section 6, PR 5. Tool calls stay out. The rulings in
+A secret-named key is stored as `<redacted>` (section 6, PR 5). Tool calls stay out. The rulings in
 section 7 were decided on 17 November 2026.
 
 lgcov records a baseline once and replays each PR against it. Several planned tasks need the
@@ -35,7 +35,7 @@ a read. A function named with no file is in [`cassette.py`](../../src/lgcov/cass
 | The candidate file | Schema 2. The job that decides refuses anything but exactly that shape ([`candidate.py`](../../src/lgcov/candidate.py)) |
 | What the job that decides reads | The PR's `baseline.json` (`_evaluate` in `cli.py`, run in the PR's checkout). Base's copy only for the edited-cassette check (`_cassettes_edited`) |
 | `cassette accept` | Writes back each run's `inputs` and `steps`, nothing else |
-| Secrets | Nothing is redacted. Inputs and outputs are written as they ran; masking only affects matching and comparison |
+| Secrets | A secret-named key is stored as `<redacted>`, and matching redacts the live value the same way. Any other value is written as it ran |
 
 ## 2. The fields
 
@@ -285,7 +285,7 @@ field after the flip is optional.
    container rule).
 4. **Flip:** `lgcov record` writes schema 2 by default. `--schema 1` writes schema 1. The demo
    baselines are re-recorded. Release R2 is 0.6.0.
-5. **Redaction** at write time.
+5. **Redaction** at write time, for a secret-named key. Other patterns stay a design.
 6. **Tool units**, after 5.
 7. **Units of a graph started inside a node or a tool**, served only whole.
 8. **Routes** (T221): `routed`, `router_state` and the router probe.
