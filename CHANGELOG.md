@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `lgcov record` writes schema 2 by default: `schema`, `scheme` (`ast`), `graph`, and the nodes inside a subgraph, as units. `--schema 1` still writes the runs only, and schema 1 files still load. A schema-2 file needs lgcov 0.4.0 or later, the Action's deciding job included. **Re-record** to get units and the graph's node names. The nodes inside a subgraph are written with their inputs and outputs unredacted until the redaction change lands ([docs/design/cassette-schema.md](docs/design/cassette-schema.md), section 6, PR 5). A graph started inside a node or a tool still gets no units, and tool calls stay out. On a schema-1 baseline a subgraph still runs live and is labelled as before.
+
 ## 0.5.0 (2026-11-18)
 
 Everything merged from 16 to 18 November 2026 (#161 to #202), one line per change, with its PR. Docs-only, test-only and simulator PRs have no line: #163, #164, #166, #167, #170, #176, #177, #178, #179, #180, #181, #184, #185, #187, #197, #201. The review parser, GitHub client and refusal rules (#169, #182, #183) are the review commands below. #193 was merged by mistake and reverted in #195, so it leaves no change. #196 was closed unmerged.

@@ -818,12 +818,18 @@ TODAYS_RECORDINGS = {
 }
 
 
-@pytest.mark.parametrize("path", TODAYS_RECORDINGS.values(), ids=TODAYS_RECORDINGS.keys())
-def test_today_s_recordings_read_as_schema_1_and_save_byte_for_byte(path: Path) -> None:
-    text = path.read_text(encoding="utf-8")
+@pytest.mark.parametrize(
+    ("name", "schema"),
+    [("demo_fixture", 2), ("selfcheck", 1), ("demo_agent", 2)],
+)
+def test_today_s_recordings_read_and_save_byte_for_byte(name: str, schema: int) -> None:
+    text = TODAYS_RECORDINGS[name].read_text(encoding="utf-8")
     recording = recording_from_json(text)
-    assert recording == Recording(runs_from_json(text))  # schema 1, with no recording fields
-    assert recording_to_json(recording) == runs_to_json(recording.runs) == text
+    assert recording.schema == schema
+    assert recording_to_json(recording) == text
+    if schema == 1:  # no recording fields, so the runs alone are the whole file
+        assert recording == Recording(runs_from_json(text))
+        assert runs_to_json(recording.runs) == text
 
 
 # T193, PR 2: `lgcov record --schema 2` writes the graph's shape as `graph`: each node by name, a

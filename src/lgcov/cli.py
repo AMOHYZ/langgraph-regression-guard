@@ -775,12 +775,11 @@ def _record(argv: list[str]) -> int:
         "--schema",
         type=int,
         choices=(1, 2),
-        default=1,
-        help="the recording's schema: 1, the default, or 2, a preview of T193's "
-        "(docs/design/cassette-schema.md). Every lgcov that reads a schema-2 file, the "
-        "Action's in both jobs included, must be 0.4.0 or later. Schema 2 also records the "
-        "nodes inside a subgraph, with their inputs and outputs unredacted until the redaction "
-        "PR (section 6, PR 5) lands",
+        default=2,
+        help="the recording's schema. 2, the default, writes scheme, graph, and the nodes "
+        "inside a subgraph (docs/design/cassette-schema.md). Their inputs and outputs are "
+        "unredacted until the redaction PR (section 6, PR 5) lands. A reader, the Action's "
+        "deciding job included, must be 0.4.0 or later. --schema 1 writes the runs only",
     )
     args = ap.parse_args(argv)
     try:

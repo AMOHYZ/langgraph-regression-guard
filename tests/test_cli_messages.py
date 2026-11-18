@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from lgcov.cassette import Step
-from lgcov.cli import _l2_cases, _load_runs, _write_runs, main
+from lgcov.cassette import Step, recording_from_json, recording_to_json
+from lgcov.cli import _l2_cases, _load_runs, main
 from lgcov.jev_judge import JevJudge
 from lgcov.taxonomy import KPISpec
 
@@ -140,9 +140,8 @@ def test_lgcov_replay_reports_changed_tool_args_as_root_drift(
 def test_a_cassette_from_before_messages_re_saves_byte_identical(
     tmp_path: Path, baseline: str
 ) -> None:
-    out = tmp_path / "baseline.json"
-    _write_runs(out, _load_runs(str(ROOT / baseline)))
-    assert out.read_text(encoding="utf-8") == (ROOT / baseline).read_text(encoding="utf-8")
+    text = (ROOT / baseline).read_text(encoding="utf-8")
+    assert recording_to_json(recording_from_json(text)) == text
 
 
 def test_lgcov_cassette_accept_finds_no_drift_from_new_ids(
