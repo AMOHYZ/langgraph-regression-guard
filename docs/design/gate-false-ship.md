@@ -148,8 +148,12 @@ before G and change nothing.
    simulation-checked. Follow-up: a gate_sim arm for a studentized paired bootstrap on the
    graded path.
 3. **G: run both arms first.** Adopt G only if the random-loss penalty is at most 0.02 at 2%
-   loss per side, with false BLOCK unchanged.
-4. **Per-side loss counts in the PR comment: now.** Until G is decided, an interim rule: when
-   the PR side lost more results than the base beyond a small tolerance, the KPI never SHIPs
-   (needs a human). The tolerance is still to be ruled on.
+   loss per side, with false BLOCK unchanged. The arms ran
+   ([results](../validation/gate-simulations.md#lost-results-g-and-the-interim-rule-18-nov-2026)):
+   G's shift was −0.014 to −0.019 and its BLOCKs unchanged, but it about halved SHIPs of
+   unchanged PRs, so G was left out and the interim rule stands.
+4. **Per-side loss counts in the PR comment: now.** Plus an interim rule: when the PR side
+   lost more results than the base beyond a small tolerance, the KPI never SHIPs (needs a
+   human). Ruled after the arms: half the margin's worth of the cases both sides ran, at
+   least 2, and G left out.
 5. **Judge errors clustering on the PR side:** never seen in real runs so far.

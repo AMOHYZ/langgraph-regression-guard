@@ -375,7 +375,51 @@ an unsure judge. Tango's and the SCAS-style bound are comparators here; the gate
 KPI's CI is Tango's ([the fixes](../design/gate-false-ship.md)), and gate_sim still asks for
 BCa, so these tables rerun as printed.
 
-## Rerun
+## Lost results: G and the interim rule (18 Nov 2026)
+
+[The fixes page](../design/gate-false-ship.md) asked for two more arms before G, which fills in
+the PR's lost results as fails for SHIP, could go in. Simulated at `b14f737` (run as `cffab3d`, before a rebase that brought in report changes the runs never call and the interim rule, which never fires on the simulated KPIs: they carry no lost counts) on Python 3.12.4
+on the binary grid, on the gate's Tango interval, R = 5,000 per arm, base seed 0: 2 minutes on
+6 workers.
+
+- **Random loss on one side:** each side's result is lost on its own, with chance 2% or 5%.
+  About 2% (or 4.8%) of cases are lost on the PR side only, and as many on the base side only.
+- **Half of the PR's failing results lost:** part 2's informative arm, on Tango's interval.
+
+Each run is judged as today, then with G: SHIP needs the filled-in test to SHIP too, and
+BLOCK reads the kept pairs alone. Each run also counts how often the interim rule's three
+candidate tolerances fire. The candidates count against the N cases asked; the gate counts the
+cases both sides ran, which only differs by the few lost on both sides.
+
+| | Today | With G |
+|---|---|---|
+| 2% per side: mean shift in Δ | — | −0.014 to −0.019 |
+| 2% per side: unchanged PRs that SHIP, N = 200 | 29.7–89.4% | 15.3–38.3% |
+| 2% per side: unchanged PRs that SHIP, N = 800 | 83.0–100% | 49.3–95.4% |
+| 5% per side: mean shift in Δ | — | −0.035 to −0.048 |
+| Half of the PR's failures lost: wrong SHIP at Δ = −m | up to 99.7% | at most 2.8% |
+
+G's BLOCKs equal today's in every arm, as its definition makes them. Its shift at 2% is
+within the 0.02 the ruling allowed, but it about halves SHIPs of unchanged PRs whenever
+results go missing at random, so G wasn't adopted. Tango's interval alone doesn't help with
+lost failures: a drop of δ still SHIPs up to 99.7% of the time.
+
+**The interim rule's tolerance.** A KPI whose PR side lost more results than its base side by
+more than the tolerance can't SHIP. The candidates, with how often each fired on unchanged PRs
+at 2% random loss per side, and the most often a drop of δ still SHIPped with half of the PR's
+failures lost:
+
+| Tolerance | Fires at 2% random loss, N = 50 / 100 / 200 / 800 | Wrong SHIP left, lost failures |
+|---|---|---|
+| Half the margin's worth of cases, at least 2 | 3.7% / 9.6% / 2.0% / 0.0% | 3.8% |
+| A quarter of the margin's worth, at least 1 | 13.1% / 21.5% / 17.2% / 3.1% | 1.9% |
+| One-sided sign test, p < 0.05 | 0.1% / 0.7% / 1.7% / 3.5% | 8.6% |
+
+The first is the interim rule now in the gate. At 2% random loss it takes at most 5 points
+off unchanged PRs' SHIP rate. Its 3.8% is at p = 0.95, N = 50, and its 9.6% at N = 100 is
+where 3 excess losses first exceed the tolerance of 2.5. False BLOCK doesn't change: the
+rule only stops SHIPs.
+
 
 ```bash
 uv run python -m lgcov.gate_sim 2000 0
@@ -387,7 +431,8 @@ Part 1's cell. The arguments are runs per arm and the base seed. It takes about 
 uv run python -m lgcov.gate_sim grid 5000 0 --scenario-reps 1000 --workers 6
 ```
 
-Part 2. It logs every skip with its reason, then prints one table per scenario and the
+Part 2. Add `--loss` to run only the lost-results arms above, with `--scenario-reps 5000`.
+It logs every skip with its reason, then prints one table per scenario and the
 lower-bound table. On 17 Nov 2026 it took 2 h 56 min on 6 workers, on a laptop shared with
 other jobs: the graded scenario took a third of that, and the 4-KPI one a fifth. The worker
 count changes the time, not the numbers.

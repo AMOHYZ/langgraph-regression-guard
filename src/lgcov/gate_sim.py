@@ -28,7 +28,7 @@ import sys
 import time
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import NormalDist
 from typing import Literal
 
@@ -55,6 +55,8 @@ class Scenario:
     missing: float = 0.0  # the chance a pair is lost
     informative: bool = False  # lose only pairs whose PR result fails, as a PR's bad outputs can
     k: int = 1  # samples per case; above 1, graded scores (graded_cases), the sign-flip path
+    one_sided: bool = False  # lose each side's result on its own, with chance `missing`
+    interval: Literal["score", "bca"] = "bca"  # T151 measured BCa; the gate now reads Tango's
 
     def __post_init__(self) -> None:
         if self.k > 1 and (self.kpis > 1 or self.missing):
@@ -68,6 +70,29 @@ SCENARIOS = (
     Scenario("2 KPIs, Holm", kpis=2),
     Scenario("4 KPIs, Holm", kpis=4),
     Scenario("graded, K=3 samples per case: the sign-flip path", k=3),
+)
+# The rulings on docs/design/gate-false-ship.md: what G costs when results go missing at
+# random on one side, and what it fixes when the PR's failures go missing; Tango's interval
+LOSS_SCENARIOS = (
+    Scenario(
+        "2% of results lost on each side, at random", missing=0.02, one_sided=True, interval="score"
+    ),
+    Scenario(
+        "5% of results lost on each side, at random", missing=0.05, one_sided=True, interval="score"
+    ),
+    Scenario(
+        "half of the PR's failing results lost, Tango's interval",
+        missing=0.5,
+        informative=True,
+        interval="score",
+    ),
+)
+# The interim rule's candidate tolerances: a KPI whose PR side lost more results than its base
+# side, beyond the tolerance, never SHIPs (interim_fires)
+TOLERANCES = (
+    "half the margin, at least 2",
+    "a quarter of the margin, at least 1",
+    "one-sided sign test, p < 0.05",
 )
 
 
@@ -112,6 +137,15 @@ class ArmResult:
     scas: tuple[int, int, int] = (0, 0, 0)
     misses: tuple[int, int, int] = (0, 0, 0)
     rho_sum: float = 0.0  # graded: the observed correlation of case means, over all runs
+    # Lost results, one KPI: G's calls (SHIP needs the PR's lost results filled in as fails to
+    # SHIP too), its shift in delta, results lost on one side only, and per tolerance the runs
+    # it fires on and the SHIPs it would turn into needs_human
+    g_calls: tuple[int, int, int] = (0, 0, 0)
+    shift_sum: float = 0.0
+    pr_only: int = 0
+    base_only: int = 0
+    fired: tuple[int, int, int] = (0, 0, 0)
+    fired_ship: tuple[int, int, int] = (0, 0, 0)
 
 
 Bounds = tuple[Decision, Decision, tuple[bool, bool, bool]]  # Tango's call, SCAS-style, misses
@@ -126,6 +160,11 @@ class Run:
     other_block: bool
     bounds: Bounds | None = None  # one KPI only
     rho: float = 0.0  # graded: the observed correlation of case means
+    g_decision: Decision | None = None  # with G; None outside a lossy one-KPI scenario
+    shift: float = 0.0  # G's delta minus the kept pairs' delta
+    pr_only: int = 0
+    base_only: int = 0
+    fires: tuple[bool, bool, bool] = (False, False, False)
 
 
 @dataclass(frozen=True)
@@ -256,6 +295,31 @@ def _lost(rng: random.Random, pair: tuple[float, float], scenario: Scenario) -> 
     return u < scenario.missing and (not scenario.informative or pair[1] == 0.0)
 
 
+def _loss(rng: random.Random, pair: tuple[float, float], scenario: Scenario) -> str:
+    """Which side lost its result: "", "pr", "base" or "both". A one-sided scenario draws a
+    uniform per side; the others keep _lost's one draw per pair. A pair lost at random loses
+    both sides; informative loss takes only the PR's (failing) result."""
+    if scenario.one_sided:
+        base, pr = rng.random() < scenario.missing, rng.random() < scenario.missing
+        return "both" if base and pr else "base" if base else "pr" if pr else ""
+    if not _lost(rng, pair, scenario):
+        return ""
+    return "pr" if scenario.informative else "both"
+
+
+def interim_fires(pr_only: int, base_only: int, n: int, margin: float) -> tuple[bool, bool, bool]:
+    """Whether each of TOLERANCES says the PR side lost too many more results than the base:
+    its excess over half or a quarter of the margin's worth of the n cases (each lost result
+    can hide a drop of 1 / n), or a one-sided exact sign test on the one-sided losses."""
+    excess, total = pr_only - base_only, pr_only + base_only
+    tail = sum(math.comb(total, i) for i in range(pr_only, total + 1)) / 2**total
+    return (
+        excess > max(2.0, margin / 2 * n),
+        excess > max(1.0, margin / 4 * n),
+        pr_only > base_only and tail < 0.05,
+    )
+
+
 def _kpi(name: str, r: PairedResult | None, cell: Cell) -> KpiStats:
     """A blocking KPI as gate_kpis takes it: this run's paired result and a sure judge."""
     return KpiStats(
@@ -311,16 +375,22 @@ def _run(cell: Cell, delta: float, cells: Cells, null: Cells, seed: int, scenari
     losses = random.Random(seeds[2])
     streams = [(seeds[0], seeds[1]), *zip(seeds[3::2], seeds[4::2], strict=True)]
     stats, lost, no_drop, bounds = [], 0, False, None
+    sides: list[str] = []
+    first: list[tuple[float, float]] = []
+    first_kept: list[tuple[float, float]] = []
     for j, (data_seed, boot_seed) in enumerate(streams):
         pairs = _pairs(random.Random(data_seed), cells if j == 0 else null, cell.n)
-        kept = [pair for pair in pairs if not _lost(losses, pair, scenario)]
+        side = [_loss(losses, pair, scenario) for pair in pairs]
+        kept = [pair for pair, s in zip(pairs, side, strict=True) if not s]
         lost += len(pairs) - len(kept)
         r = None
         if kept:
             base, new = [[b] for b, _ in kept], [[p] for _, p in kept]
-            # T151 measured the gate's BCa interval; binary KPIs now read Tango's, so the
-            # runs ask for BCa to keep part 1's and part 2's tables reproducible
-            r = paired_test(base, new, alpha=cell.alpha, seed=boot_seed, interval="bca")
+            # T151 measured the gate's BCa interval; binary KPIs now read Tango's, so part 1's
+            # and part 2's scenarios ask for BCa to keep their tables reproducible
+            r = paired_test(base, new, alpha=cell.alpha, seed=boot_seed, interval=scenario.interval)
+        if j == 0:
+            sides, first, first_kept = side, pairs, kept
         no_drop = no_drop or (j == 0 and r is not None and r.discordant == 0)
         if scenario.kpis == 1 and r is not None and len(kept) > 1:
             bounds = _bounds(cell, delta, r, kept)
@@ -328,7 +398,49 @@ def _run(cell: Cell, delta: float, cells: Cells, null: Cells, seed: int, scenari
     gated = gate_kpis(stats, alpha=cell.alpha)
     verdict = gate_findings(gated).statistical or "INCONCLUSIVE"
     blocked = [g.decision == "BLOCK" for g in gated]
-    return Run(verdict, no_drop, lost, blocked[0], any(blocked[1:]), bounds)
+    run = Run(verdict, no_drop, lost, blocked[0], any(blocked[1:]), bounds)
+    if not scenario.missing or scenario.kpis > 1:
+        return run
+    return _with_g(run, cell, scenario, stats[0].paired, first, first_kept, sides, seeds[1])
+
+
+def _with_g(
+    run: Run,
+    cell: Cell,
+    scenario: Scenario,
+    r: PairedResult | None,
+    pairs: list[tuple[float, float]],
+    kept: list[tuple[float, float]],
+    sides: list[str],
+    boot_seed: int,
+) -> Run:
+    """G: the PR's lost results, where the base's survived, filled in as fails. SHIP needs the
+    filled-in test to SHIP too; BLOCK reads the kept pairs alone, so G never adds one."""
+    filled = kept + [(b, 0.0) for (b, _), s in zip(pairs, sides, strict=True) if s == "pr"]
+    g = (
+        paired_test(
+            [[b] for b, _ in filled],
+            [[p] for _, p in filled],
+            alpha=cell.alpha,
+            seed=boot_seed,
+            interval=scenario.interval,
+        )
+        if filled
+        else None
+    )
+    g_call = gate_findings(gate_kpis([_kpi("kpi1", g, cell)], alpha=cell.alpha)).statistical
+    decision: Decision = run.decision
+    if run.decision == "SHIP" and g_call != "SHIP":
+        decision = "INCONCLUSIVE"
+    pr_only, base_only = sides.count("pr"), sides.count("base")
+    return replace(
+        run,
+        g_decision=decision,
+        shift=g.delta - r.delta if g is not None and r is not None else 0.0,
+        pr_only=pr_only,
+        base_only=base_only,
+        fires=interim_fires(pr_only, base_only, cell.n, cell.margin),
+    )
 
 
 def arms_to_run(resolved: Resolved, seed: int) -> list[tuple[float, Cells, int]]:
@@ -369,6 +481,14 @@ def simulate_arm(
         scas=_calls([b[1] for b in bounds]),
         misses=_add([tuple(map(int, b[2])) for b in bounds]),
         rho_sum=sum(run.rho for run in runs),
+        g_calls=_calls([run.g_decision for run in runs if run.g_decision is not None]),
+        shift_sum=sum(run.shift for run in runs),
+        pr_only=sum(run.pr_only for run in runs),
+        base_only=sum(run.base_only for run in runs),
+        fired=_add([tuple(map(int, run.fires)) for run in runs]),
+        fired_ship=_add(
+            [tuple(int(f and run.decision == "SHIP") for f in run.fires) for run in runs]
+        ),
     )
 
 
@@ -396,6 +516,12 @@ def merge(parts: Sequence[ArmResult]) -> ArmResult:
         scas=_add([p.scas for p in parts]),
         misses=_add([p.misses for p in parts]),
         rho_sum=sum(p.rho_sum for p in parts),
+        g_calls=_add([p.g_calls for p in parts]),
+        shift_sum=sum(p.shift_sum for p in parts),
+        pr_only=sum(p.pr_only for p in parts),
+        base_only=sum(p.base_only for p in parts),
+        fired=_add([p.fired for p in parts]),
+        fired_ship=_add([p.fired_ship for p in parts]),
     )
 
 
@@ -628,6 +754,50 @@ def bounds_table(results: Sequence[CellResult | Skipped]) -> str:
     return "\n".join(lines)
 
 
+def loss_table(results: Sequence[CellResult | Skipped]) -> str:
+    """One row per arm of a lossy scenario: the calls today and with G, the wrong call's rate
+    both ways, G's mean shift in delta, the share lost on one side only, and per tolerance how
+    often the interim rule fires and the share of runs left to SHIP under it."""
+    head = [
+        "p",
+        "ρ",
+        "N",
+        "Δ",
+        "SHIP / BLOCK / INCONCLUSIVE",
+        "With G",
+        "Wrong call",
+        "Rate (Wilson 95%)",
+        "With G (Wilson 95%)",
+        "Mean Δ shift under G",
+        "Lost: PR only / base only",
+    ]
+    head += [f"Fires: {t}" for t in TOLERANCES] + [f"SHIP under: {t}" for t in TOLERANCES]
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    for out in results:
+        if isinstance(out, Skipped):
+            continue
+        r, c = out.resolved, out.resolved.cell
+        rho = f"{r.rho:.3f}" + (f" (clamped from {c.rho:g})" if r.clamped else "")
+        for a in out.arms:
+            wrong = "SHIP" if a.delta < -c.margin + 1e-9 else "BLOCK"
+            rates = []
+            for k in (a.ship, a.g_calls[0]) if wrong == "SHIP" else (a.block, a.g_calls[1]):
+                rate, _, (lo, hi) = mc_error(k, a.reps)
+                rates.append(f"{_pct(rate)} ({_pct(lo)}–{_pct(hi)})")
+            cases = a.reps * c.n
+            fires = [_pct(f / a.reps) for f in a.fired]
+            ships = [_pct((a.ship - f) / a.reps) for f in a.fired_ship]
+            lines.append(
+                f"| {c.p_base:g} | {rho} | {c.n} | {a.delta:+g} "
+                f"| {a.ship} / {a.block} / {a.inconclusive} "
+                f"| {' / '.join(map(str, a.g_calls))} | {wrong} | {' | '.join(rates)} "
+                f"| {a.shift_sum / a.reps:+.4f} "
+                f"| {_pct(a.pr_only / cases)} / {_pct(a.base_only / cases)} "
+                f"| {' | '.join(fires)} | {' | '.join(ships)} |"
+            )
+    return "\n".join(lines)
+
+
 def _grid_main(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m lgcov.gate_sim grid")
     parser.add_argument("reps", type=int, nargs="?", default=5000, help="runs per arm")
@@ -635,6 +805,9 @@ def _grid_main(argv: Sequence[str]) -> int:
     parser.add_argument("--workers", type=int, default=1, help="worker processes")
     parser.add_argument(
         "--scenario-reps", type=int, default=1000, help="runs per arm for the other scenarios"
+    )
+    parser.add_argument(
+        "--loss", action="store_true", help="only the lost-results scenarios, G and the tolerances"
     )
     args = parser.parse_args(argv)
     reps: int = args.reps
@@ -653,6 +826,18 @@ def _grid_main(argv: Sequence[str]) -> int:
                 if isinstance(why, str):
                     print(f"{what}: skipped arm delta={d:+g} of {r.cell}: {why}", file=sys.stderr)
     print(f"M1 grid: seed={seed}, margin m={_GATE.margin:g}, alpha={_GATE.alpha:g}", flush=True)
+    if args.loss:
+        for scenario in LOSS_SCENARIOS:
+            start = time.perf_counter()
+            results = run_grid(plan, scenario_reps, seed, workers, scenario=scenario)
+            took = time.perf_counter() - start
+            print(
+                f"\n## {scenario.name}: R={scenario_reps} per arm, {took:.0f} s on {workers} "
+                "workers\n"
+            )
+            print(loss_table(results), flush=True)
+            print(f"{scenario.name}: {took:.1f} s", file=sys.stderr)
+        return 0
     for scenario, r_ in ((MAIN, reps), *((s, scenario_reps) for s in SCENARIOS)):
         start = time.perf_counter()
         results = run_grid(graded if scenario.k > 1 else plan, r_, seed, workers, scenario=scenario)
