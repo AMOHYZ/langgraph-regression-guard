@@ -97,6 +97,7 @@ from lgcov.cassette import (
     judge_probes,
     judge_repeats,
     probe_steps,
+    probe_units,
     record,
     recording_from_json,
     recording_to_json,
@@ -403,8 +404,10 @@ def _replay_under(
     on_divergence: OnDivergence = "flag",
     budget: Budget | None = None,
     baseline: Sequence[Cassette] = (),
+    units: bool = False,
 ) -> Replay:
-    """`replay_run` with what lgcov.yaml says to mask. `baseline`: every run of the recording."""
+    """`replay_run` with what lgcov.yaml says to mask. `baseline`: every run of the recording.
+    T193: `units` records the units inside subgraphs on the fresh steps."""
     return replay_run(
         graph,
         run,
@@ -414,6 +417,7 @@ def _replay_under(
         budget,
         mask_volatile=cfg.mask_volatile_in_key,
         baseline=baseline,
+        units=units,
     )
 
 
@@ -1167,9 +1171,10 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
     serve = policy.rules.serve and not args.live
     budget.expected_live = unservable(graph, runs) if serve else sum(len(r.steps) for r in runs)
     agent_start = perf_counter()
+    units = any(s.units for r in runs for s in r.steps)  # T193: a baseline that holds units
     try:
         replays = [
-            _replay_under(cfg, graph, recorded, serve, args.on_divergence, budget, runs)
+            _replay_under(cfg, graph, recorded, serve, args.on_divergence, budget, runs, units)
             for recorded in runs
         ]
     except NodeError as exc:
@@ -1180,6 +1185,7 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
     except Exception as exc:  # replay itself: no node or router raised it
         return replace(run, harness_error=_harness_message("replay failed outside node code", exc))
     probes = probe_steps(graph, runs, changed_nodes(graph, runs))  # T162: offline, no verdict
+    probes += probe_units(graph, runs) if units else ()  # T193: units read the same way
     return replace(
         run,
         fresh=tuple(FreshRun(r.steps, r.calls, r.halt) for r in replays),

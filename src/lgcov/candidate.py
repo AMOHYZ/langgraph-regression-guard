@@ -85,16 +85,26 @@ def _run_body(run: FreshRun) -> dict[str, object]:
     }
 
 
+def _probe_body(probe: ProbeStep, schema: int) -> dict[str, object]:
+    body = {k: v for k, v in asdict(probe).items() if k in _PROBE}
+    if schema == 3:  # T193: by the unit's position down the tree
+        body["unit"] = [body.pop("step"), *(probe.inner or ())]
+    return body
+
+
 def candidate_to_json(run: CandidateRun) -> str:
     """TypeError or ValueError if a step can't be saved, as with a tuple for a dict's key. T193: it
-    writes schema 2, so no parts or repeats, and each probe by its step index."""
+    writes schema 2, no parts or repeats and each probe by its step index, unless a step holds
+    units or a probe is a unit's: then schema 3, with each probe by its unit's position."""
+    units = any(s.units for r in run.fresh for s in r.steps) or any(p.inner for p in run.probes)
+    schema = 3 if units else SCHEMA
     body: dict[str, object] = asdict(replace(run, head=None, fresh=(), probes=(), repeats=()))
     del body["fresh"], body["probes"], body["parts"], body["repeats"]
     body |= {
-        "schema": SCHEMA,
+        "schema": schema,
         "head": run.head.to_dict() if run.head else None,
         "runs": [_run_body(r) for r in run.fresh],
-        "probes": [{k: v for k, v in asdict(p).items() if k in _PROBE} for p in run.probes],
+        "probes": [_probe_body(p, schema) for p in run.probes],
     }
     return json.dumps(body, indent=2, default=_saved) + "\n"
 
