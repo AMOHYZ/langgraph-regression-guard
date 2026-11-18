@@ -1086,7 +1086,7 @@ def compared_run(
 ) -> Replay:
     """T179: one run's steps against its cassette. It only reads data, so the job that decides
     can do this with steps another job reports, without the graph."""
-    recorded = cassette.steps
+    recorded, steps = cassette.steps, fresh
     not_checked: tuple[str, ...] = ()
     if halt is not None:  # compare only what the run reached: each node's first k steps
         reached, seen = Counter(s.node for s in fresh), Counter[str]()
@@ -1097,8 +1097,10 @@ def compared_run(
                 seen[s.node] += 1
         later = [n for n in dict.fromkeys(s.node for s in cassette.steps) if n not in reached]
         not_checked = (halt.node, *(n for n in later if n != halt.node))
+    if any(s.units is not None for s in fresh):  # T193: the replay kept units, so compare them
+        recorded, fresh = with_units(recorded), with_units(fresh)
     # T168: a cassette saved before goto was kept has no route to compare a fresh one with.
-    routed = {s.node for s in cassette.steps if s.goto is not None}
+    routed = {s.node for s in with_units(cassette.steps) if s.goto is not None}
     expected = _by_node(recorded, ignore_paths, routed)
     actual = _by_node(fresh, ignore_paths, routed)
     drifts = tuple(
@@ -1106,7 +1108,17 @@ def compared_run(
         for n in sorted(expected.keys() | actual.keys())
         if expected.get(n) != actual.get(n)
     )
-    return Replay(drifts, tuple(fresh), tuple(calls), halt, not_checked)
+    return Replay(drifts, tuple(steps), tuple(calls), halt, not_checked)
+
+
+def with_units(steps: Sequence[Step]) -> list[Step]:
+    """T193: `steps` with the units inside each, as steps named by their path (`answer.respond`).
+    A step's units come just before it: they finished before it did."""
+    out: list[Step] = []
+    for s in steps:
+        out += [replace(u, node=f"{s.node}.{u.node}") for u in with_units(s.units or [])]
+        out.append(s)
+    return out
 
 
 def same_input(
@@ -1298,12 +1310,18 @@ def judge_probes(
     replay compares it? Pure. ValueError for a probe that matches no recorded step."""
     found: dict[str, Probe] = {}
     for p in probes:
-        if p.inner is not None or p.routed is not None:
-            continue  # T193, T221: a probe inside a step, or a router's: no label reads one yet
+        if p.routed is not None:
+            continue  # T221: a router's probe: no label reads one yet
         steps = runs[p.run].steps if 0 <= p.run < len(runs) else []
         recorded = steps[p.step] if 0 <= p.step < len(steps) else None
+        path = [recorded.node] if recorded else []
+        for k in p.inner or ():  # T193: down the units to the probed one
+            units = recorded.units or [] if recorded else []
+            recorded = units[k] if 0 <= k < len(units) else None
+            path += [recorded.node] if recorded else []
         if recorded is None or recorded.node != p.node:
             raise ValueError(f"a probe of `{p.node}` matches no recorded step")
+        name = ".".join(path)
         if p.raised:
             probe = Probe(None, p.raised)
         else:
@@ -1311,7 +1329,7 @@ def judge_probes(
             fresh = _compared(Step(p.node, p.output, goto=p.goto), ignore_paths, routed)
             was = _compared(recorded, ignore_paths, routed)
             probe = Probe(drift_exceeds_noise([was], [fresh]))
-        found[p.node] = _merged(found.get(p.node), probe)
+        found[name] = _merged(found.get(name), probe)
     return found
 
 

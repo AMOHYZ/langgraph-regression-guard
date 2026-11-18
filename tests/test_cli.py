@@ -628,6 +628,77 @@ def test_cli_ci_writes_a_schema_3_candidate_file_for_a_baseline_with_units(
     assert main(["ci", "--report", "two.md", "--candidate-in", "c.json"]) == one_job
 
 
+# T193, 3b-2: on a baseline with units, labels see them. The edited unit is root, by its path, and
+# its container gets no label: the unit explains its drift. In one job and in two.
+def _box_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("graph.py").write_text(BOX_GRAPH, encoding="utf-8")
+    Path("lgcov.yaml").write_text("graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n")
+    Path("inputs.json").write_text("[{}]", encoding="utf-8")
+    assert main(["record", "--inputs", "inputs.json", "--schema", "2"]) == 0
+    Path("graph.py").write_text(BOX_GRAPH.replace("A1", "A2"), encoding="utf-8")
+    assert main(["ci", "--report", "r.md", "--candidate-out", "c.json"]) == 0
+
+
+def _labels_in(report: str) -> dict[str, str]:
+    rows = [line.split(" | ") for line in Path(report).read_text("utf-8").splitlines()]
+    return {r[0].strip("|` "): r[1] for r in rows if len(r) == 3 and r[0].startswith("| `")}
+
+
+def test_ci_labels_the_edited_unit_root_and_its_container_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _box_edit(tmp_path, monkeypatch)
+    assert main(["ci", "--report", "one.md", "--github-output", "one.txt"]) == 1
+    two = ["--candidate-in", "c.json", "--github-output", "two.txt"]
+    assert main(["ci", "--report", "two.md", *two]) == 1
+    assert _labels_in("one.md") == _labels_in("two.md") == {"box.inside": "root"}
+    for out in ("one.txt", "two.txt"):  # the unit finished first
+        assert "first-drift=box.inside" in Path(out).read_text("utf-8").splitlines()
+
+
+def test_the_next_step_s_accept_command_works_for_a_root_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The comment says `accept --nodes box.inside`; accept re-records the step that holds it.
+    _box_edit(tmp_path, monkeypatch)
+    assert main(["ci", "--report", "one.md"]) == 1
+    assert "`lgcov cassette accept --nodes box.inside`" in Path("one.md").read_text("utf-8")
+    assert main(["cassette", "accept", "--nodes", "box.inside"]) == 0
+    (box,) = json.loads(Path("cassettes/baseline.json").read_text())["runs"][0]["steps"]
+    assert box["output"] == box["units"][0]["output"] == {"a": "A2"}
+
+
+def _forged(drop: bool, head: tuple[str, ...]) -> None:
+    # The real unit dropped, or kept undrifted with a fake one beside it; no probes.
+    body = json.loads(Path("c.json").read_text(encoding="utf-8"))
+    (box,) = body["runs"][0]["steps"]
+    (real,) = box["units"]
+    fake = {**real, "node": "fake"}
+    box["units"] = [] if drop else [{**real, "output": {"a": "A1"}}, fake]
+    body["probes"] = []
+    body["head"]["nodes"] += list(head)
+    Path("forged.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+@pytest.mark.parametrize("drop", [False, True], ids=["fake unit added", "real unit dropped"])
+@pytest.mark.parametrize("head", [(), ("box.inside", "box.fake")], ids=["as is", "names forged"])
+def test_a_forged_candidate_file_can_t_unblock_the_container_s_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drop: bool, head: tuple[str, ...]
+) -> None:
+    # The trust rules: the PR's code writes units and probes, so they can't turn the container's
+    # drift non-blocking. It keeps its label unless a unit inside is root, which blocks too.
+    _box_edit(tmp_path, monkeypatch)
+    _forged(drop, head)
+    assert main(["ci", "--report", "f.md", "--candidate-in", "forged.json"]) == 1
+    rows = _labels_in("f.md")
+    blocks = ("root", "inconclusive")
+    assert rows.get("box", "").startswith(blocks) or rows.get("box.inside") == "root"
+    assert not any(n.startswith("box.") and kind == "root" for n, kind in rows.items()) or (
+        "box" not in rows
+    )
+
+
 def test_cli_accept_cassette_dir_flag_overrides_config(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

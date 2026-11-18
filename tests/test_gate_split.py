@@ -326,7 +326,8 @@ def test_a_forged_probe_is_a_harness_error(pr: Path) -> None:
 
 def test_a_schema_3_file_decides_as_its_schema_2_twin(pr: Path) -> None:
     # T193: a candidate job on a later lgcov writes schema 3, as #116's wrote a key base refused.
-    # Units, probes by position, a probe inside a step and parts leave this job's verdict as it was.
+    # Probes by position and parts leave this job's verdict as it was. 3b-2: a probe inside a step
+    # is judged, so one of a unit base never recorded is refused, as any forged probe is.
     _write(pr, {"graph.py": TWO_ROOTS})
     assert _candidate() == 0
     code, report, outputs = _evaluate()
@@ -334,13 +335,15 @@ def test_a_schema_3_file_decides_as_its_schema_2_twin(pr: Path) -> None:
     body = json.loads(FILE.read_text("utf-8"))
     for probe in body["probes"]:
         probe["unit"] = [probe.pop("step")]
-    first = body["probes"][0]
-    body["runs"][first["run"]]["steps"][first["unit"][0]]["units"] = [{"node": "i", "output": 1}]
-    inner = {**first, "unit": [*first["unit"], 0], "node": "i"}
-    body |= {"schema": 3, "probes": [*body["probes"], inner], "parts": {}, "repeats": []}
+    body |= {"schema": 3, "parts": {}, "repeats": []}
     FILE.write_text(json.dumps(body), encoding="utf-8")
     again = _evaluate()
     assert (again[0], again[2], _normal(again[1])) == (code, outputs, _normal(report))
+    first = body["probes"][0]
+    body["probes"].append({**first, "unit": [*first["unit"], 0], "node": "i"})
+    FILE.write_text(json.dumps(body), encoding="utf-8")
+    forged = _evaluate()
+    assert forged[0] == 2 and "matches no recorded step" in forged[1]
 
 
 CODE_TAXONOMY = """\

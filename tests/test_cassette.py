@@ -683,11 +683,38 @@ def test_a_probe_that_matches_no_recorded_step_is_refused(forged: ProbeStep) -> 
         judge_probes([base], [forged])
 
 
-def test_judge_probes_leaves_a_probe_inside_a_step_or_of_a_router_to_a_later_lgcov() -> None:
-    # T193, T221: candidate schema 3 can hold either. No label reads one yet, so neither decides.
+def test_judge_probes_leaves_a_probe_of_a_router_to_a_later_lgcov() -> None:
+    # T221: candidate schema 3 can hold one. No label reads it yet, so it doesn't decide.
     base = record(_one_node(lambda s: s), {"x": 1})
-    inner, router = ProbeStep(0, 0, "inner", 1, inner=[0]), ProbeStep(0, 0, "n", routed=["b"])
-    assert judge_probes([base], [inner, router]) == {}
+    assert judge_probes([base], [ProbeStep(0, 0, "n", routed=["b"])]) == {}
+
+
+# T193, 3b-2: a unit inside a step is compared and probed by its path, `box.inside`.
+BOXED = Cassette({}, [Step("box", {"a": "A1"}, units=[Step("inside", {"a": "A1"}, {}, "c1")])])
+
+
+def test_judge_probes_judges_a_unit_s_probe_by_its_path() -> None:
+    same, edited = (ProbeStep(0, 0, "inside", {"a": a}, inner=[0]) for a in ("A1", "A2"))
+    assert judge_probes([BOXED], [same]) == {"box.inside": Probe(False)}
+    assert judge_probes([BOXED], [edited]) == {"box.inside": Probe(True)}
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [ProbeStep(0, 0, "inside", inner=[1]), ProbeStep(0, 0, "other", inner=[0])],
+    ids=["no such unit", "another unit's name"],
+)
+def test_a_unit_s_probe_that_matches_no_recorded_unit_is_refused(forged: ProbeStep) -> None:
+    with pytest.raises(ValueError, match="matches no recorded step"):
+        judge_probes([BOXED], [forged])
+
+
+def test_compared_run_compares_units_by_path_when_the_replay_kept_them() -> None:
+    fresh = [Step("box", {"a": "A2"}, units=[Step("inside", {"a": "A2"}, {}, "c2")])]
+    assert {d.node for d in compared_run(BOXED, fresh, [], None).drifts} == {"box", "box.inside"}
+    # a replay without unit capture says nothing about units
+    blind = [Step("box", {"a": "A2"})]
+    assert {d.node for d in compared_run(BOXED, blind, [], None).drifts} == {"box"}
 
 
 # T175: a conditional edge's router is in no node's fingerprint, so its source node's steps keep

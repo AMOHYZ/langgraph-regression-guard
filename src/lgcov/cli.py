@@ -108,6 +108,7 @@ from lgcov.cassette import (
     runs_to_json,
     same_input,
     unservable,
+    with_units,
 )
 from lgcov.ci_report import CiResult, Tally, Timing, render_ci_report
 from lgcov.code_judges import code_judge, unknown_names
@@ -462,7 +463,13 @@ def _node_labels(
     Root by fingerprint and probe (`classify`, T162), then what a run's order, routers and inputs
     add (`explain_runs`: T175, T230). `quiet` (T211): nodes under their noise, which get no label
     and aren't a run's first drifted node. `graphs` (T238): base's and head's node names, None for
-    one that isn't known."""
+    one that isn't known.
+
+    T193: units count as nodes, by their path (`answer.respond`), on both sides (`with_units`). A
+    container gets no label when a unit inside it is root: the unit explains its drift."""
+    top = {s.node for steps in (*(r.steps for r in runs), *fresh) for s in steps}
+    runs = [replace(r, steps=with_units(r.steps)) for r in runs]
+    fresh = [with_units(steps) for steps in fresh]
     codes = (
         {s.node: s.code for r in runs for s in r.steps},
         {s.node: s.code for steps in fresh for s in steps},
@@ -477,15 +484,30 @@ def _node_labels(
     ran = [[s.node for s in r.steps] for r in runs]
     by_node = classify(set().union(*nodes), codes, probes, graphs)
     same = [same_input(r, f, ignore_paths) for r, f in zip(runs, fresh, strict=True)]
-    return explain_runs(
+    labels = explain_runs(
         by_node, [None if f in quiet else f for f in firsts], nodes, routers, ran, same
+    )
+    # The trust rules: the PR's code writes the units, so only a root unit, which blocks too, can
+    # take its container's label away. A unit base never recorded is never propagated (`classify`).
+    return _without_containers(labels, set(labels.root) - top)
+
+
+def _without_containers(labels: NodeLabels, explaining: Collection[str]) -> NodeLabels:
+    """T193: `labels` less each container of a unit in `explaining`, which explains its drift."""
+    gone = {n.rsplit(".", k)[0] for n in explaining for k in range(1, n.count(".") + 1)}
+    return NodeLabels(
+        tuple(n for n in labels.root if n not in gone),
+        tuple(n for n in labels.propagated if n not in gone),
+        {n: why for n, why in labels.inconclusive.items() if n not in gone},
+        {n: k for n, k in labels.routing.items() if n not in gone},
     )
 
 
 def _run_root(run: Cassette, run_drifts: list[Drift]) -> str | None:
     drifted = {d.node for d in run_drifts}
     # nodes the change added are not in the baseline steps; they sort last
-    ordered = [s.node for s in run.steps if s.node in drifted] + sorted(drifted)
+    # T193: a unit, by its path, before the step that holds it
+    ordered = [s.node for s in with_units(run.steps) if s.node in drifted] + sorted(drifted)
     return ordered[0] if ordered else None
 
 
@@ -506,6 +528,9 @@ def _replay_markdown(
         return [*lines, f"No cassette drift ({len(runs)} runs)."]
     lines += ["| node | drift | runs |", "|---|---|---|"]
     for node in sorted({*counts, *routing}):
+        labelled = {*roots, *unsure, *(labels.propagated if labels else ())}
+        if labels and node not in labelled and any(r.startswith(f"{node}.") for r in roots):
+            continue  # T193: a container a root unit explains gets no label
         kind = "root" if node in roots else "propagated"
         kind = f"inconclusive ({unsure[node]})" if node in unsure else kind
         kind = f"root ({ROUTING.format(node)})" if node in routing else kind
@@ -941,11 +966,14 @@ def _cassette_accept(argv: list[str]) -> int:
                 print("lgcov cassette accept: no drifted nodes", file=sys.stderr)
                 return EXIT_NOT_DRIFTED
         else:
-            nodes = named
-            known = {s.node for r in (*runs, *fresh) for s in r.steps}
-            unknown = sorted(nodes - known)
+            # T193: a unit, by its path, re-records the step that holds it
+            known = {
+                u.node: s.node for r in (*runs, *fresh) for s in r.steps for u in with_units([s])
+            }
+            unknown = sorted(named - known.keys())
             if unknown:
                 raise ValueError(f"unknown node {unknown[0]!r}; known: {sorted(known)}")
+            nodes = {known[n] for n in named}
         results = [
             accept_nodes(b, f, nodes, cfg.ignore_paths) for b, f in zip(runs, fresh, strict=True)
         ]
@@ -1261,7 +1289,9 @@ def _evaluate(
     blocking = {*labels.root, *labels.inconclusive}
     root, downstream = sorted(blocking), list(labels.propagated)
     # T199: the comment's tally line: each run's root and inconclusive nodes, in run order.
-    in_order = [s.node for r, n in zip(runs, nodes, strict=True) for s in r.steps if s.node in n]
+    in_order = [
+        s.node for r, n in zip(runs, nodes, strict=True) for s in with_units(r.steps) if s.node in n
+    ]
     named = dict.fromkeys(n for n in [*in_order, *root] if n in blocking)
     tally = Tally(len(runs), sum(1 for d in drifts if d), tuple(named))
     # T083: coverage of the runs replay just did; nothing executes again for it.
