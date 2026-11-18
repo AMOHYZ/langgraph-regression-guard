@@ -6,8 +6,8 @@ the job that decides: `report` in this repo's own workflow.
 [Why, and how](#the-bots-commit-has-no-gate-result).
 
 **Built.** In this repo the workflow below runs the three commands. Another repo gets them from
-the first release after 0.4.0, which ships `review/action.yml`. `override` needs a report written
-by an lgcov that lists the judged cases, which the same release brings.
+lgcov 0.5.0 or later, which ships `review/action.yml`. `override` needs a report written
+by an lgcov that lists the judged cases, which 0.5.0 brings.
 
 A maintainer answers lgcov's PR report with a comment, and a workflow turns the comment into one
 commit on the PR branch:
