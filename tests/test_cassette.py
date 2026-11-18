@@ -21,9 +21,12 @@ from fixtures.graphs import (
     AskModel,
     S,
     _noop,
+    _prep_edited,
+    _second_edited,
     ask,
     async_command_subgraph,
     conditional,
+    counted_subgraph,
     fan_out_send,
     fan_out_to_subgraph,
     graph_inside_node,
@@ -44,6 +47,7 @@ from lgcov.cassette import (
     Cassette,
     ProbeStep,
     Recording,
+    Replay,
     Step,
     _plain,
     _router_prints,
@@ -873,7 +877,65 @@ def test_a_recording_with_units_replays_as_its_twin() -> None:
         replay_run(graph, record(graph, {"x": 1}, units=u), serve=True) for u in (False, True)
     ]
     calls = [[(c.node, c.how) for c in r.calls] for r in replays]
-    assert calls[0] == calls[1] and replays[0].drifts == replays[1].drifts
+    assert replays[0].drifts == replays[1].drifts
+    # 3a-2: the same top-level calls, and the units inside `inner` served too
+    assert calls[1] == [*calls[0], ("inner.a", "served"), ("inner.b", "served")]
+
+
+# T193, 3a-2: replay serves a unit inside a subgraph as it serves a node: when its code and its
+# masked input match, it returns the recorded output and the node doesn't run.
+def _how(replay: Replay) -> dict[str, str]:
+    return {c.node: c.how for c in replay.calls}
+
+
+def test_replay_serves_the_units_inside_a_subgraph() -> None:
+    cassette = record(counted_subgraph(), {"x": 1}, units=True)
+    replayed = replay_run(counted_subgraph(), cassette, serve=True)
+    assert replayed.drifts == ()
+    assert _how(replayed) == {"prep": "served", "inner.first": "served", "inner.second": "served"}
+
+
+def test_a_changed_unit_runs_live_and_the_rest_are_still_served() -> None:
+    cassette = record(counted_subgraph(), {"x": 1}, units=True)
+    replayed = replay_run(counted_subgraph(_second_edited), cassette, serve=True)
+    assert (_how(replayed)["inner.first"], _how(replayed)["inner.second"]) == ("served", "live")
+    assert [d.node for d in replayed.drifts] == ["inner"]
+
+
+def test_a_unit_whose_input_changed_runs_live_on_it() -> None:
+    cassette = record(counted_subgraph(), {"x": 1}, units=True)
+    replayed = replay_run(counted_subgraph(prep=_prep_edited), cassette, serve=True)
+    # each runs on what the node before it returned live
+    assert (_how(replayed)["inner.first"], _how(replayed)["inner.second"]) == (
+        "diverged",
+        "after_divergence",
+    )
+
+
+def test_on_divergence_fail_halts_at_a_unit_inside_a_subgraph() -> None:
+    cassette = record(counted_subgraph(), {"x": 1}, units=True)
+    graph = counted_subgraph(prep=_prep_edited)
+    replayed = replay_run(graph, cassette, serve=True, on_divergence="fail")
+    assert replayed.halt is not None and replayed.halt.node == "inner.first"
+
+
+def test_parallel_runs_of_a_subgraph_each_serve_their_own_units() -> None:
+    cassette = record(fan_out_to_subgraph(), {"items": []}, units=True)
+    replayed = replay_run(fan_out_to_subgraph(), cassette, serve=True)
+    assert [c.how for c in replayed.calls if c.node == "inner.times_ten"] == ["served"] * 3
+    assert replayed.drifts == ()
+
+
+def test_an_async_subgraph_s_units_are_served() -> None:
+    cassette = record(async_command_subgraph(), {"x": 1}, units=True)
+    replayed = replay_run(async_command_subgraph(), cassette, serve=True)
+    assert _how(replayed)["inner.a"] == "served" and replayed.drifts == ()
+
+
+def test_a_recording_without_units_still_runs_a_subgraph_live() -> None:
+    cassette = record(counted_subgraph(), {"x": 1})
+    replayed = replay_run(counted_subgraph(), cassette, serve=True)
+    assert "inner.first" not in _how(replayed)  # its nodes aren't wrapped, so they ran live
 
 
 # T211: repeats run a node live, K times on each input base recorded; `judge_repeats` compares

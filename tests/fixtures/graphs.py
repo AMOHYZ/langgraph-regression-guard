@@ -1,6 +1,6 @@
 import operator
 from dataclasses import dataclass
-from typing import Annotated, Literal, TypedDict, cast
+from typing import Annotated, Literal, Protocol, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -180,6 +180,43 @@ def fan_out_to_subgraph() -> CompiledStateGraph[Items]:
     g.add_node("inner", sub.compile())
     g.add_edge(START, "plan")
     g.add_conditional_edges("plan", _each, ["inner"])
+    g.add_edge("inner", END)
+    return g.compile()
+
+
+# T193, 3a-2: a subgraph with two plain nodes, and edits a PR could make around it.
+def _first(state: S) -> S:
+    return {"x": state.get("x", 0) + 1}
+
+
+def _second(state: S) -> S:
+    return {"x": state.get("x", 0) * 10}
+
+
+def _second_edited(state: S) -> S:  # a PR that edits the subgraph's second node
+    return {"x": state.get("x", 0) * 100}
+
+
+def _prep_edited(state: S) -> S:  # a PR that edits what the subgraph gets
+    return {"x": state.get("x", 0) + 5}
+
+
+class _Node(Protocol):  # LangGraph's node protocol names the argument `state`
+    def __call__(self, state: S) -> S: ...
+
+
+def counted_subgraph(second: _Node = _second, prep: _Node = _noop) -> CompiledStateGraph[S]:
+    sub = StateGraph(S)
+    sub.add_node("first", _first)
+    sub.add_node("second", second)
+    sub.add_edge(START, "first")
+    sub.add_edge("first", "second")
+    sub.add_edge("second", END)
+    g = StateGraph(S)
+    g.add_node("prep", prep)
+    g.add_node("inner", sub.compile())
+    g.add_edge(START, "prep")
+    g.add_edge("prep", "inner")
     g.add_edge("inner", END)
     return g.compile()
 

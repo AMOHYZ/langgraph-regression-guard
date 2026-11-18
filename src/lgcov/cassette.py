@@ -641,6 +641,18 @@ def _within(update: Any, result: Any) -> bool:
         return False
 
 
+def _inside(steps: Sequence[Step], prefix: str = "") -> list[Step]:
+    """T193: the units of `steps`, at any depth, each named with its subgraph's
+    (`answer.respond`), as `_run` names the call it serves."""
+    found: list[Step] = []
+    for step in steps:
+        for unit in step.units or ():
+            name = f"{prefix}{step.node}.{unit.node}"
+            found.append(replace(unit, node=name, units=None))
+            found += _inside([replace(unit, node=name)])
+    return found
+
+
 @dataclass
 class _Unit:
     step: Step
@@ -776,8 +788,13 @@ def _run(
 
     T193: `units` also records each plain node inside a subgraph, wrapped as a top-level one, and
     puts what it streamed under its subgraph's step (`_Units`). The run streams subgraphs then.
+    A served step's units are served the same way, by their name with their subgraph's
+    (`answer.respond`): a subgraph whose step has units gets its plain nodes wrapped.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
+    inside = _inside(served)  # T193: the units of served steps, named with their subgraph's
+    boxed = {s.node.split(".")[0] for s in inside}  # the top-level subgraphs they ran in
+    served = [*served, *inside]
     unused = [(s, _key(s.input, ignore_paths, mask_volatile)) for s in served if s.code is not None]
     recorded = {(s.node, s.code) for s in served if s.code is not None}
     # node, input, returned, fingerprint, and T193: the namespace it ran in
@@ -885,7 +902,8 @@ def _run(
 
     for name, spec in original.items():  # T109: a subgraph's errors name its own node
         if isinstance(getattr(spec, "bound", None), Pregel):
-            inner = _attributed(spec.bound, f"{name}.", failed, as_unit if tree else None)
+            unit = as_unit if tree or name in boxed else None
+            inner = _attributed(spec.bound, f"{name}.", failed, unit)
             nodes[name] = spec.copy({"bound": inner})
     routers = _routers(graph)
     routed = _router_prints(graph, recorded=[*served, *like])
