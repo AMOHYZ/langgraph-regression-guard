@@ -3,6 +3,8 @@ example lines in docs/review.md, hostile first lines, and the issue_comment even
 
 import copy
 import re
+from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,11 +17,19 @@ from lgcov.review_command import (
     Command,
     CommandError,
     CommentEvent,
+    FetchContext,
     Override,
+    Pull,
+    Refusal,
     Reject,
+    Report,
+    command_from_json,
+    command_to_json,
     comment_event,
+    local_commands,
     may_command,
     parse_command,
+    refusal,
 )
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "review.md"
@@ -316,3 +326,123 @@ def test_anyone_else_may_not(association: str) -> None:
 )
 def test_a_bot_an_issue_an_edit_or_a_deletion_starts_nothing(event: dict[str, object]) -> None:
     assert not may_command(comment_event(event))
+
+
+# T186, PR 6: what fetch checks before it reads anything else (docs/review.md, "When the bot
+# refuses"). A context is the API's answers, already read; refusal is pure.
+H = "a" * 40
+PULL = Pull(
+    number=12,
+    state="open",
+    merged=False,
+    head_repo="octo-org/agent",
+    head_ref="feat/x",
+    head_sha=H,
+    base_sha="b" * 40,
+    default_branch="main",
+)
+REPORT = Report(
+    artifact_id=7,
+    expired=False,
+    artifact_updated="2026-11-17T10:20:00Z",
+    run_status="completed",
+    run_event="pull_request",
+    run_head_sha=H,
+    run_updated="2026-11-17T10:21:00Z",
+    base_sha="b" * 40,
+)
+
+
+ACCEPT = Accept(("respond",))
+
+
+def _context(
+    command: Command = ACCEPT, changes: Mapping[str, object] | None = None
+) -> FetchContext:
+    context = FetchContext(
+        event=comment_event(_event()),  # posted 10:25:30
+        command=command,
+        repo="octo-org/agent",
+        permission="write",
+        body_now="/lgcov accept respond",
+        pull=PULL,
+        changed=("graph.py", "cassettes/baseline.json"),
+        changed_complete=True,
+        report=REPORT,
+    )
+    # Any: replace() can't check a mapping's values against the fields; each test names real ones
+    return replace(context, **(changes or {}))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("command", [Accept(("respond",)), Accept(None), Reject()])
+def test_a_maintainer_s_fresh_command_on_a_reported_head_goes_ahead(command: Command) -> None:
+    assert refusal(_context(command)) is None
+
+
+def test_reject_needs_no_report() -> None:
+    assert refusal(_context(Reject(), {"report": None})) is None
+
+
+@pytest.mark.parametrize(
+    ("changes", "why", "local"),
+    [
+        ({"permission": "read"}, "can't push to this repo", False),
+        ({"permission": "triage"}, "can't push to this repo", False),
+        ({"body_now": None}, "was deleted", False),
+        ({"body_now": "/lgcov accept all"}, "was edited after it was posted", False),
+        ({"pull": replace(PULL, state="closed")}, "is closed", False),
+        ({"pull": replace(PULL, merged=True)}, "is closed", False),
+        ({"pull": replace(PULL, head_repo="someone/fork")}, "comes from a fork", True),
+        ({"pull": replace(PULL, head_repo="")}, "comes from a fork", True),
+        ({"pull": replace(PULL, head_ref="main")}, "head is the default branch", False),
+        ({"changed": (".github/workflows/x.yml",)}, "touches .github/ or an action file", True),
+        ({"changed": ("deep/dir/action.yaml",)}, "touches .github/ or an action file", True),
+        ({"changed_complete": False}, "more files than GitHub lists", True),
+        ({"report": None}, "no lgcov report for `aaaaaaa`", False),
+        ({"report": replace(REPORT, expired=True)}, "has expired", False),
+        ({"report": replace(REPORT, run_status="in_progress")}, "no finished report", False),
+        ({"report": replace(REPORT, run_event="push")}, "no finished report", False),
+        ({"report": replace(REPORT, run_head_sha="c" * 40)}, "no lgcov report for", False),
+        (
+            {"report": replace(REPORT, run_updated="2026-11-17T10:26:00Z")},
+            "changed after your comment",
+            False,
+        ),
+        (
+            {"report": replace(REPORT, artifact_updated="2026-11-17T10:25:31Z")},
+            "changed after your comment",
+            False,
+        ),
+    ],
+)
+def test_each_reason_to_refuse(changes: dict[str, object], why: str, local: bool) -> None:
+    refused = refusal(_context(changes=changes))
+    assert refused is not None and why in refused.reason, refused
+    assert refused.local == local
+
+
+def test_a_refusal_never_names_a_path_the_pr_chose() -> None:
+    refused = refusal(_context(changes={"changed": (".github/@team![x](http://e.example).yml",)}))
+    assert refused is not None and "@team" not in refused.reason and "http" not in refused.reason
+
+
+@pytest.mark.parametrize(
+    ("command", "lines"),
+    [
+        (Accept(("respond", "tool")), ["lgcov cassette accept --nodes respond,tool"]),
+        (Accept(None), ["lgcov cassette accept --all-drifted"]),
+        (Reject(), ["lgcov review reject --base-dir <checkout of the base>"]),
+    ],
+)
+def test_the_local_commands_for_a_refused_command(command: Command, lines: list[str]) -> None:
+    text = local_commands(command)
+    assert all(f"`{line}`" in text for line in lines)
+
+
+@pytest.mark.parametrize("command", [*RUNS.values()])
+def test_a_command_survives_the_round_trip(command: Command) -> None:
+    assert command_from_json(command_to_json(command)) == command
+
+
+def test_refusal_is_a_reason_and_whether_to_give_the_local_commands() -> None:
+    assert Refusal("x") == Refusal("x", local=False)

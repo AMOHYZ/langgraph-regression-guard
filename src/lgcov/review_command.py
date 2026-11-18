@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
+
+from lgcov.review import unwritable
 
 PREFIX = "/lgcov "
 MAX_LINE = 300  # characters in the first line
@@ -200,3 +203,147 @@ def may_command(event: CommentEvent) -> bool:
         and event.author_type == "User"
         and event.association in ASSOCIATIONS
     )
+
+
+# T186, PR 6: what `lgcov review fetch` checks before it reads the PR's files. The context is the
+# API's answers, already read, so the rules are pure (docs/review.md, "When the bot refuses").
+PERMITTED = ("admin", "maintain", "write")  # role names that can push
+
+
+@dataclass(frozen=True)
+class Pull:
+    number: int
+    state: str  # open or closed
+    merged: bool
+    head_repo: str  # owner/name; "" when the fork is gone
+    head_ref: str
+    head_sha: str
+    base_sha: str
+    default_branch: str
+
+
+@dataclass(frozen=True)
+class Report:
+    """The newest `lgcov-candidate` artifact for the PR's head, and the run that made it."""
+
+    artifact_id: int
+    expired: bool
+    artifact_updated: str  # as GitHub writes times: 2026-11-17T10:25:30Z
+    run_status: str
+    run_event: str
+    run_head_sha: str
+    run_updated: str
+    base_sha: str  # the base the run graded against, whose policy the command reads
+
+
+@dataclass(frozen=True)
+class FetchContext:
+    event: CommentEvent
+    command: Command
+    repo: str  # owner/name, the repo the workflow runs in
+    permission: str  # the commenter's role name: admin, maintain, write, triage, read, none
+    body_now: str | None  # the comment as it reads now; None when it was deleted
+    pull: Pull
+    changed: tuple[str, ...]  # each changed file's path, and its old path for a rename
+    changed_complete: bool  # False when GitHub's list stopped at its cap
+    report: Report | None
+
+
+@dataclass(frozen=True)
+class Refusal:
+    reason: str
+    local: bool = False  # the reply should give the commands to run locally instead
+
+
+def _after(time: str, than: str) -> bool:
+    return datetime.fromisoformat(time) > datetime.fromisoformat(than)
+
+
+def refusal(context: FetchContext) -> Refusal | None:
+    """Why the bot won't act on this command, in the order docs/review.md lists them; None when
+    it may go on. A reason never repeats a path or a name the PR chose."""
+    event, pull, report = context.event, context.pull, context.report
+    if context.permission not in PERMITTED:
+        return Refusal("the commenter can't push to this repo, so the bot won't act for them")
+    if context.body_now is None:
+        return Refusal("the comment was deleted")
+    if context.body_now != event.body:
+        return Refusal("the comment was edited after it was posted: post a new one")
+    if pull.state != "open" or pull.merged:
+        return Refusal("the PR is closed")
+    if pull.head_repo != context.repo:
+        return Refusal("the PR comes from a fork, and the workflow's token can't push there", True)
+    if pull.head_ref == pull.default_branch:
+        return Refusal("the PR's head is the default branch")
+    if not context.changed_complete:
+        return Refusal(
+            "the PR changes more files than GitHub lists, so the bot can't check them", True
+        )
+    if any(unwritable(path) for path in context.changed):
+        return Refusal(
+            "the PR touches .github/ or an action file, so its own runs could say anything", True
+        )
+    if isinstance(context.command, Reject):
+        return None
+    short = pull.head_sha[:7]
+    if report is None or report.run_head_sha != pull.head_sha:
+        return Refusal(f"there is no lgcov report for `{short}` yet: push, or re-run the report")
+    if report.expired:
+        return Refusal(f"the report's file for `{short}` has expired: re-run the report")
+    if report.run_status != "completed" or report.run_event != "pull_request":
+        return Refusal(f"there is no finished report run for `{short}` yet")
+    if _after(report.run_updated, event.created_at) or _after(
+        report.artifact_updated, event.created_at
+    ):
+        return Refusal(
+            f"the report for `{short}` changed after your comment: read it again, then comment"
+        )
+    return None
+
+
+def local_commands(command: Command) -> str:
+    """What to run in a checkout of the PR instead, for a reply that can't act."""
+    if isinstance(command, Accept):
+        which = "--all-drifted" if command.nodes is None else "--nodes " + ",".join(command.nodes)
+        line = f"lgcov cassette accept {which}"
+    elif isinstance(command, Reject):
+        line = "lgcov review reject --base-dir <checkout of the base>"
+    else:
+        line = (
+            f"lgcov review override --kpi {command.kpi} --case-id {command.case} "
+            f"--human-label {command.label} --judge-label <what the judge said> --reviewer <you>"
+        )
+    return f"Run it in a checkout of the PR instead, then push: `{line}`"
+
+
+def command_to_json(command: Command) -> dict[str, object]:
+    if isinstance(command, Accept):
+        return {"verb": "accept", "nodes": None if command.nodes is None else list(command.nodes)}
+    if isinstance(command, Override):
+        return {
+            "verb": "override",
+            "kpi": command.kpi,
+            "case": command.case,
+            "label": command.label,
+        }
+    return {"verb": "reject"}
+
+
+def command_from_json(raw: object) -> Command:
+    """ValueError for anything command_to_json didn't write."""
+    if not isinstance(raw, dict):
+        raise ValueError("not a command")
+    verb = raw.get("verb")
+    if verb == "reject" and raw.keys() == {"verb"}:
+        return Reject()
+    if verb == "accept" and raw.keys() == {"verb", "nodes"}:
+        nodes = raw["nodes"]
+        if nodes is None:
+            return Accept(None)
+        if isinstance(nodes, list) and nodes and all(isinstance(n, str) for n in nodes):
+            return Accept(tuple(nodes))
+    if verb == "override" and raw.keys() == {"verb", "kpi", "case", "label"}:
+        kpi, case, label = raw["kpi"], raw["case"], raw["label"]
+        if isinstance(kpi, str) and isinstance(case, str) and isinstance(label, str):
+            return Override(kpi, case, label)
+    raise ValueError(f"not a command: {raw!r}")
