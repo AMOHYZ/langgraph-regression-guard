@@ -143,6 +143,8 @@ from lgcov.gate_round import (
 from lgcov.gate_round import lock_round as lock_gate_round
 from lgcov.gate_round import parse_round as parse_gate_round
 from lgcov.gate_round import round_to_yaml as gate_round_to_yaml
+from lgcov.github_api import API_URL as GITHUB_API
+from lgcov.github_api import Client, GitHub
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
@@ -167,6 +169,8 @@ from lgcov.metrics import (
 )
 from lgcov.normalize import normalize
 from lgcov.review import Changes, ReviewDecision, apply_decision, reject_changes, unwritable
+from lgcov.review_command import comment_event
+from lgcov.review_fetch import fetch
 from lgcov.sampling import (
     KpiStats,
     gate_exit_code,
@@ -2174,7 +2178,8 @@ def _calibrate_cmd(argv: list[str]) -> int:
 _REVIEW_USAGE = (
     "usage: lgcov review override --kpi KPI --case-id CASE --judge-label LABEL "
     "--human-label LABEL --reviewer NAME [--note TEXT]\n"
-    "       lgcov review reject --base-dir DIR [--config FILE] [--cassette-dir DIR]"
+    "       lgcov review reject --base-dir DIR [--config FILE] [--cassette-dir DIR]\n"
+    "       lgcov review fetch --event FILE --out DIR [--cassette-dir DIR]"
 )
 
 
@@ -2486,12 +2491,43 @@ def _review_reject(argv: list[str]) -> int:
     return 0
 
 
+def _review_fetch(argv: list[str], client: Client | None = None) -> int:
+    """T186: the half of a comment command that holds the token and only reads. It fills --out
+    with what `review apply` needs, or with reply.md alone (docs/review.md). Exit 2 when it can't
+    start or GitHub can't be reached; the reply says so too."""
+    ap = argparse.ArgumentParser(prog="lgcov review fetch")
+    ap.add_argument("--event", required=True, help="the issue_comment event: $GITHUB_EVENT_PATH")
+    ap.add_argument("--out", required=True, help="an empty folder to fill")
+    ap.add_argument("--cassette-dir", help="overrides the base's cassette_dir")
+    args = ap.parse_args(argv)
+    out = Path(args.out)
+    try:
+        token = os.environ.get("GH_TOKEN", "")
+        if not token:
+            raise ValueError("GH_TOKEN isn't set")
+        event = comment_event(json.loads(Path(args.event).read_text(encoding="utf-8")))
+        out.mkdir(parents=True, exist_ok=True)
+        if any(out.iterdir()):
+            raise ValueError(f"{out} isn't empty")
+    except (OSError, ValueError) as exc:
+        print(f"lgcov review fetch: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    gh = GitHub(token, os.environ.get("GITHUB_API_URL") or GITHUB_API, client)
+    code = fetch(gh, event, out, args.cassette_dir).code
+    # only lgcov's own words: the runner obeys `::` commands in a job's output
+    state = "refused, see reply.md" if (out / "reply.md").exists() else "not a command"
+    print(f"lgcov review fetch: {'ready' if (out / 'command.json').exists() else state}")
+    return code
+
+
 def _review_cmd(argv: list[str]) -> int:
     """T102: override a judge's verdict on one case. The override is a label; when the
     human disagrees, the case is saved so the judge is re-checked on it on every PR; and
     the judge's band is recalculated."""
     if argv[:1] == ["reject"]:  # T186
         return _review_reject(argv[1:])
+    if argv[:1] == ["fetch"]:
+        return _review_fetch(argv[1:])
     if argv[:1] != ["override"]:
         print(_REVIEW_USAGE, file=sys.stderr)
         return EXIT_ERROR
@@ -3415,6 +3451,7 @@ commands:
   calibrate         compare each judge with human labels and set its band
   review override   override a judge's verdict on one case
   review reject     put cassette_dir back to the base's, undoing an accept
+  review fetch      read a review comment's command and its data (docs/review.md)
   taxonomy check    validate a taxonomy and print its KPIs
   taxonomy draft    draft failure modes and KPIs from traces, each pending review
   taxonomy approve  approve one drafted entry
