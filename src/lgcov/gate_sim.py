@@ -29,7 +29,7 @@ import time
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
-from statistics import NormalDist
+from statistics import NormalDist, fmean, stdev
 from typing import Literal
 
 from lgcov.config import GateConfig
@@ -44,6 +44,7 @@ Cells = tuple[float, float, float, float]  # both pass, base only, PR only, both
 POWER_DELTAS = (-0.10, 0.05)  # T151 part 2: BLOCK is right at -0.10, SHIP at +0.05
 GRID_N = (50, 100, 200, 800)
 GRADED_SIGMA = 1.0  # the spread of cases' latent effects in the graded model, probit scale
+STUDENTIZED_RESAMPLES = 999  # (B + 1) x 0.025 is a whole number: the 25th and 975th of the t*s
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,10 @@ class ArmResult:
     scas: tuple[int, int, int] = (0, 0, 0)
     misses: tuple[int, int, int] = (0, 0, 0)
     rho_sum: float = 0.0  # graded: the observed correlation of case means, over all runs
+    # Graded: the calls with the studentized CI in place of BCa, and how often each lower bound
+    # sat above the true delta (the gate's BCa, the studentized one)
+    stud: tuple[int, int, int] = (0, 0, 0)
+    graded_misses: tuple[int, int] = (0, 0)
     # Lost results, one KPI: G's calls (SHIP needs the PR's lost results filled in as fails to
     # SHIP too), its shift in delta, results lost on one side only, and per tolerance the runs
     # it fires on and the SHIPs it would turn into needs_human
@@ -160,6 +165,8 @@ class Run:
     other_block: bool
     bounds: Bounds | None = None  # one KPI only
     rho: float = 0.0  # graded: the observed correlation of case means
+    stud: Decision | None = None  # graded: the call with the studentized CI
+    graded_misses: tuple[bool, bool] = (False, False)
     g_decision: Decision | None = None  # with G; None outside a lossy one-KPI scenario
     shift: float = 0.0  # G's delta minus the kept pairs' delta
     pr_only: int = 0
@@ -269,6 +276,41 @@ def graded_cases(
     return base, new
 
 
+def studentized_ci(
+    diffs: Sequence[float],
+    level: float = 0.95,
+    resamples: int = STUDENTIZED_RESAMPLES,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """The bootstrap-t interval for the mean of paired differences (B. Efron and R. J.
+    Tibshirani, An Introduction to the Bootstrap, Chapman & Hall, 1993, chapter 12.5): each
+    resample's t* = (mean* - mean) / se*, with se = sd / sqrt(n), and the interval is
+    (mean - t*[1 - a/2] se, mean - t*[a/2] se), t*[q] the ((B + 1) q)-th smallest t*. A
+    resample with no spread has t* = 0 at the mean and +-inf off it, which can push a limit
+    past the differences' range, so the limits are clipped to [-1, 1]. No spread at all gives
+    BCa's zero width, (mean, mean)."""
+    n = len(diffs)
+    mean = fmean(diffs)
+    if n < 2 or max(diffs) - min(diffs) < 1e-12:
+        return (mean, mean)
+    se = stdev(diffs) / math.sqrt(n)
+    rng = random.Random(seed)
+    ts = []
+    for _ in range(resamples):
+        boot = rng.choices(diffs, k=n)
+        m, sd = fmean(boot), stdev(boot)
+        if sd > 1e-12:
+            ts.append((m - mean) / (sd / math.sqrt(n)))
+        else:
+            ts.append(0.0 if abs(m - mean) < 1e-12 else math.copysign(math.inf, m - mean))
+    ts.sort()
+    tail = (1 - level) / 2
+    low_t = ts[max(round((resamples + 1) * tail) - 1, 0)]
+    high_t = ts[min(round((resamples + 1) * (1 - tail)) - 1, resamples - 1)]
+    lo, hi = mean - high_t * se, mean - low_t * se
+    return (max(-1.0, min(1.0, lo)), max(-1.0, min(1.0, hi)))
+
+
 def spawn_seeds(base: int, count: int) -> list[int]:
     """count independent 64-bit seeds from one base seed: SeedSequence.spawn without numpy."""
     return [
@@ -364,13 +406,35 @@ def _run(cell: Cell, delta: float, cells: Cells, null: Cells, seed: int, scenari
     also its calls and misses under Tango's and the SCAS-style bound. Graded: N cases of k
     samples (graded_cases) at the cell's rho, so paired_test takes its sign-flip path."""
     if scenario.k > 1:
-        data_seed, boot_seed = spawn_seeds(seed, 2)
+        data_seed, boot_seed, stud_seed = spawn_seeds(seed, 3)  # the first two are part 2's
         rng = random.Random(data_seed)
         base, new = graded_cases(rng, cell.p_base, delta, cell.rho, cell.n, scenario.k)
         g = paired_test(base, new, alpha=cell.alpha, seed=boot_seed)
         gated = gate_kpis([_kpi("kpi1", g, cell)], alpha=cell.alpha)
         verdict = gate_findings(gated).statistical or "INCONCLUSIVE"
-        return Run(verdict, g.discordant == 0, 0, verdict == "BLOCK", False, rho=g.rho or 0.0)
+        diffs = [fmean(p) - fmean(b) for b, p in zip(base, new, strict=True)]
+        stud = studentized_ci(diffs, seed=stud_seed)
+        call = decide(
+            g.delta,
+            stud,
+            cell.margin,
+            g.p <= cell.alpha,  # Holm with one KPI
+            discordant=g.discordant,
+            n=g.n,
+            alpha=cell.alpha,
+        )
+        no_drop = -no_drop_bound(g.n, cell.alpha)  # what SHIP reads with no discordant case
+        gate_lo, stud_lo = (no_drop, no_drop) if g.discordant == 0 else (g.ci[0], stud[0])
+        return Run(
+            verdict,
+            g.discordant == 0,
+            0,
+            verdict == "BLOCK",
+            False,
+            rho=g.rho or 0.0,
+            stud=call,
+            graded_misses=(gate_lo > delta, stud_lo > delta),
+        )
     seeds = spawn_seeds(seed, 3 + 2 * (scenario.kpis - 1))  # data, bootstrap, losses, more KPIs
     losses = random.Random(seeds[2])
     streams = [(seeds[0], seeds[1]), *zip(seeds[3::2], seeds[4::2], strict=True)]
@@ -481,6 +545,11 @@ def simulate_arm(
         scas=_calls([b[1] for b in bounds]),
         misses=_add([tuple(map(int, b[2])) for b in bounds]),
         rho_sum=sum(run.rho for run in runs),
+        stud=_calls([run.stud for run in runs if run.stud is not None]),
+        graded_misses=(
+            sum(run.graded_misses[0] for run in runs),
+            sum(run.graded_misses[1] for run in runs),
+        ),
         g_calls=_calls([run.g_decision for run in runs if run.g_decision is not None]),
         shift_sum=sum(run.shift for run in runs),
         pr_only=sum(run.pr_only for run in runs),
@@ -516,6 +585,11 @@ def merge(parts: Sequence[ArmResult]) -> ArmResult:
         scas=_add([p.scas for p in parts]),
         misses=_add([p.misses for p in parts]),
         rho_sum=sum(p.rho_sum for p in parts),
+        stud=_add([p.stud for p in parts]),
+        graded_misses=(
+            sum(p.graded_misses[0] for p in parts),
+            sum(p.graded_misses[1] for p in parts),
+        ),
         g_calls=_add([p.g_calls for p in parts]),
         shift_sum=sum(p.shift_sum for p in parts),
         pr_only=sum(p.pr_only for p in parts),
@@ -754,6 +828,33 @@ def bounds_table(results: Sequence[CellResult | Skipped]) -> str:
     return "\n".join(lines)
 
 
+def graded_bounds_table(results: Sequence[CellResult | Skipped]) -> str:
+    """Graded: one row per arm, how often the gate's BCa and the studentized lower bound sat
+    above the true delta (nominal 2.5%), with Wilson intervals, and the SHIPs and BLOCKs with
+    each CI."""
+    lines = [
+        "| p | ρ | N | Δ | Gate's bound (BCa) above Δ | Studentized | SHIP: BCa / studentized "
+        "| BLOCK: BCa / studentized |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for out in results:
+        if isinstance(out, Skipped):
+            continue
+        c = out.resolved.cell
+        for a in out.arms:
+            misses = []
+            for k in a.graded_misses:
+                rate, _, (lo, hi) = mc_error(k, a.reps)
+                misses.append(f"{_pct(rate)} ({_pct(lo)}–{_pct(hi)})")
+            ships = f"{_pct(a.ship / a.reps)} / {_pct(a.stud[0] / a.reps)}"
+            blocks = f"{_pct(a.block / a.reps)} / {_pct(a.stud[1] / a.reps)}"
+            lines.append(
+                f"| {c.p_base:g} | {c.rho:g} | {c.n} | {a.delta:+g} | {' | '.join(misses)} "
+                f"| {ships} | {blocks} |"
+            )
+    return "\n".join(lines)
+
+
 def loss_table(results: Sequence[CellResult | Skipped]) -> str:
     """One row per arm of a lossy scenario: the calls today and with G, the wrong call's rate
     both ways, G's mean shift in delta, the share lost on one side only, and per tolerance how
@@ -809,6 +910,9 @@ def _grid_main(argv: Sequence[str]) -> int:
     parser.add_argument(
         "--loss", action="store_true", help="only the lost-results scenarios, G and the tolerances"
     )
+    parser.add_argument(
+        "--graded", action="store_true", help="only the graded path: BCa next to the studentized CI"
+    )
     args = parser.parse_args(argv)
     reps: int = args.reps
     seed: int = args.seed
@@ -826,6 +930,20 @@ def _grid_main(argv: Sequence[str]) -> int:
                 if isinstance(why, str):
                     print(f"{what}: skipped arm delta={d:+g} of {r.cell}: {why}", file=sys.stderr)
     print(f"M1 grid: seed={seed}, margin m={_GATE.margin:g}, alpha={_GATE.alpha:g}", flush=True)
+    if args.graded:
+        graded_scenario = next(s for s in SCENARIOS if s.k > 1)
+        start = time.perf_counter()
+        results = run_grid(graded, scenario_reps, seed, workers, scenario=graded_scenario)
+        took = time.perf_counter() - start
+        print(
+            f"\n## {graded_scenario.name}: R={scenario_reps} per arm, {took:.0f} s on {workers} "
+            "workers\n"
+        )
+        print(grid_table(results, graded_scenario))
+        print("\n## Graded lower bounds: the gate's BCa, the studentized one\n")
+        print(graded_bounds_table(results), flush=True)
+        print(f"graded: {took:.1f} s", file=sys.stderr)
+        return 0
     if args.loss:
         for scenario in LOSS_SCENARIOS:
             start = time.perf_counter()

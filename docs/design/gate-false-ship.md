@@ -146,7 +146,9 @@ before G and change nothing.
    and stays a comparator.
 2. **Graded KPIs stay on BCa for now.** gate.md says that below N = 200 they aren't
    simulation-checked. Follow-up: a gate_sim arm for a studentized paired bootstrap on the
-   graded path.
+   graded path. Run on 18 November
+   ([results](../validation/gate-simulations.md#graded-kpis-bca-next-to-a-studentized-bootstrap-18-nov-2026)):
+   it did no better than BCa, so graded KPIs stay on BCa.
 3. **G: run both arms first.** Adopt G only if the random-loss penalty is at most 0.02 at 2%
    loss per side, with false BLOCK unchanged. The arms ran
    ([results](../validation/gate-simulations.md#lost-results-g-and-the-interim-rule-18-nov-2026)):

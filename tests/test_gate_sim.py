@@ -17,6 +17,7 @@ from lgcov.gate_sim import (
     _pairs,
     _run,
     bounds_table,
+    graded_bounds_table,
     graded_cases,
     grid,
     grid_table,
@@ -32,6 +33,7 @@ from lgcov.gate_sim import (
     simulate,
     simulate_arm,
     spawn_seeds,
+    studentized_ci,
     sweep,
 )
 from lgcov.stats import ni_required_n, paired_test, required_n, rho_from_2x2, wilson
@@ -395,3 +397,61 @@ def test_grid_loss_runs_only_the_loss_scenarios(capsys: pytest.CaptureFixture[st
     out = capsys.readouterr().out
     assert all(f"## {s.name}" in out for s in LOSS_SCENARIOS)
     assert "Lower bounds" not in out and "## binary, one KPI" not in out
+
+
+# The follow-up to ruling 2 on docs/design/gate-false-ship.md: graded KPIs, BCa next to a
+# studentized paired bootstrap (bootstrap-t)
+
+
+def test_studentized_ci_is_reproducible_and_holds_the_mean() -> None:
+    rng = random.Random(1)
+    diffs = [rng.choice((-0.5, -1 / 6, 0.0, 0.0, 1 / 6, 1 / 3)) for _ in range(60)]
+    mean = sum(diffs) / len(diffs)
+    lo, hi = studentized_ci(diffs, seed=4)
+    assert lo < mean < hi and (lo, hi) == studentized_ci(diffs, seed=4)
+
+
+def test_studentized_ci_is_near_the_t_interval_on_many_smooth_differences() -> None:
+    rng = random.Random(2)
+    diffs = [rng.gauss(0.1, 0.3) for _ in range(400)]
+    mean = sum(diffs) / 400
+    se = math.sqrt(sum((d - mean) ** 2 for d in diffs) / 399 / 400)
+    lo, hi = studentized_ci(diffs, seed=0)
+    assert lo == pytest.approx(mean - 1.96 * se, abs=0.3 * se)
+    assert hi == pytest.approx(mean + 1.96 * se, abs=0.3 * se)
+
+
+def test_studentized_ci_collapses_on_identical_differences_and_stays_in_range() -> None:
+    assert studentized_ci([0.2] * 10) == (0.2, 0.2)  # no spread, as BCa gives
+    lo, hi = studentized_ci([0.0] * 9 + [-1.0], seed=0)  # most resamples have no spread
+    assert -1.0 <= lo < -0.1 and hi <= 1.0
+
+
+def test_graded_runs_count_studentized_calls_and_each_bounds_misses() -> None:
+    graded = Scenario(k=3)
+    r = resolve_graded(Cell(n=30, rho=0.3, p_base=0.80), POWER_DELTAS)
+    assert not isinstance(r, Skipped)
+    arms = simulate(r, reps=6, seed=0, scenario=graded)
+    for a in arms:
+        assert sum(a.stud) == a.reps and all(0 <= m <= a.reps for m in a.graded_misses)
+    before = simulate(r, reps=6, seed=0, scenario=graded)
+    assert [(a.ship, a.block) for a in arms] == [(a.ship, a.block) for a in before]
+    text = graded_bounds_table(run_grid([r], reps=6, seed=0, scenario=graded))
+    assert "Studentized" in text and text.count("\n| 0.8 |") == len(arms)
+
+
+def test_graded_runs_keep_part_2s_calls() -> None:
+    """The studentized interval draws from its own stream: the gate's own calls on the graded
+    path are part 2's, run for run."""
+    r = resolve_graded(Cell(n=100, rho=0.7, p_base=0.95))
+    assert not isinstance(r, Skipped)
+    (zero, margin) = simulate(r, reps=20, seed=0, scenario=Scenario(k=3))
+    calls = (zero.ship, zero.block, zero.inconclusive, margin.ship, margin.block)
+    assert calls == (19, 0, 1, 1, 10)  # what part 2's code gives
+    assert zero.rho_sum == pytest.approx(6.996145, abs=1e-6)
+
+
+def test_grid_graded_runs_only_the_graded_comparison(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["grid", "2", "0", "--graded", "--scenario-reps", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "Studentized" in out and "Lower bounds" not in out and "lost on each side" not in out
