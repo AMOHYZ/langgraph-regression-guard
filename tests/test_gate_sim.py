@@ -7,16 +7,23 @@ import pytest
 
 from lgcov.config import GateConfig
 from lgcov.gate_sim import (
+    LOSS_SCENARIOS,
     POWER_DELTAS,
+    TOLERANCES,
     Cell,
     Resolved,
     Scenario,
     Skipped,
+    _pairs,
+    _run,
     bounds_table,
     graded_cases,
     grid,
     grid_table,
+    interim_fires,
     joint_cells,
+    loss_table,
+    main,
     mc_error,
     predicted,
     resolve,
@@ -318,3 +325,73 @@ def test_graded_runs_count_calls_and_the_observed_rho_of_case_means() -> None:
     assert 0.0 < zero.rho_sum / 3 < 0.7  # sampling noise thins the latent 0.7
     text = grid_table(run_grid([r], reps=3, seed=0, scenario=graded), graded)
     assert "Observed ρ" in text
+
+
+# The rulings on docs/design/gate-false-ship.md: G's two arms, and the interim rule's tolerance
+
+
+def test_one_sided_loss_loses_each_side_about_the_asked_share() -> None:
+    r = resolve(Cell(n=200, rho=0.3, p_base=0.80))
+    assert not isinstance(r, Skipped)
+    a = simulate(r, reps=40, seed=0, scenario=LOSS_SCENARIOS[1])[0]  # 5% on each side
+    assert LOSS_SCENARIOS[1].one_sided and LOSS_SCENARIOS[1].missing == 0.05
+    for side in (a.pr_only, a.base_only):  # lost on one side only: 0.05 x 0.95 of cases
+        assert 0.035 < side / (40 * 200) < 0.06
+
+
+def test_g_fills_the_lost_failures_back_so_its_delta_is_the_full_runs() -> None:
+    r = resolve(Cell(n=200, rho=0.3, p_base=0.80))
+    assert not isinstance(r, Skipped)
+    (_, null), (delta, cells) = r.arms
+    every_failure = Scenario(missing=1.0, informative=True, interval="score")
+    run = _run(r.cell, delta, cells, null, 7, every_failure)
+    pairs = _pairs(random.Random(spawn_seeds(7, 3)[0]), cells, r.cell.n)
+    full = sum(p - b for b, p in pairs) / len(pairs)
+    kept = [p - b for b, p in pairs if p == 1.0]
+    assert run.shift == pytest.approx(full - sum(kept) / len(kept))
+
+
+def test_g_never_changes_a_block_and_only_takes_ships_away() -> None:
+    r = resolve(Cell(n=100, rho=0.7, p_base=0.80), power=POWER_DELTAS)
+    assert not isinstance(r, Skipped)
+    for a in simulate(r, reps=30, seed=0, scenario=LOSS_SCENARIOS[1]):
+        assert a.g_calls[1] == a.block and a.g_calls[0] <= a.ship
+        assert sum(a.g_calls) == a.reps and a.shift_sum <= 0
+
+
+def test_with_no_result_lost_on_one_side_only_g_changes_nothing() -> None:
+    r = resolve(Cell(n=100, rho=0.3, p_base=0.80))
+    assert not isinstance(r, Skipped)
+    pairs_lost = Scenario(missing=0.10, interval="score")  # both sides of a pair at once
+    for a in simulate(r, reps=20, seed=0, scenario=pairs_lost):
+        assert a.g_calls == (a.ship, a.block, a.inconclusive)
+        assert (a.pr_only, a.base_only, a.shift_sum) == (0, 0, 0.0)
+
+
+def test_each_interim_tolerance_fires_on_the_prs_excess_losses() -> None:
+    assert TOLERANCES == (
+        "half the margin, at least 2",
+        "a quarter of the margin, at least 1",
+        "one-sided sign test, p < 0.05",
+    )
+    assert interim_fires(3, 0, 100, 0.05) == (True, True, False)  # over 2.5 and 1.25 cases
+    assert interim_fires(2, 0, 100, 0.05) == (False, True, False)
+    assert interim_fires(5, 0, 100, 0.05) == (True, True, True)  # 0.5^5 = 0.031
+    assert interim_fires(4, 0, 100, 0.05) == (True, True, False)  # 0.5^4 = 0.0625
+    assert interim_fires(7, 4, 100, 0.05) == (True, True, False)
+    assert interim_fires(0, 5, 100, 0.05) == (False, False, False)
+    assert interim_fires(3, 0, 50, 0.05) == (True, True, False)  # the floor of 2 cases
+
+
+def test_loss_table_shows_g_the_shift_and_each_tolerance() -> None:
+    plan = [resolve(Cell(n=20, rho=0.3, p_base=0.80))]
+    text = loss_table(run_grid(plan, reps=4, seed=0, scenario=LOSS_SCENARIOS[0]))
+    assert "With G" in text and "Mean Δ shift under G" in text
+    assert all(t in text for t in TOLERANCES)
+
+
+def test_grid_loss_runs_only_the_loss_scenarios(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["grid", "2", "0", "--loss", "--scenario-reps", "2"]) == 0
+    out = capsys.readouterr().out
+    assert all(f"## {s.name}" in out for s in LOSS_SCENARIOS)
+    assert "Lower bounds" not in out and "## binary, one KPI" not in out
