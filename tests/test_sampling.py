@@ -194,6 +194,34 @@ def test_a_kpi_with_mostly_infra_samples_shows_judge_unreliable() -> None:
     assert not steady.judge_unreliable
 
 
+def test_kpi_stats_counts_the_cases_each_side_lost() -> None:
+    """The ruling on docs/design/gate-false-ship.md: a case scored on one side only is left
+    out of the paired test, so the comment says how many each side lost."""
+    base = _cases(["pass"], ["pass"], ["infra"], ["pass"], ["infra"])
+    new = _cases(["infra"], ["pass"], ["pass"], ["infra"], ["infra"])
+    stats = kpi_stats(KPI_, 1, base=base, new=new)
+    assert (stats.lost_pr, stats.lost_base) == (2, 1)  # run-4, lost on both, is in neither
+
+
+def test_a_case_only_one_side_ran_is_not_a_lost_result() -> None:
+    base = _cases(["pass"], ["pass"])
+    new = {"run-0": base["run-0"]}  # run-1 wasn't run on the PR: removed, not lost
+    stats = kpi_stats(KPI_, 1, base=base, new=new)
+    assert (stats.lost_pr, stats.lost_base) == (0, 0)
+
+
+def test_the_gate_table_names_each_sides_lost_results() -> None:
+    base, new = _drop(200, 20)
+    for i in (0, 1, 199):
+        new[f"run-{i}"] = judge_samples(Scripted(["infra"]), {}, {}, 1)
+    lines = render_gate_table([kpi_stats(KPI_, 1, base, new)])
+    row = "| ⚠️ lost results: grounded, 3 on the PR side and 0 on the base side, left out of Δ |"
+    assert row + " |" * 10 in lines
+    assert not any(
+        "lost results" in line for line in render_gate_table([kpi_stats(KPI_, 1, *_drop(200, 20))])
+    )
+
+
 # T091 PR B: the paired gate. Holm across blocking KPIs, Benjamini-Hochberg across advisory.
 def _drop(
     n: int, fails: int

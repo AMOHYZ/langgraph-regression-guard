@@ -154,6 +154,10 @@ class KpiStats:
     infra_reasons: tuple[tuple[str, int], ...] = ()  # T195: why, and how often; most first
     # T186, model judges only: each PR-side case, with the labels it got on the base and the PR
     case_labels: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = ()
+    # Cases both sides ran that only one side scored, so the paired test leaves them out
+    # (docs/design/gate-false-ship.md): the base scored them and the PR didn't, or the reverse
+    lost_pr: int = 0
+    lost_base: int = 0
 
     @property
     def flakiness(self) -> float:
@@ -195,7 +199,8 @@ def kpi_stats(
     infra = sum(c.infra for c in (*base_cases, *new_cases))
     b_scores = {c: _scores(s) for c, s in base.items()}
     n_scores = {c: _scores(s) for c, s in new.items()}
-    pairs = [c for c in sorted(b_scores.keys() & n_scores.keys()) if b_scores[c] and n_scores[c]]
+    ran = b_scores.keys() & n_scores.keys()
+    pairs = [c for c in sorted(ran) if b_scores[c] and n_scores[c]]
     paired = None
     if pairs:
         paired = paired_test(
@@ -246,6 +251,8 @@ def kpi_stats(
         case_labels=()
         if code
         else tuple((c, _labels(base.get(c, ())), _labels(new[c])) for c in sorted(new)),
+        lost_pr=sum(1 for c in ran if b_scores[c] and not n_scores[c]),
+        lost_base=sum(1 for c in ran if n_scores[c] and not b_scores[c]),
     )
     return gate_kpis([stats], alpha=alpha, min_confidence=min_confidence, power=power)[0]
 
@@ -397,10 +404,15 @@ def render_gate_table(
         name = s.kpi if s.band == "blocking" else f"{s.kpi} ({s.band})"
         roots = ", ".join(f"`{n}`" for n in s.roots) or "—"
         r = s.paired
+        lost = []
+        if s.lost_pr or s.lost_base:
+            sides = f"{s.lost_pr} on the PR side and {s.lost_base} on the base side"
+            lost = [f"| ⚠️ lost results: {s.kpi}, {sides}, left out of Δ |" + " |" * 10]
         if r is None:
             lines.append(
                 f"| {name} | 0 | — | — | — | — | {s.margin:.2f} | — | — | {_verdict(s)} | — |"
             )
+            lines += lost
             continue
         mde = "—" if r.sd < 1e-9 else f"{r.mde:.2f}"  # no spread seen: nothing to size it by
         needed = r.required_n
@@ -419,6 +431,7 @@ def render_gate_table(
             many = f"{len(s.new_failures)} of {r.n} cases"
             what = f"{s.kpi} on {many}: {named_cases(s.new_failures)}"
             lines.append(f"| {icon} new failure: {what} |" + " |" * 10)
+        lines += lost
     lines += [
         "",
         f"Cases paired base vs PR. p adj.: Holm across the K_gate = {k_gate(stats)} blocking "
