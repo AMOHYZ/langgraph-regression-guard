@@ -607,6 +607,27 @@ def test_cli_accept_re_records_the_units_of_a_step_it_accepts(tmp_path: Path) ->
     assert box["output"] == box["units"][0]["output"] == {"a": "A2"}
 
 
+# T193, 3b-1: on a baseline with units the candidate job replays them, probes a changed one and
+# writes schema 3. The job that decides doesn't label units yet, so the verdict is as before.
+def test_cli_ci_writes_a_schema_3_candidate_file_for_a_baseline_with_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("graph.py").write_text(BOX_GRAPH, encoding="utf-8")
+    Path("lgcov.yaml").write_text("graph_entrypoint: graph.py:graph\ncassette_dir: cassettes\n")
+    Path("inputs.json").write_text("[{}]", encoding="utf-8")
+    assert main(["record", "--inputs", "inputs.json", "--schema", "2"]) == 0
+    Path("graph.py").write_text(BOX_GRAPH.replace("A1", "A2"), encoding="utf-8")
+    one_job = main(["ci", "--report", "one.md"])
+    assert main(["ci", "--report", "r.md", "--candidate-out", "c.json"]) == 0
+    body = json.loads(Path("c.json").read_text(encoding="utf-8"))
+    assert body["schema"] == 3
+    (box,) = body["runs"][0]["steps"]
+    assert box["units"][0]["output"] == {"a": "A2"}
+    assert [(p["node"], p["unit"]) for p in body["probes"]] == [("inside", [0, 0])]
+    assert main(["ci", "--report", "two.md", "--candidate-in", "c.json"]) == one_job
+
+
 def test_cli_accept_cassette_dir_flag_overrides_config(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

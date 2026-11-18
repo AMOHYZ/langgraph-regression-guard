@@ -1055,14 +1055,24 @@ def replay_run(
     budget: Budget | None = None,
     mask_volatile: bool = False,
     baseline: Sequence[Cassette] = (),
+    units: bool = False,
 ) -> Replay:
     """`replay_steps` under a divergence policy and a budget, with how each call ran. T212:
     `baseline` is every run recorded with `cassette`: a node this run didn't record, but another
-    did, gets its fingerprint in that recording's scheme."""
+    did, gets its fingerprint in that recording's scheme. T193: `units` records the units inside
+    each subgraph on the fresh steps, as `record` does."""
     served = cassette.steps if serve else ()
     like = [s for r in (cassette, *baseline) for s in r.steps]
     fresh, calls, halt = _run(
-        graph, cassette.inputs, served, ignore_paths, on_divergence, budget, mask_volatile, like
+        graph,
+        cassette.inputs,
+        served,
+        ignore_paths,
+        on_divergence,
+        budget,
+        mask_volatile,
+        like,
+        units,
     )
     return compared_run(cassette, fresh, calls, halt, ignore_paths)
 
@@ -1242,6 +1252,36 @@ def probe_steps(
         for j, s in enumerate(run.steps)
         if s.node in nodes
     )
+
+
+def probe_units(graph: Any, runs: Sequence[Cassette]) -> tuple[ProbeStep, ...]:
+    """T193: `probe_steps` for units. Each unit whose fingerprint differs in this graph's subgraph
+    runs with this code on the input base recorded for it, offline, and its probe names it by
+    `step` and `inner`, its position down the units."""
+    return tuple(
+        p
+        for i, run in enumerate(runs)
+        for j, s in enumerate(run.steps)
+        for p in _units(graph, i, j, s)
+    )
+
+
+def _units(graph: Any, i: int, j: int, step: Step, at: Sequence[int] = ()) -> list[ProbeStep]:
+    sub = getattr(getattr(graph, "nodes", {}).get(step.node), "bound", None)
+    if not step.units or not isinstance(sub, Pregel):
+        return []
+    codes, found = _codes(sub, step.units), []
+    for k, unit in enumerate(step.units):
+        spec = sub.nodes.get(unit.node)
+        if (
+            spec is not None
+            and unit.code is not None
+            and codes.get(unit.node) not in (None, unit.code)
+        ):
+            probe = _probe_step(i, j, unit, _plain(spec.bound), given=_node_input(spec))
+            found.append(replace(probe, inner=[*at, k]))
+        found += _units(sub, i, j, unit, [*at, k])
+    return found
 
 
 def _merged(old: Probe | None, new: Probe) -> Probe:

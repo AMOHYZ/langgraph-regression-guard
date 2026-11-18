@@ -241,6 +241,21 @@ def test_this_lgcov_still_writes_schema_2_with_probes_by_step_index() -> None:
     assert all(set(p) == by_index for p in body["probes"])
 
 
+# T193, 3b-1: a run with units, and a probe of a unit, go in schema 3: steps with their units,
+# and each probe by its unit's position down the tree (`unit`: the step's index, then the units').
+BOX = Step("box", {"a": "A2"}, {}, None, units=[Step("inside", {"a": "A2"}, {}, "c2")])
+RUN_3 = replace(
+    RUN, fresh=(FreshRun((BOX,), ()),), probes=(ProbeStep(0, 0, "inside", {"a": "A2"}, inner=[0]),)
+)
+
+
+def test_a_run_with_units_is_written_as_schema_3_with_probes_by_unit() -> None:
+    body = json.loads(candidate_to_json(RUN_3))
+    assert body["schema"] == 3
+    assert [(p["node"], p["unit"]) for p in body["probes"]] == [("inside", [0, 0])]
+    assert parse_candidate(candidate_to_json(RUN_3)) == RUN_3
+
+
 # T186: `cassette accept --candidate-in` takes its fresh runs from the file, so the review commands
 # can accept without running the PR's code (docs/review.md).
 RECORDED = [

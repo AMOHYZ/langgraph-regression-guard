@@ -59,6 +59,7 @@ from lgcov.cassette import (
     judge_repeats,
     probe_nodes,
     probe_steps,
+    probe_units,
     record,
     recording_from_json,
     recording_to_json,
@@ -930,6 +931,16 @@ def test_an_async_subgraph_s_units_are_served() -> None:
     cassette = record(async_command_subgraph(), {"x": 1}, units=True)
     replayed = replay_run(async_command_subgraph(), cassette, serve=True)
     assert _how(replayed)["inner.a"] == "served" and replayed.drifts == ()
+
+
+# T193, 3b-1: a unit whose fingerprint changed is probed as a node is, on base's input for it, and
+# its probe names it by its position: step 1, `inner`, its second unit.
+def test_probe_units_runs_each_changed_unit_on_base_s_input() -> None:
+    cassette = record(counted_subgraph(), {"x": 1}, units=True)
+    (probe,) = probe_units(counted_subgraph(_second_edited), [cassette])
+    assert (probe.run, probe.step, probe.inner, probe.node) == (0, 1, [1], "second")
+    assert (probe.output, probe.raised) == ({"x": 200}, "")  # base gave second {"x": 2}
+    assert probe_units(counted_subgraph(), [cassette]) == ()
 
 
 def test_a_recording_without_units_still_runs_a_subgraph_live() -> None:
