@@ -232,6 +232,8 @@ LGCOV_COMMANDS = (
     "review override",
     "review reject",
     "review fetch",
+    "review apply",
+    "review commit",
     "taxonomy check",
     "taxonomy draft",
     "taxonomy approve",

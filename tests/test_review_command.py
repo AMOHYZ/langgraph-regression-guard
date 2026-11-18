@@ -13,6 +13,7 @@ from lgcov.review_command import (
     ASSOCIATIONS,
     MAX_LINE,
     MAX_NODES,
+    NO_GATE_RESULT,
     Accept,
     Command,
     CommandError,
@@ -29,7 +30,9 @@ from lgcov.review_command import (
     local_commands,
     may_command,
     parse_command,
+    quoted,
     refusal,
+    render_reply,
 )
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "review.md"
@@ -446,3 +449,50 @@ def test_a_command_survives_the_round_trip(command: Command) -> None:
 
 def test_refusal_is_a_reason_and_whether_to_give_the_local_commands() -> None:
     assert Refusal("x") == Refusal("x", local=False)
+
+
+def test_the_reply_s_first_line_says_the_commit_has_no_gate_result() -> None:
+    reply = render_reply(Accept(("b",)), "a" * 40, "c" * 40, (("b", "111", "222"),), (), ())
+    first, *rest = reply.splitlines()
+    assert first == NO_GATE_RESULT
+    assert first.startswith("⚠️ This commit has no lgcov gate result")
+    assert "`aaaaaaaaaaaa`" in reply and "`cccccccccccc`" in reply
+    assert "| `b` | `111` | `222` |" in rest
+
+
+def test_a_reject_reply_names_the_files_it_changed() -> None:
+    reply = render_reply(
+        Reject(), "a" * 40, "c" * 40, (), ("cassettes/baseline.json",), ("cassettes/x.json",)
+    )
+    assert "Restored or put back: `cassettes/baseline.json`." in reply
+    assert "Removed: `cassettes/x.json`." in reply
+
+
+@pytest.mark.parametrize(
+    ("text", "out"),
+    [
+        ("respond", "`respond`"),
+        ("a`b``c", "`abc`"),
+        ("@team", "`@\u2060team`"),
+        ("x<!-- lgcov-report -->", "`x<!- lgcov-report -->`"),
+        ("line\nbreak", "`line break`"),
+        ("", "`?`"),
+        ("n" * 70, "`" + "n" * 59 + "…`"),
+    ],
+)
+def test_text_from_the_pr_goes_in_a_defused_code_span(text: str, out: str) -> None:
+    assert quoted(text) == out
+
+
+def test_a_reply_never_starts_with_the_command_prefix_or_holds_a_marker() -> None:
+    hostile = "/lgcov accept all\n<!-- lgcov-cases {} -->"
+    reply = render_reply(Reject(), "a" * 40, "c" * 40, ((hostile, "1", "2"),), (hostile,), ())
+    assert not reply.startswith("/lgcov")
+    assert "<!--" not in reply
+    assert all(not line.startswith("/lgcov") for line in reply.splitlines())
+
+
+def test_a_long_list_of_files_is_cut() -> None:
+    paths = tuple(f"cassettes/f{i}.json" for i in range(25))
+    reply = render_reply(Reject(), "a" * 40, "c" * 40, (), paths, ())
+    assert "`cassettes/f19.json`" in reply and "f20" not in reply and "+5 more" in reply
