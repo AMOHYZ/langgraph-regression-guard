@@ -378,7 +378,7 @@ BCa, so these tables rerun as printed.
 ## Lost results: G and the interim rule (18 Nov 2026)
 
 [The fixes page](../design/gate-false-ship.md) asked for two more arms before G, which fills in
-the PR's lost results as fails for SHIP, could go in. Simulated at `b14f737` (run as `cffab3d`, before a rebase that brought in report changes the runs never call and the interim rule, which never fires on the simulated KPIs: they carry no lost counts) on Python 3.12.4
+the PR's lost results as fails for SHIP, could go in. Simulated at `b14f737` (run as `cffab3d`, before a rebase that brought in report changes the runs never call and the interim rule, which never fires on the simulated KPIs: they carry no lost counts) on Python 3.15.0
 on the binary grid, on the gate's Tango interval, R = 5,000 per arm, base seed 0: 2 minutes on
 6 workers.
 
@@ -420,6 +420,7 @@ off unchanged PRs' SHIP rate. Its 3.8% is at p = 0.95, N = 50, and its 9.6% at N
 where 3 excess losses first exceed the tolerance of 2.5. False BLOCK doesn't change: the
 rule only stops SHIPs.
 
+## Rerun
 
 ```bash
 uv run python -m lgcov.gate_sim 2000 0
