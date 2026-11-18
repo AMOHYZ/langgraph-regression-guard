@@ -49,5 +49,13 @@ or slice group never goes further than its KPIs' own verdicts.
   simulated SHIPped a drop of δ up to 4.4% of the time. When half of a PR's failing results
   went missing, a drop of δ SHIPped up to 99.6% of the time
   ([gate simulations](validation/gate-simulations.md), [the fixes](design/gate-false-ship.md)).
+- **A lost result leaves its case out.** A case both sides ran that only one side scored, as
+  when the judge hit an infra error, isn't paired, so Δ doesn't see it. The PR comment counts
+  these per side under the KPI's row. If the PR's failures are the ones the judge fails on, Δ
+  reads too high. So when the PR side lost more results than the base by more than half the
+  margin's worth of cases (at least 2), the KPI can't SHIP: it is INCONCLUSIVE and a human
+  decides. Simulated, that kept a drop of δ from SHIPping more than 3.8% of the time when half
+  of a PR's failing results went missing, against up to 99.7% without it. It's an interim rule
+  ([the fixes](design/gate-false-ship.md)).
 - **On a PR, these settings come from the base commit,** so a PR can't change what grades it. What
   that does and doesn't stop is in [the trust boundary](trust-boundary.md).
