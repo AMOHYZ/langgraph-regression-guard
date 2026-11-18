@@ -444,7 +444,9 @@ PR's branch. [docs/review.md](docs/review.md) has the workflow, who can run it a
    job's file for the head, so you accept what the report showed. `/lgcov accept all` takes every
    drifted node.
 3. `/lgcov reject` puts the PR's cassettes back to the base's, undoing an accept.
-4. `/lgcov override` isn't built from a comment yet: use `lgcov review override`.
+4. `/lgcov override --kpi tone --case run-0/respond --label pass` saves a label where the judge
+   was wrong, as `lgcov review override` does. The report lists the cases a model judge scored
+   lower, and the judge's label comes from the report itself.
 
 It needs the two-job layout above, and a release after 0.4.0, which ships `review/action.yml`. A
 fork PR, or one that touches `.github/` or an action file, gets the commands to run locally instead.

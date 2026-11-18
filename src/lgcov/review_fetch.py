@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 import yaml
 
+from lgcov.ci_report import MARKER
 from lgcov.github_api import GitHub, GitHubError
 from lgcov.review import unwritable
 from lgcov.review_command import (
@@ -26,11 +27,13 @@ from lgcov.review_command import (
     CommandError,
     CommentEvent,
     FetchContext,
+    Override,
     Pull,
     Refusal,
     Reject,
     Report,
     command_to_json,
+    judge_label,
     local_commands,
     may_command,
     parse_command,
@@ -42,6 +45,7 @@ CANDIDATE_BYTES = 50 * 2**20  # the artifact's zip, and candidate.json inside it
 FILE_BYTES = 10 * 2**20
 FILES = 500  # the most files fetch reads from one folder
 CHANGED_PAGES = 30  # GitHub lists at most 3,000 of a PR's files, 100 a page
+BOT = "github-actions[bot]"  # who posts the report with the job's own token
 _PLAIN = ("100644", "100755")  # a tree entry's mode for a plain file; 120000 is a symlink
 
 
@@ -182,6 +186,40 @@ def _cassette_dir(config: bytes | None, override: str | None) -> str:
     return folder
 
 
+def _report_body(gh: GitHub, repo: str, pr: int) -> str | None:
+    """The bot's report comment on the PR, as the comment step leaves it; None when there is
+    none. Only the bot's own comment counts, so no one can post a list of judged cases."""
+    comments, _ = gh.pages(f"/repos/{repo}/issues/{pr}/comments", pages=30)
+    ours = [
+        _text(c, "body")
+        for c in comments
+        if _text(c, "user", "login") == BOT and MARKER in _text(c, "body")
+    ]
+    return ours[-1] if ours else None
+
+
+def _taxonomy(
+    gh: GitHub, repo: str, tree: list[object], config: bytes | None, given: str | None
+) -> bytes:
+    """The base's taxonomy: the review action's `taxonomy` input, else lgcov.yaml's."""
+    raw = yaml.safe_load(config.decode("utf-8")) if config else None
+    named = [raw.get(k) for k in ("taxonomy_path", "taxonomy")] if isinstance(raw, dict) else []
+    path = given or next((p for p in named if isinstance(p, str) and p), None)
+    if not path:
+        raise Refused(
+            "the base names no taxonomy: set the review action's `taxonomy` input, or "
+            "`taxonomy_path` in lgcov.yaml"
+        )
+    want = PurePosixPath(path).as_posix()
+    entry = next((e for e in tree if _text(e, "path") == want), None)
+    size = entry.get("size") if isinstance(entry, dict) else None
+    if entry is None or _text(entry, "mode") not in _PLAIN:
+        raise Refused("the base has no taxonomy file where it names one")
+    if not isinstance(size, int) or size > FILE_BYTES:
+        raise Refused("the base's taxonomy is larger than the bot reads")
+    return _blob(gh, repo, _text(entry, "sha"))
+
+
 def _candidate(gh: GitHub, repo: str, artifact: int) -> bytes:
     data = gh.download(f"/repos/{repo}/actions/artifacts/{artifact}/zip", CANDIDATE_BYTES)
     try:
@@ -204,7 +242,13 @@ def _reply(out: Path, text: str) -> None:
     (out / "reply.md").write_text(text + "\n", encoding="utf-8")
 
 
-def fetch(gh: GitHub, event: CommentEvent, out: Path, cassette_dir: str | None = None) -> Fetched:
+def fetch(
+    gh: GitHub,
+    event: CommentEvent,
+    out: Path,
+    cassette_dir: str | None = None,
+    taxonomy: str | None = None,
+) -> Fetched:
     """Make the checks and fill `out`, which must exist and be empty."""
     if not may_command(event) or event.pr is None:
         return Fetched(0)  # the workflow's `if` keeps these out; nothing to say to anyone
@@ -220,7 +264,7 @@ def fetch(gh: GitHub, event: CommentEvent, out: Path, cassette_dir: str | None =
     _answering(out, event)
     repo = event.repo
     try:
-        return _checked(gh, event, command, repo, out, cassette_dir)
+        return _checked(gh, event, command, repo, out, cassette_dir, taxonomy)
     except Refused as exc:
         _reply(out, f"Not run: {exc}.")
         return Fetched(0)
@@ -230,7 +274,13 @@ def fetch(gh: GitHub, event: CommentEvent, out: Path, cassette_dir: str | None =
 
 
 def _checked(
-    gh: GitHub, event: CommentEvent, command: Command, repo: str, out: Path, override: str | None
+    gh: GitHub,
+    event: CommentEvent,
+    command: Command,
+    repo: str,
+    out: Path,
+    override: str | None,
+    taxonomy: str | None,
 ) -> Fetched:
     assert event.pr is not None
     raw = gh.get(f"/repos/{repo}/pulls/{event.pr}")
@@ -253,6 +303,14 @@ def _checked(
         local = f"\n\n{local_commands(command)}" if refused.local else ""
         _reply(out, f"Not run: {refused.reason}.{local}")
         return Fetched(0)
+    said = ""
+    if isinstance(command, Override):  # the judge's label, from the bot's report for the head
+        label = judge_label(_report_body(gh, repo, pull.number), pull.head_sha, command)
+        if isinstance(label, Refusal):
+            local = f"\n\n{local_commands(command)}" if label.local else ""
+            _reply(out, f"Not run: {label.reason}.{local}")
+            return Fetched(0)
+        said = label
     base_sha = pull.base_sha if report is None else report.base_sha
     base_tree = _tree(gh, repo, base_sha)
     config = next((e for e in base_tree if _text(e, "path") == "lgcov.yaml"), None)
@@ -261,10 +319,16 @@ def _checked(
         (out / "base").mkdir()
         (out / "base" / "lgcov.yaml").write_bytes(config_bytes)
     folder = _cassette_dir(config_bytes, override)
-    fetched = _folder(gh, repo, _tree(gh, repo, pull.head_sha), folder, out / "pr")
+    head_tree = _tree(gh, repo, pull.head_sha)
+    fetched = _folder(gh, repo, head_tree, folder, out / "pr")
     if isinstance(command, Reject):
         _folder(gh, repo, base_tree, folder, out / "base")
-    if isinstance(command, Accept):
+    if isinstance(command, Override):
+        kpis = _taxonomy(gh, repo, base_tree, config_bytes, taxonomy)
+        (out / "base").mkdir(exist_ok=True)
+        (out / "base" / "taxonomy.yaml").write_bytes(kpis)
+        fetched |= _folder(gh, repo, head_tree, "calibration", out / "pr")
+    if isinstance(command, Accept | Override):
         assert report is not None
         (out / "candidate.json").write_bytes(_candidate(gh, repo, report.artifact_id))
     meta = {
@@ -277,6 +341,7 @@ def _checked(
         "reviewer": event.author,
         "comment_id": event.comment_id,
         "comment_url": event.url,
+        **({"judge_label": said} if said else {}),
     }
     (out / "command.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     (out / "fetched.json").write_text(json.dumps(fetched, indent=2) + "\n", encoding="utf-8")

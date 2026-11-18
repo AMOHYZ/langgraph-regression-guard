@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 from lgcov.github_api import GitHub, GitHubError
 from lgcov.review_apply import FileChanges, Job, allowed, changes_from_json, job_from_json
-from lgcov.review_command import Accept, quoted, render_reply
+from lgcov.review_command import Accept, Override, quoted, render_reply
 
 MOVED = (
     "Not run: the PR's branch moved while the command ran, so nothing was committed. Comment "
@@ -29,6 +29,8 @@ def _message(job: Job) -> str:
     if isinstance(command, Accept):
         what = "every drifted node" if command.nodes is None else ", ".join(command.nodes)
         subject = f"lgcov: accept {what}"
+    elif isinstance(command, Override):
+        subject = f"lgcov: override {command.kpi} on {command.case} to {command.label}"
     else:
         subject = "lgcov: reject, back to the base's cassettes"
     if len(subject) > 52:
@@ -102,6 +104,14 @@ def commit(gh: GitHub, repo: str, out: Path) -> int:
             gh.post(comments, {"body": why})
         return 2
     # the branch has moved: from here a failure must not say nothing was committed
-    body = render_reply(job.command, job.head_sha, sha, changes.rows, changes.write, changes.remove)
+    body = render_reply(
+        job.command,
+        job.head_sha,
+        sha,
+        changes.rows,
+        changes.write,
+        changes.remove,
+        job.judge_label,
+    )
     gh.post(comments, {"body": body})
     return 0

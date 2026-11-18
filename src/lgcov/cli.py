@@ -180,7 +180,7 @@ from lgcov.review_apply import (
     job_from_json,
     node_rows,
 )
-from lgcov.review_command import Accept, Override, comment_event, local_commands, quoted
+from lgcov.review_command import Accept, Override, comment_event, quoted
 from lgcov.review_commit import commit as review_commit
 from lgcov.review_fetch import fetch
 from lgcov.sampling import (
@@ -2232,7 +2232,7 @@ _REVIEW_USAGE = (
     "usage: lgcov review override --kpi KPI --case-id CASE --judge-label LABEL "
     "--human-label LABEL --reviewer NAME [--note TEXT]\n"
     "       lgcov review reject --base-dir DIR [--config FILE] [--cassette-dir DIR]\n"
-    "       lgcov review fetch --event FILE --out DIR [--cassette-dir DIR]\n"
+    "       lgcov review fetch --event FILE --out DIR [--cassette-dir DIR] [--taxonomy FILE]\n"
     "       lgcov review apply --dir DIR\n"
     "       lgcov review commit --dir DIR"
 )
@@ -2554,6 +2554,7 @@ def _review_fetch(argv: list[str], client: Client | None = None) -> int:
     ap.add_argument("--event", required=True, help="the issue_comment event: $GITHUB_EVENT_PATH")
     ap.add_argument("--out", required=True, help="an empty folder to fill")
     ap.add_argument("--cassette-dir", help="overrides the base's cassette_dir")
+    ap.add_argument("--taxonomy", help="for override: the base's taxonomy, over taxonomy_path")
     args = ap.parse_args(argv)
     out = Path(args.out)
     try:
@@ -2568,7 +2569,7 @@ def _review_fetch(argv: list[str], client: Client | None = None) -> int:
         print(f"lgcov review fetch: {exc}", file=sys.stderr)
         return EXIT_ERROR
     gh = GitHub(token, os.environ.get("GITHUB_API_URL") or GITHUB_API, client)
-    code = fetch(gh, event, out, args.cassette_dir).code
+    code = fetch(gh, event, out, args.cassette_dir, args.taxonomy).code
     # only lgcov's own words: the runner obeys `::` commands in a job's output
     state = "refused, see reply.md" if (out / "reply.md").exists() else "not a command"
     print(f"lgcov review fetch: {'ready' if (out / 'command.json').exists() else state}")
@@ -2606,15 +2607,23 @@ def _review_apply(argv: list[str]) -> int:
         print(f"lgcov review apply: {type(exc).__name__} reading {out}", file=sys.stderr)
         return EXIT_ERROR
     command = job.command
-    if isinstance(command, Override):  # T186 PR 10
-        why = "`override` from a comment isn't built yet"
-        return _apply_reply(out, f"Not run: {why}. {local_commands(command)}")
-    config = str(out / "base" / "lgcov.yaml")
+    config, candidate = str(out / "base" / "lgcov.yaml"), str(out / "candidate.json")
     run: Callable[[list[str]], int]
+    watched = job.cassette_dir  # the folder whose files the command changes
     if isinstance(command, Accept):
         which = ["--all-drifted"] if command.nodes is None else ["--nodes", ",".join(command.nodes)]
         run = _cassette_accept
-        run_argv = ["accept", *which, "--candidate-in", str(out / "candidate.json")]
+        run_argv = ["accept", *which, "--candidate-in", candidate]
+    elif isinstance(command, Override):
+        # the judge's label from the report's copy; the reviewer and the note from GitHub
+        run, watched = _review_cmd, "calibration"
+        run_argv = [
+            *("override", "--kpi", command.kpi, "--case-id", command.case),
+            *("--judge-label", job.judge_label, "--human-label", command.label),
+            *("--reviewer", job.reviewer, "--note", job.comment_url),
+            *("--taxonomy", str(out / "base" / "taxonomy.yaml")),
+            *("--bands", "calibration/bands.json", "--candidate-in", candidate),
+        ]
     else:
         run = _review_reject
         run_argv = ["--base-dir", str(out / "base")]
@@ -2623,7 +2632,7 @@ def _review_apply(argv: list[str]) -> int:
     said, here = io.StringIO(), Path.cwd()
     (out / "pr").mkdir(exist_ok=True)
     try:
-        os.chdir(out / "pr")  # both commands read cassette_dir from where they run
+        os.chdir(out / "pr")  # each command reads its folders from where it runs
         with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
             code = run(run_argv)
     finally:
@@ -2633,13 +2642,17 @@ def _review_apply(argv: list[str]) -> int:
         lead = "Nothing committed" if code == EXIT_NOT_DRIFTED else "Not run"
         return _apply_reply(out, f"{lead}: {quoted(lines[-1] if lines else 'it failed', 300)}.")
     try:
-        after = _plain_files(folder)
+        after = _plain_files(out / "pr" / PurePosixPath(watched))
     except (OSError, ValueError):
         return _apply_reply(out, "Not run: the command left a file that isn't a plain file.")
-    write, remove = file_changes(job, fetched, after)
+    write, remove = file_changes(job, fetched, after, watched)
     if not write and not remove:
         return _apply_reply(out, "Nothing committed: the command changed no file.")
-    rows = node_rows(before, _outputs_by_node(after.get("baseline.json")))
+    rows = (
+        ()
+        if isinstance(command, Override)
+        else node_rows(before, _outputs_by_node(after.get("baseline.json")))
+    )
     changes = FileChanges(write, remove, rows)
     (out / "changes.json").write_text(changes_to_json(changes), encoding="utf-8")
     print("lgcov review apply: ready to commit")
@@ -2697,8 +2710,15 @@ def _review_cmd(argv: list[str]) -> int:
     ap.add_argument("--cassette-dir", help="overrides cassette_dir")
     ap.add_argument("--taxonomy", help="taxonomy.yaml; overrides taxonomy_path")
     ap.add_argument("--bands", default=_BANDS, help="bands.json; overrides and cases go beside it")
+    ap.add_argument(
+        "--candidate-in",
+        help="take the case from this file, which `lgcov ci --candidate-out` wrote, instead of "
+        "replaying the graph: nothing is imported (T186)",
+    )
     args = ap.parse_args(argv[1:])
-    overrides = {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
+    # T186: from a candidate file no graph loads, so a stand-in entrypoint validates
+    standin = "candidate.py:unused" if args.candidate_in and not args.graph else args.graph
+    overrides = {"graph_entrypoint": standin, "cassette_dir": args.cassette_dir}
     try:
         cfg = load_config(args.config, overrides)
         taxonomy_path = args.taxonomy or cfg.taxonomy_path
@@ -2717,14 +2737,22 @@ def _review_cmd(argv: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"lgcov review: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    try:
-        # Exception: importing and running user graph code can raise anything.
-        graph = _load_graph(cfg.graph_entrypoint)
-        done = [_replay_under(cfg, graph, run, serve=True, baseline=runs) for run in runs]
-    except Exception as exc:
-        return _harness_error("lgcov review", "cannot replay the graph", exc)
-    _say_replay_notes(done)
-    fresh = [list(r.steps) for r in done]
+    if args.candidate_in:  # T186: what the candidate job ran, read as data
+        try:
+            ran = parse_candidate(Path(args.candidate_in).read_text(encoding="utf-8"))
+            fresh = [list(c.steps) for c in fresh_cassettes(ran, runs)]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"lgcov review: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+    else:
+        try:
+            # Exception: importing and running user graph code can raise anything.
+            graph = _load_graph(cfg.graph_entrypoint)
+            done = [_replay_under(cfg, graph, run, serve=True, baseline=runs) for run in runs]
+        except Exception as exc:
+            return _harness_error("lgcov review", "cannot replay the graph", exc)
+        _say_replay_notes(done)
+        fresh = [list(r.steps) for r in done]
     cases = _l2_cases(spec, fresh)
     if args.case_id not in cases:
         print(f"lgcov review: no case '{args.case_id}'; there are {sorted(cases)}", file=sys.stderr)

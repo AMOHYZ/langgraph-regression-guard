@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from lgcov import review_fetch
+from lgcov.ci_report import MARKER, cases_copy
 from lgcov.cli import _review_fetch
 from lgcov.github_api import API_URL, GitHub
 from lgcov.review_command import comment_event
@@ -97,6 +98,7 @@ class Api:
             "graph.py": ("100644", b"graph = 1\n"),
         }
     )
+    comments: list[dict[str, object]] = field(default_factory=list)  # the PR's, oldest first
     truncated: bool = False
     archive: bytes = field(default_factory=lambda: _zip({"candidate.json": CANDIDATE}))
     fail: dict[str, int] = field(default_factory=dict)  # path -> status
@@ -133,6 +135,7 @@ class Api:
             f"/repos/{REPO}/actions/runs/70": lambda: self.run,
             f"/repos/{REPO}/git/trees/{B}": lambda: self._tree(self.base_files),
             f"/repos/{REPO}/git/trees/{H}": lambda: self._tree(self.head_files),
+            f"/repos/{REPO}/issues/12/comments": lambda: self.comments,
         }
         for sha, data in blobs.items():
             routes[f"/repos/{REPO}/git/blobs/{sha}"] = lambda d=data: {  # type: ignore[misc]  # a default binds each blob
@@ -380,3 +383,74 @@ def test_the_command_line_fills_the_folder_and_prints_only_its_own_words(
     assert _review_fetch(["--event", str(event), "--out", str(out)], client=Api()) == 0
     assert capsys.readouterr().out == "lgcov review fetch: ready\n"
     assert (out / "command.json").exists()
+
+
+# T186: override reads the judge's label from the bot's report comment, the base's taxonomy, and
+# the PR's calibration/ folder, as data.
+OVERRIDE = "/lgcov override --kpi tone --case run-0/respond --label pass"
+TAXONOMY = b"version: 1\nkpis: []\n"
+
+
+def _bot_report(head: str = H, author: str = "github-actions[bot]") -> dict[str, object]:
+    copy = cases_copy(head, {"tone": {"run-0/respond": ("fail",)}})
+    body = f"{MARKER}\n## 🔴 lgcov: drift\n\nverdict: **fail**\n{copy}\n"
+    return {"body": body, "user": {"login": author}}
+
+
+def _override_api() -> Api:
+    api = Api(body_now=OVERRIDE, comments=[_bot_report()])
+    config = CONFIG + b"taxonomy_path: kpis/taxonomy.yaml\n"
+    api.base_files.update(
+        {"lgcov.yaml": ("100644", config), "kpis/taxonomy.yaml": ("100644", TAXONOMY)}
+    )
+    api.head_files.update(
+        {
+            "calibration/bands.json": ("100644", b"{}\n"),
+            "calibration/labels/demo.csv": ("100644", b"case_id,kpi,label\n"),
+        }
+    )
+    return api
+
+
+def test_override_fetches_the_judge_s_label_the_taxonomy_and_calibration(tmp_path: Path) -> None:
+    code, out = _fetch(_override_api(), tmp_path, OVERRIDE)
+    assert code == 0 and not (out / "reply.md").exists()
+    job = json.loads((out / "command.json").read_text())
+    assert job["judge_label"] == "fail" and job["command"]["verb"] == "override"
+    assert (out / "candidate.json").read_bytes() == CANDIDATE
+    assert (out / "base" / "taxonomy.yaml").read_bytes() == TAXONOMY
+    assert (out / "pr" / "calibration" / "labels" / "demo.csv").exists()
+    fetched = json.loads((out / "fetched.json").read_text())
+    assert {"calibration/bands.json", "cassettes/baseline.json"} <= set(fetched)
+
+
+@pytest.mark.parametrize(
+    ("change", "why"),
+    [
+        (lambda a: a.comments.clear(), "no lgcov report on this PR"),
+        (lambda a: a.comments.__setitem__(0, _bot_report(author="mallory")), "no lgcov report"),
+        (lambda a: a.comments.__setitem__(0, _bot_report(head=B)), "is for an older head"),
+        (
+            lambda a: a.base_files.update({"lgcov.yaml": ("100644", CONFIG)}),
+            "the base names no taxonomy",
+        ),
+    ],
+)
+def test_override_refuses_without_the_bot_s_copy_or_a_taxonomy(
+    tmp_path: Path, change: Callable[[Api], object], why: str
+) -> None:
+    api = _override_api()
+    change(api)
+    code, out = _fetch(api, tmp_path, OVERRIDE)
+    assert code == 0 and why in _reply(out), _reply(out)
+    assert not (out / "command.json").exists()
+
+
+def test_the_taxonomy_input_overrides_the_base_s_path(tmp_path: Path) -> None:
+    api = _override_api()
+    api.base_files["other.yaml"] = ("100644", b"version: 1\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    event = comment_event(_event(OVERRIDE))
+    assert fetch(GitHub("tok", client=api), event, out, taxonomy="other.yaml").code == 0
+    assert (out / "base" / "taxonomy.yaml").read_bytes() == b"version: 1\n"
