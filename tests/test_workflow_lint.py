@@ -29,7 +29,12 @@ def test_this_repo_s_workflows_pass(path: Path) -> None:
 
 
 def test_there_are_workflows_to_lint() -> None:
-    assert {p.name for p in WORKFLOWS} >= {"ci.yml", "graph-diff.yml", "release.yml"}
+    assert {p.name for p in WORKFLOWS} >= {
+        "ci.yml",
+        "graph-diff.yml",
+        "lgcov-review.yml",
+        "release.yml",
+    }
 
 
 def test_a_candidate_job_with_no_secrets_passes() -> None:

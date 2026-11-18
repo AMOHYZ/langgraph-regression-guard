@@ -5,9 +5,10 @@ your default branch, or such a commit can be merged ungated. With two jobs, requ
 the job that decides: `report` in this repo's own workflow.
 [Why, and how](#the-bots-commit-has-no-gate-result).
 
-**Not built yet.** This page is the design the next changes build to, and it says so here until
-the workflow ships. Until then, review on the command line with `lgcov cassette accept` and
-`lgcov review override`.
+**`accept` and `reject` are built; `override` comes next.** Until it lands, `/lgcov override`
+answers with the command to run, and you override on the command line with
+`lgcov review override`. In this repo the workflow below runs the commands. Another repo gets
+them from the first release after 0.4.0, which ships `review/action.yml`.
 
 A maintainer answers lgcov's PR report with a comment, and a workflow turns the comment into one
 commit on the PR branch:
@@ -167,6 +168,9 @@ For a fork, or a PR that touches `.github/` or an action file, the reply gives t
 locally instead.
 
 ## How it runs
+
+This repo's own workflow, `.github/workflows/lgcov-review.yml`. In another repo, the step is
+`uses: AMOHYZ/langgraph-regression-guard/review@<tag>`, with a tag that ships it.
 
 ```yaml
 name: lgcov review

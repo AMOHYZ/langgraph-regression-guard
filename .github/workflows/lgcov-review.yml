@@ -1,0 +1,32 @@
+# T186: a maintainer's /lgcov comment on a PR becomes one commit on its branch (docs/review.md).
+# On issue_comment GitHub runs this file and ./review from the default branch, never the PR's.
+name: lgcov review
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  review:
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/lgcov ') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: lgcov-review-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./review
+        with:
+          taxonomy: examples/demo_agent/taxonomy.yaml

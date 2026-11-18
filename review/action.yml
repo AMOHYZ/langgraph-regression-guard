@@ -1,0 +1,78 @@
+name: lgcov review
+description: >-
+  Run a maintainer's /lgcov accept or /lgcov reject comment on a PR as one commit on its branch:
+  read with the token, run with none, commit with it. The commit has no lgcov gate result.
+author: AMOHYZ
+
+# docs/review.md has the design, every refusal and the workflow to run this from. The comment
+# reaches lgcov only through the event file, never a script, and no step checks out the PR.
+inputs:
+  github-token:
+    description: "Token that reads the PR and commits to its branch. With the job's own, the commit starts no workflow."
+    required: false
+    default: ${{ github.token }}
+  taxonomy:
+    description: "taxonomy.yaml, read at the base, for /lgcov override. Override from a comment isn't built yet."
+    required: false
+    default: ""
+  cassette-dir:
+    description: "Overrides cassette_dir from the base's lgcov.yaml. Empty: that, else cassettes."
+    required: false
+    default: ""
+  python-version:
+    description: "Python version uv installs and runs lgcov on."
+    required: false
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        # This job holds a write token: restore and save no cache a PR's job could have left.
+        enable-cache: false
+
+    # Pinned by the Action's own lock, away from the checkout, with no uv config, as the gate's
+    # job that decides installs it (docs/trust-boundary.md, "One job or two").
+    - name: Install lgcov
+      id: install
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        UV_PYTHON: ${{ inputs.python-version }}
+        UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/lgcov-review-venv
+      run: uv sync --no-config --project "$ACTION_PATH/.." --locked --no-dev
+
+    - name: Read the command and its files
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        CASSETTE_DIR: ${{ inputs.cassette-dir }}
+        LGCOV: ${{ runner.temp }}/lgcov-review-venv/bin/lgcov
+        OUT: ${{ runner.temp }}/lgcov-review
+      run: |
+        args=(review fetch --event "$GITHUB_EVENT_PATH" --out "$OUT")
+        [ -n "$CASSETTE_DIR" ] && args+=(--cassette-dir "$CASSETTE_DIR")
+        "$LGCOV" "${args[@]}"
+
+    - name: Run the command, with no token
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      env:
+        LGCOV: ${{ runner.temp }}/lgcov-review-venv/bin/lgcov
+        OUT: ${{ runner.temp }}/lgcov-review
+      run: '"$LGCOV" review apply --dir "$OUT"'
+
+    # It also posts the reply when fetch or apply refused, or failed after writing one.
+    - name: Commit and reply
+      if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        LGCOV: ${{ runner.temp }}/lgcov-review-venv/bin/lgcov
+        OUT: ${{ runner.temp }}/lgcov-review
+      run: '"$LGCOV" review commit --dir "$OUT"'

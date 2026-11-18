@@ -433,6 +433,22 @@ jobs:
   code written to attack the gate can still report a clean run. A same-repo author can also edit the
   workflow itself. [docs/trust-boundary.md](docs/trust-boundary.md) has the full list.
 
+### Review from the PR
+
+A maintainer can answer the report with a comment, and a workflow turns it into one commit on the
+PR's branch. [docs/review.md](docs/review.md) has the workflow, who can run it and every refusal.
+
+1. **Require the check of the job that decides first.** The bot's commit starts no workflow, so it
+   has no lgcov result until someone pushes. Without the required check, it can be merged ungated.
+2. `/lgcov accept respond` makes the node's outputs on this PR the baseline, from the candidate
+   job's file for the head, so you accept what the report showed. `/lgcov accept all` takes every
+   drifted node.
+3. `/lgcov reject` puts the PR's cassettes back to the base's, undoing an accept.
+4. `/lgcov override` isn't built from a comment yet: use `lgcov review override`.
+
+It needs the two-job layout above, and a release after 0.4.0, which ships `review/action.yml`. A
+fork PR, or one that touches `.github/` or an action file, gets the commands to run locally instead.
+
 ### Outcomes
 
 [docs/verdict-actions.md](docs/verdict-actions.md) gives every outcome's PR comment headline,

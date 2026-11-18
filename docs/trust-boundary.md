@@ -68,6 +68,26 @@ So unless the workflow file itself is edited (limit 5), the PR's code can't:
 `tests/test_workflow_lint.py` fails CI if this repo's candidate job can hold a write token or keeps its
 token in `.git/config`, or if its job that decides can be skipped.
 
+## Review commands
+
+A maintainer's `/lgcov accept` or `/lgcov reject` on a PR becomes one commit on its branch
+([review.md](review.md)). That workflow runs on `issue_comment`, so GitHub runs it, and
+`review/action.yml`, from the default branch, never from the PR. Its job holds a write token, so
+it never checks out or runs the PR's code:
+
+- It starts only for a comment by `OWNER`, `MEMBER` or `COLLABORATOR`, then asks GitHub for the
+  commenter's permission and refuses anything below write.
+- The comment reaches lgcov's Python only, through the event file. No script holds it.
+- `lgcov review fetch` reads the PR's files and the candidate job's artifact through GitHub's API,
+  as data. `apply` runs the command with no token. `commit` checks each changed path against the
+  command's allowlist, commits with the PR's head as the parent and moves the branch without force.
+- Every command is refused while the PR's diff touches `.github/` or an action file, so limit 5
+  can't reach the commands.
+
+Limit 1 reaches `accept`: it commits the outputs the candidate job reported, which are the PR's
+code's word. The bot's commit lands on the PR's own branch, so its next report reads "No decision:
+needs_human" at best, and the commit has no gate result until someone pushes. Require the check.
+
 ## What is NOT covered
 
 1. **What the PR's code says it did.** The steps and probes in `candidate.json` are that code's word.
