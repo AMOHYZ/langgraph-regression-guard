@@ -1,6 +1,7 @@
 """T151: the gate simulator (pure, seeded, offline)."""
 
 import math
+import random
 
 import pytest
 
@@ -12,19 +13,21 @@ from lgcov.gate_sim import (
     Scenario,
     Skipped,
     bounds_table,
+    graded_cases,
     grid,
     grid_table,
     joint_cells,
     mc_error,
     predicted,
     resolve,
+    resolve_graded,
     run_grid,
     simulate,
     simulate_arm,
     spawn_seeds,
     sweep,
 )
-from lgcov.stats import ni_required_n, required_n, rho_from_2x2, wilson
+from lgcov.stats import ni_required_n, paired_test, required_n, rho_from_2x2, wilson
 
 
 def test_joint_cells_keep_the_marginals_and_give_rho_back() -> None:
@@ -278,3 +281,40 @@ def test_bounds_table_has_a_row_per_arm_with_each_bounds_misses() -> None:
     text = bounds_table(run_grid(plan, reps=4, seed=0))
     assert "SCAS-style" in text and "Tango" in text
     assert len([line for line in text.splitlines() if line.startswith("| 0.8 ")]) == 4
+
+
+# T151 part 2: graded scores with K > 1 samples per case, the sign-flip path
+
+
+def test_graded_cases_hit_the_asked_mean_scores_and_take_the_sign_flip_path() -> None:
+    base, new = graded_cases(random.Random(4), p_base=0.80, delta=-0.05, rho=0.7, n=4000, k=3)
+    assert len(base) == len(new) == 4000 and {len(s) for s in (*base, *new)} == {3}
+    assert {x for s in (*base, *new) for x in s} == {0.0, 0.5, 1.0}
+    mean = [sum(map(sum, side)) / (3 * 4000) for side in (base, new)]
+    assert mean == [pytest.approx(0.80, abs=0.01), pytest.approx(0.75, abs=0.01)]
+    assert paired_test(base[:30], new[:30]).method == "sign-flip"
+
+
+def test_graded_cells_run_any_rho_and_need_only_a_pr_rate_in_0_1() -> None:
+    r = resolve_graded(Cell(n=100, rho=0.7, p_base=0.95), power=POWER_DELTAS)
+    assert not isinstance(r, Skipped) and (r.rho, r.clamped) == (0.7, False)
+    (_, drop), (_, gain) = r.power
+    assert not isinstance(drop, str) and isinstance(gain, str) and "PR rate 1" in gain
+
+
+def test_a_graded_scenario_has_one_kpi_and_every_pair() -> None:
+    with pytest.raises(ValueError, match="graded"):
+        Scenario(k=3, kpis=2)
+    with pytest.raises(ValueError, match="graded"):
+        Scenario(k=3, missing=0.1)
+
+
+def test_graded_runs_count_calls_and_the_observed_rho_of_case_means() -> None:
+    graded = Scenario(k=3)
+    r = resolve_graded(Cell(n=30, rho=0.7, p_base=0.80))
+    assert not isinstance(r, Skipped)
+    (zero, _) = simulate(r, reps=3, seed=0, scenario=graded)
+    assert zero.ship + zero.block + zero.inconclusive == 3 and zero.tango == (0, 0, 0)
+    assert 0.0 < zero.rho_sum / 3 < 0.7  # sampling noise thins the latent 0.7
+    text = grid_table(run_grid([r], reps=3, seed=0, scenario=graded), graded)
+    assert "Observed ρ" in text

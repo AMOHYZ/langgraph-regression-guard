@@ -12,7 +12,10 @@ Part 2 adds power arms (POWER_DELTAS), each run at the cell's rho or skipped wit
 and runs the M1 grid (grid()) over a process pool. Runs are seeded by index, so the result
 doesn't depend on the number of workers. A Scenario loses pairs (at random, or only the PR's
 failures) or adds KPIs; every run is decided by the gate's own gate_kpis (Holm across the
-KPIs) and gate_findings (the PR's verdict).
+KPIs) and gate_findings (the PR's verdict). With one KPI, each run also puts Tango's and the
+SCAS-style lower bound (paired_score) next to the gate's (bounds_table). A graded Scenario
+(k > 1) draws graded_cases, k samples per case scored 0, 0.5 or 1, so paired_test takes its
+sign-flip path.
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ RhoPolicy = Literal["skip", "clamp"]
 Cells = tuple[float, float, float, float]  # both pass, base only, PR only, both fail
 POWER_DELTAS = (-0.10, 0.05)  # T151 part 2: BLOCK is right at -0.10, SHIP at +0.05
 GRID_N = (50, 100, 200, 800)
+GRADED_SIGMA = 1.0  # the spread of cases' latent effects in the graded model, probit scale
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,11 @@ class Scenario:
     kpis: int = 1  # blocking KPIs on the same cases: KPI 1 takes the arm's delta, the rest 0
     missing: float = 0.0  # the chance a pair is lost
     informative: bool = False  # lose only pairs whose PR result fails, as a PR's bad outputs can
+    k: int = 1  # samples per case; above 1, graded scores (graded_cases), the sign-flip path
+
+    def __post_init__(self) -> None:
+        if self.k > 1 and (self.kpis > 1 or self.missing):
+            raise ValueError("a graded scenario here has one KPI and every pair")
 
 
 MAIN = Scenario()
@@ -58,6 +67,7 @@ SCENARIOS = (
     Scenario("half of the PR's failing results lost", missing=0.5, informative=True),
     Scenario("2 KPIs, Holm", kpis=2),
     Scenario("4 KPIs, Holm", kpis=4),
+    Scenario("graded, K=3 samples per case: the sign-flip path", k=3),
 )
 
 
@@ -101,6 +111,7 @@ class ArmResult:
     tango: tuple[int, int, int] = (0, 0, 0)  # SHIP / BLOCK / INCONCLUSIVE
     scas: tuple[int, int, int] = (0, 0, 0)
     misses: tuple[int, int, int] = (0, 0, 0)
+    rho_sum: float = 0.0  # graded: the observed correlation of case means, over all runs
 
 
 Bounds = tuple[Decision, Decision, tuple[bool, bool, bool]]  # Tango's call, SCAS-style, misses
@@ -114,6 +125,7 @@ class Run:
     first_block: bool
     other_block: bool
     bounds: Bounds | None = None  # one KPI only
+    rho: float = 0.0  # graded: the observed correlation of case means
 
 
 @dataclass(frozen=True)
@@ -176,6 +188,46 @@ def resolve(
     arms = tuple((d, joint_cells(cell.p_base, p, rho)) for d, p in zip(deltas, rates, strict=True))
     reach = tuple((d, _power_arm(cell, rho, d)) for d in power)
     return Resolved(cell, rho, abs(rho - cell.rho) > 1e-9, arms, reach)
+
+
+_NO_TABLE: Cells = (0.0, 0.0, 0.0, 0.0)  # the graded model draws no 2x2 table
+
+
+def resolve_graded(cell: Cell, power: Sequence[float] = ()) -> Resolved | Skipped:
+    """The graded model's arms. It has no 2x2 table, so any rho in [-1, 1] runs as asked; an
+    arm needs only a PR rate in (0, 1)."""
+
+    def arm(delta: float) -> Cells | str:
+        p_pr = cell.p_base + delta
+        return _NO_TABLE if 0 < p_pr < 1 else f"PR rate {p_pr:g} not in (0, 1)"
+
+    why = [w for w in (arm(0.0), arm(-cell.margin)) if isinstance(w, str)]
+    if not -1 <= cell.rho <= 1:
+        why.append(f"rho={cell.rho:g} not in [-1, 1]")
+    if why:
+        return Skipped(cell, why[0])
+    arms = ((0.0, _NO_TABLE), (-cell.margin, _NO_TABLE))
+    return Resolved(cell, cell.rho, False, arms, tuple((d, arm(d)) for d in power))
+
+
+def graded_cases(
+    rng: random.Random, p_base: float, delta: float, rho: float, n: int, k: int
+) -> tuple[list[list[float]], list[list[float]]]:
+    """n cases of k samples a side, each scored 0, 0.5 or 1. A case's pass probability is
+    Φ(a + σz) on each side, its base and PR z's correlated rho, and each sample is
+    Binomial(2, that probability) / 2. a is set so the mean score is exactly p_base on the base
+    and p_base + delta on the PR, since E[Φ(a + σZ)] = Φ(a / √(1 + σ²))."""
+    scale = math.sqrt(1 + GRADED_SIGMA**2)
+    a_base, a_pr = (_NORMAL.inv_cdf(p) * scale for p in (p_base, p_base + delta))
+    base: list[list[float]] = []
+    new: list[list[float]] = []
+    for _ in range(n):
+        z_base = rng.gauss(0.0, 1.0)
+        z_pr = rho * z_base + math.sqrt(1 - rho * rho) * rng.gauss(0.0, 1.0)
+        for a, z, side in ((a_base, z_base, base), (a_pr, z_pr, new)):
+            pi = _NORMAL.cdf(a + GRADED_SIGMA * z)
+            side.append([((rng.random() < pi) + (rng.random() < pi)) / 2 for _ in range(k)])
+    return base, new
 
 
 def spawn_seeds(base: int, count: int) -> list[int]:
@@ -245,7 +297,16 @@ def _bounds(cell: Cell, delta: float, r: PairedResult, kept: list[tuple[float, f
 def _run(cell: Cell, delta: float, cells: Cells, null: Cells, seed: int, scenario: Scenario) -> Run:
     """Each KPI's N pairs (KPI 1 from the arm's table, the rest from delta 0's), less the lost
     ones, judged by the gate's own paired_test, then gate_kpis and gate_findings. With one KPI,
-    also its calls and misses under Tango's and the SCAS-style bound."""
+    also its calls and misses under Tango's and the SCAS-style bound. Graded: N cases of k
+    samples (graded_cases) at the cell's rho, so paired_test takes its sign-flip path."""
+    if scenario.k > 1:
+        data_seed, boot_seed = spawn_seeds(seed, 2)
+        rng = random.Random(data_seed)
+        base, new = graded_cases(rng, cell.p_base, delta, cell.rho, cell.n, scenario.k)
+        g = paired_test(base, new, alpha=cell.alpha, seed=boot_seed)
+        gated = gate_kpis([_kpi("kpi1", g, cell)], alpha=cell.alpha)
+        verdict = gate_findings(gated).statistical or "INCONCLUSIVE"
+        return Run(verdict, g.discordant == 0, 0, verdict == "BLOCK", False, rho=g.rho or 0.0)
     seeds = spawn_seeds(seed, 3 + 2 * (scenario.kpis - 1))  # data, bootstrap, losses, more KPIs
     losses = random.Random(seeds[2])
     streams = [(seeds[0], seeds[1]), *zip(seeds[3::2], seeds[4::2], strict=True)]
@@ -305,6 +366,7 @@ def simulate_arm(
         tango=_calls([b[0] for b in bounds]),
         scas=_calls([b[1] for b in bounds]),
         misses=_add([tuple(map(int, b[2])) for b in bounds]),
+        rho_sum=sum(run.rho for run in runs),
     )
 
 
@@ -331,6 +393,7 @@ def merge(parts: Sequence[ArmResult]) -> ArmResult:
         tango=_add([p.tango for p in parts]),
         scas=_add([p.scas for p in parts]),
         misses=_add([p.misses for p in parts]),
+        rho_sum=sum(p.rho_sum for p in parts),
     )
 
 
@@ -492,10 +555,12 @@ def table(result: CellResult, seed: int) -> str:
 def grid_table(results: Sequence[CellResult | Skipped], scenario: Scenario = MAIN) -> str:
     """One Markdown row per arm: its calls, the wrong call's rate with its MC error, and the
     right call's rate next to the predicted one. Skipped cells and arms follow the table.
-    With lost pairs, the share lost; with more KPIs, how often one at delta 0 was BLOCKed."""
+    With lost pairs, the share lost; with more KPIs, how often one at delta 0 was BLOCKed.
+    Graded: no predicted power (its formulas are binary), and the observed rho of case means."""
     extra = (["Pairs lost"] if scenario.missing else []) + (
         ["BLOCK on a KPI at Δ=0 (Wilson 95%)"] if scenario.kpis > 1 else []
     )
+    extra += ["Observed ρ of case means"] if scenario.k > 1 else []
     head = ["p", "ρ", "N", "Δ", "SHIP / BLOCK / INCONCLUSIVE", "No-drop SHIPs", "Wrong call"]
     head += ["Rate (MC SE)", "Wilson 95%", "Right call", "Rate", "Predicted", *extra]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
@@ -517,11 +582,13 @@ def grid_table(results: Sequence[CellResult | Skipped], scenario: Scenario = MAI
                 name, n_right = (
                     ("SHIP", a.ship) if a.delta > -c.margin else ("BLOCK", a.first_block)
                 )
-                right = f"{name} | {_pct(n_right / a.reps)} | {_pct(p)}"
+                guess = "—" if scenario.k > 1 else _pct(p)
+                right = f"{name} | {_pct(n_right / a.reps)} | {guess}"
             more = [_pct(a.lost / (a.reps * c.n * scenario.kpis))] if scenario.missing else []
             if scenario.kpis > 1:
                 rate_other, _, (lo_o, hi_o) = mc_error(a.other_block, a.reps)
                 more.append(f"{_pct(rate_other)} ({_pct(lo_o)}–{_pct(hi_o)})")
+            more += [f"{a.rho_sum / a.reps:.3f}"] if scenario.k > 1 else []
             lines.append(
                 f"| {c.p_base:g} | {rho} | {c.n} | {a.delta:+g} "
                 f"| {a.ship} / {a.block} / {a.inconclusive} | {a.no_drop_ship} | {wrong} "
@@ -573,17 +640,20 @@ def _grid_main(argv: Sequence[str]) -> int:
     workers: int = args.workers
     scenario_reps: int = args.scenario_reps
     plan = [resolve(cell, policy, POWER_DELTAS) for cell, policy in grid()]
-    for r in plan:  # the logged reasons, before the long part
-        if isinstance(r, Skipped):
-            print(f"skipped {r.cell}: {r.reason}", file=sys.stderr)
-            continue
-        for d, why in r.power:
-            if isinstance(why, str):
-                print(f"skipped arm delta={d:+g} of {r.cell}: {why}", file=sys.stderr)
+    # Graded: no 2x2 table, so no clamped row; p=0.95 with rho=0.7 runs as asked
+    graded = [resolve_graded(cell, POWER_DELTAS) for cell, policy in grid() if policy == "skip"]
+    for what, cells in (("binary", plan), ("graded", graded)):  # the logged reasons, up front
+        for r in cells:
+            if isinstance(r, Skipped):
+                print(f"{what}: skipped {r.cell}: {r.reason}", file=sys.stderr)
+                continue
+            for d, why in r.power:
+                if isinstance(why, str):
+                    print(f"{what}: skipped arm delta={d:+g} of {r.cell}: {why}", file=sys.stderr)
     print(f"M1 grid: seed={seed}, margin m={_GATE.margin:g}, alpha={_GATE.alpha:g}", flush=True)
     for scenario, r_ in ((MAIN, reps), *((s, scenario_reps) for s in SCENARIOS)):
         start = time.perf_counter()
-        results = run_grid(plan, r_, seed, workers, scenario=scenario)
+        results = run_grid(graded if scenario.k > 1 else plan, r_, seed, workers, scenario=scenario)
         took = time.perf_counter() - start
         print(f"\n## {scenario.name}: R={r_} per arm, {took:.0f} s on {workers} workers\n")
         print(grid_table(results, scenario), flush=True)
