@@ -1,0 +1,1 @@
+{"case_id": "run-0/respond", "human_label": 0.0, "judge_label": "pass", "kpi": "answer_states_order_status", "node": "respond", "output": {"answer": "[81] t.\norder #42: shipped\nWhere is my order?"}, "reason": "https://github.com/AMOHYZ/langgraph-regression-guard/pull/207#issuecomment-6989063451", "reviewer": "AMOHYZ"}
