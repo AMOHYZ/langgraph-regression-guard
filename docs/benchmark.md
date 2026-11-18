@@ -11,10 +11,10 @@ Each kind of evidence has its own section, and their numbers never combine: demo
 ## Limitations
 
 - **One real PR (n=1).** Both runs are the same PR and question, so they aren't two data points.
-- **The edited-node baseline beats lgcov on single-node edits,** on recall, 1.00 (20 of 20) against 0.85 (17 of 20), and on coverage, 1.00 (44 of 44) against 0.86 (38 of 44). lgcov is ahead only on case-level precision, 0.45 against 0.35: see [Synthetic](#synthetic).
-- **`lgcov ci` can't tell an added node from a newly reached one.** The synthetic bench gives lgcov both graphs, so a node a route stopped or started reaching is propagated there, and exact match on all edits is 0.90 (28 of 31): see [Per node](#per-node). `lgcov ci` doesn't know base's graph yet, in one job or two, so a node only the PR reached, which no baseline run ever reached, reads inconclusive whether the PR added it or newly reached it. It blocks either way. The label becomes precise once the baseline recording holds the graph's node names: see [the design note](router-route-design.md#the-graphs-node-names-t238). `lgcov bench` gives real rows both graphs too: each side saves the node names of the graph it ran (T242), and `--from-runs` reads them. Runs kept before that have none, so there a node only one side ran stays inconclusive.
-- **No harmless-edit discrimination yet.** lgcov names a root on 21 of 24 harmless synthetic cases and leaves the other 3 inconclusive, and both node-naming baselines flag 24 of 24; negative controls (T123) are the next test. On edits the diff can't pin to one node, it names a root on 10 of 14 harmless cases.
-- **On edits the diff can't pin to one node, lgcov misses 6 of 32 drift roots** (T182). All six sit inside a subgraph, which it calls inconclusive, since a subgraph has no fingerprint. The five T182 found in a model swap inside a client object are seen since T250: the fingerprint counts what a project object holds, not only its repr. Each of the 26 nodes it names there is a drift root, and 13 of them are regression roots: see [Edits the diff can't pin to one node](#edits-the-diff-cant-pin-to-one-node).
+- **The edited-node baseline ties lgcov on single-node edits,** on recall, 1.00 (20 of 20) each, and on coverage, 1.00 (44 of 44) each. lgcov is ahead only on case-level precision, 0.45 against 0.35: see [Synthetic](#synthetic).
+- **`lgcov ci` can't tell an added node from a newly reached one.** The synthetic bench gives lgcov both graphs, so a node a route stopped or started reaching is propagated there, and exact match on all edits is 1.00 (31 of 31): see [Per node](#per-node). `lgcov ci` doesn't know base's graph yet, in one job or two, so a node only the PR reached, which no baseline run ever reached, reads inconclusive whether the PR added it or newly reached it. It blocks either way. The label becomes precise once the baseline recording holds the graph's node names: see [the design note](router-route-design.md#the-graphs-node-names-t238). `lgcov bench` gives real rows both graphs too: each side saves the node names of the graph it ran (T242), and `--from-runs` reads them. Runs kept before that have none, so there a node only one side ran stays inconclusive.
+- **No harmless-edit discrimination yet.** lgcov names a root on 24 of 24 harmless synthetic cases, and both node-naming baselines flag 24 of 24 too; negative controls (T123) are the next test. On edits the diff can't pin to one node, it names a root on 14 of 14 harmless cases.
+- **The synthetic bench labels the nodes inside a subgraph, as `lgcov ci` does only on a baseline recorded with `lgcov record --schema 2`** (T193). Its base runs hold the subgraph's units, and `lgcov record` doesn't write them by default yet. On a default baseline lgcov calls a subgraph inconclusive, since a subgraph has no fingerprint. Before the bench recorded units it missed 6 of 32 drift roots on edits the diff can't pin to one node, all six inside a subgraph, and on single-node edits the subgraph edits were inconclusive. Now it finds all 32: each of the 32 nodes it names is a drift root, and 14 of them are regression roots. See [Edits the diff can't pin to one node](#edits-the-diff-cant-pin-to-one-node).
 - **Synthetic cases come from our own generator,** so they share its assumptions about what an edit looks like; real PRs (T171) are the check.
 - **Usage counts are pending.** Request, token and error counts for the `gpt-6-luna` runs and the pilot still have to come from the usage page: see [Cost per run](#cost-per-run).
 - **lgcov's root label has no noise threshold.** Base run against itself gave the same root and propagated labels as both #163 runs, so #163's 1 of 1 can't be told apart from model noise, and real-PR root precision doesn't test the kill criterion yet: see [A/A noise floor](#aa-noise-floor). `lgcov bench --noise-repeats 3` gave no false alarm on one later base-against-base run ([A/A at K=3](#aa-at-k3)); the gate doesn't use that rule.
@@ -45,7 +45,7 @@ lgcov bench tests/fixtures/bench
 
 ## Synthetic
 
-Run 2026-11-16: 72 cases from 24 distinct edits on 3 offline agents, covering all 8 classes in [mutations.yaml](mutations.yaml) (31 regressed, 24 benign, 17 inert). No paid calls. These numbers never combine with the real PRs below.
+Run 2026-11-18: 72 cases from 24 distinct edits on 3 offline agents, covering all 8 classes in [mutations.yaml](mutations.yaml) (31 regressed, 24 benign, 17 inert). No paid calls. These numbers never combine with the real PRs below.
 
 - **Precision:** of the cases where a method names a node, the share where that node is the edited one and the edit regressed.
 - **Recall:** of regressed cases, the share where the edited node is named.
@@ -58,12 +58,12 @@ Single-node leaves out the router and fan-out edits, which change a conditional 
 
 | Edits | Method | Precision | Recall | Coverage | False flag |
 |---|---|---|---|---|---|
-| All | lgcov root | 0.57 (28 of 49) | 0.90 (28 of 31) | 0.89 (49 of 55) | 0.88 (21 of 24) |
+| All | lgcov root | 0.56 (31 of 55) | 1.00 (31 of 31) | 1.00 (55 of 55) | 1.00 (24 of 24) |
 | All | first drift + router rule | 0.51 (28 of 55) | 0.90 (28 of 31) | 0.89 (49 of 55) | 1.00 (24 of 24) |
 | All | edited node from the diff | 0.43 (31 of 72) | 1.00 (31 of 31) | 1.00 (55 of 55) | 1.00 (24 of 24) |
 | All | first divergence | 0.31 (17 of 55) | 0.55 (17 of 31) | 0.69 (38 of 55) | 1.00 (24 of 24) |
 | All | end-to-end | — | 0.00 (0 of 31) | 0.00 (0 of 55) | 0.00 (0 of 24) |
-| Single-node | lgcov root | 0.45 (17 of 38) | 0.85 (17 of 20) | 0.86 (38 of 44) | 0.88 (21 of 24) |
+| Single-node | lgcov root | 0.45 (20 of 44) | 1.00 (20 of 20) | 1.00 (44 of 44) | 1.00 (24 of 24) |
 | Single-node | first drift + router rule | 0.39 (17 of 44) | 0.85 (17 of 20) | 0.86 (38 of 44) | 1.00 (24 of 24) |
 | Single-node | edited node from the diff | 0.35 (20 of 57) | 1.00 (20 of 20) | 1.00 (44 of 44) | 1.00 (24 of 24) |
 | Single-node | first divergence | 0.39 (17 of 44) | 0.85 (17 of 20) | 0.86 (38 of 44) | 1.00 (24 of 24) |
@@ -75,12 +75,12 @@ Cases sharing an edit aren't independent, so each edit also gets one vote, by ma
 
 | Edits | Method | Precision | Recall | Coverage | False flag |
 |---|---|---|---|---|---|
-| All | lgcov root | 0.58 (11 of 19; 0.36–0.77) | 0.92 (11 of 12; 0.65–0.99) | 0.90 (19 of 21; 0.71–0.97) | 0.89 (8 of 9; 0.57–0.98) |
+| All | lgcov root | 0.57 (12 of 21; 0.37–0.76) | 1.00 (12 of 12; 0.76–1.00) | 1.00 (21 of 21; 0.85–1.00) | 1.00 (9 of 9; 0.70–1.00) |
 | All | first drift + router rule | 0.52 (11 of 21; 0.32–0.72) | 0.92 (11 of 12; 0.65–0.99) | 0.90 (19 of 21; 0.71–0.97) | 1.00 (9 of 9; 0.70–1.00) |
 | All | edited node from the diff | 0.50 (12 of 24; 0.31–0.69) | 1.00 (12 of 12; 0.76–1.00) | 1.00 (21 of 21; 0.85–1.00) | 1.00 (9 of 9; 0.70–1.00) |
 | All | first divergence | 0.33 (7 of 21; 0.17–0.55) | 0.58 (7 of 12; 0.32–0.81) | 0.71 (15 of 21; 0.50–0.86) | 1.00 (9 of 9; 0.70–1.00) |
 | All | end-to-end | — | 0.00 (0 of 12; 0.00–0.24) | 0.00 (0 of 21; 0.00–0.15) | 0.00 (0 of 9; 0.00–0.30) |
-| Single-node | lgcov root | 0.47 (7 of 15; 0.25–0.70) | 0.88 (7 of 8; 0.53–0.98) | 0.88 (15 of 17; 0.66–0.97) | 0.89 (8 of 9; 0.57–0.98) |
+| Single-node | lgcov root | 0.47 (8 of 17; 0.26–0.69) | 1.00 (8 of 8; 0.68–1.00) | 1.00 (17 of 17; 0.82–1.00) | 1.00 (9 of 9; 0.70–1.00) |
 | Single-node | first drift + router rule | 0.41 (7 of 17; 0.22–0.64) | 0.88 (7 of 8; 0.53–0.98) | 0.88 (15 of 17; 0.66–0.97) | 1.00 (9 of 9; 0.70–1.00) |
 | Single-node | edited node from the diff | 0.42 (8 of 19; 0.23–0.64) | 1.00 (8 of 8; 0.68–1.00) | 1.00 (17 of 17; 0.82–1.00) | 1.00 (9 of 9; 0.70–1.00) |
 | Single-node | first divergence | 0.41 (7 of 17; 0.22–0.64) | 0.88 (7 of 8; 0.53–0.98) | 0.88 (15 of 17; 0.66–0.97) | 1.00 (9 of 9; 0.70–1.00) |
@@ -97,15 +97,15 @@ Cases sharing an edit aren't independent, so each edit also gets one vote, by ma
 
 | Edits | Precision | Recall | Exact match | Inconclusive cases | One side only |
 |---|---|---|---|---|---|
-| All | 0.57 (28 of 49) | 0.90 (28 of 31) | 0.90 (28 of 31) | 6 | 0.00 (0 of 49) |
-| Single-node | 0.45 (17 of 38) | 0.85 (17 of 20) | 0.85 (17 of 20) | 6 | 0.00 (0 of 38) |
+| All | 0.56 (31 of 55) | 1.00 (31 of 31) | 1.00 (31 of 31) | 0 | 0.00 (0 of 55) |
+| Single-node | 0.45 (20 of 44) | 1.00 (20 of 20) | 1.00 (20 of 20) | 0 | 0.00 (0 of 44) |
 
 ### What this says
 
-- **Edited node from the diff matches or beats lgcov on recall and coverage on single-node edits:** recall 1.00 (20 of 20) against 0.85 (17 of 20), and coverage 1.00 (44 of 44) against 0.86 (38 of 44). Its false-flag rate is 1.00 (24 of 24). On precision lgcov is ahead by case, 0.45 (17 of 38) against 0.35 (20 of 57), because it stays quiet on an edit that changed nothing. By edit the two are level, as the table above shows.
+- **Edited node from the diff matches or beats lgcov on recall and coverage on single-node edits:** recall 1.00 (20 of 20) against 1.00 (20 of 20), and coverage 1.00 (44 of 44) against 1.00 (44 of 44). Its false-flag rate is 1.00 (24 of 24). On precision lgcov is ahead by case, 0.45 (20 of 44) against 0.35 (20 of 57), because it stays quiet on an edit that changed nothing. By edit the two are level, as the table above shows.
 - **Edits the diff can't pin to one node (T182) are scored on their own,** [below](#edits-the-diff-cant-pin-to-one-node): there the edited node from the diff has no single node to name.
-- **lgcov flags harmless changes without judges:** its false-flag rate is 0.88 (21 of 24) on single-node edits, against 1.00 (24 of 24) for the edited node from the diff. This run scores drift only, so a harmless change that moves an output gets a root. A changed run lgcov names no root on is one it left inconclusive, not one it found harmless, and end-to-end's 0 only means it names no node.
-- **On a router or fan-out edit lgcov names the routing node,** from the router's fingerprint, and first divergence names a node downstream: recall on all edits is 0.90 (28 of 31) against 0.55 (17 of 31). On single-node edits it is 0.85 (17 of 20) against 0.85 (17 of 20).
+- **lgcov flags harmless changes without judges:** its false-flag rate is 1.00 (24 of 24) on single-node edits, against 1.00 (24 of 24) for the edited node from the diff. This run scores drift only, so a harmless change that moves an output gets a root. A changed run lgcov names no root on is one it left inconclusive, not one it found harmless, and end-to-end's 0 only means it names no node.
+- **On a router or fan-out edit lgcov names the routing node,** from the router's fingerprint, and first divergence names a node downstream: recall on all edits is 1.00 (31 of 31) against 0.55 (17 of 31). On single-node edits it is 1.00 (20 of 20) against 0.85 (17 of 20).
 - **End-to-end names no node.** As a detector, its final answer changed on 1.00 (31 of 31) regressed cases and on 0.92 (22 of 24) harmless ones.
 
 ### Edits the diff can't pin to one node
@@ -136,7 +136,7 @@ The counts are small, 10 regressed cases, so every ratio comes with them.
 | Shared helper (support) | lgcov root | 0.29 (2 of 7) | 1.00 (2 of 2) | 0.50 (1 of 2) | 1.00 (4 of 4) | 0 | 1.00 (6 of 6) |
 | Shared helper (support) | edited node from the diff: all touched nodes | 0.11 (2 of 18) | 1.00 (2 of 2) | 0.00 (0 of 2) | 1.00 (4 of 4) | 0 | — |
 | Shared helper (support) | first divergence | 0.33 (2 of 6) | 1.00 (2 of 2) | 1.00 (2 of 2) | 1.00 (4 of 4) | 0 | — |
-| Shared helper (support-nested) | lgcov root | 1.00 (1 of 1) | 0.50 (1 of 2) | 0.50 (1 of 2) | 0.00 (0 of 4) | 5 | 0.50 (2 of 4) |
+| Shared helper (support-nested) | lgcov root | 0.29 (2 of 7) | 1.00 (2 of 2) | 0.50 (1 of 2) | 1.00 (4 of 4) | 0 | 0.50 (2 of 4) |
 | Shared helper (support-nested) | edited node from the diff: all touched nodes | 0.17 (2 of 12) | 1.00 (2 of 2) | 0.00 (0 of 2) | 1.00 (4 of 4) | 0 | — |
 | Shared helper (support-nested) | first divergence | 0.17 (1 of 6) | 0.50 (1 of 2) | 0.50 (1 of 2) | 1.00 (4 of 4) | 0 | — |
 | Model swap (support) | lgcov root | 0.50 (4 of 8) | 1.00 (4 of 4) | 1.00 (2 of 2) | 1.00 (4 of 4) | 0 | 1.00 (4 of 4) |
@@ -148,7 +148,7 @@ The counts are small, 10 regressed cases, so every ratio comes with them.
 | Shared config (support) | lgcov root | 0.40 (2 of 5) | 1.00 (2 of 2) | 0.00 (0 of 2) | 1.00 (1 of 1) | 0 | 1.00 (4 of 4) |
 | Shared config (support) | edited node from the diff: all touched nodes | 0.17 (2 of 12) | 1.00 (2 of 2) | 0.00 (0 of 2) | 1.00 (1 of 1) | 0 | — |
 | Shared config (support) | first divergence | 0.67 (2 of 3) | 1.00 (2 of 2) | 1.00 (2 of 2) | 1.00 (1 of 1) | 0 | — |
-| All | lgcov root | 0.50 (13 of 26) | 0.93 (13 of 14) | 0.60 (6 of 10) | 0.71 (10 of 14) | 5 | 0.90 (18 of 20) |
+| All | lgcov root | 0.44 (14 of 32) | 1.00 (14 of 14) | 0.60 (6 of 10) | 1.00 (14 of 14) | 0 | 0.90 (18 of 20) |
 | All | edited node from the diff: all touched nodes | 0.23 (14 of 60) | 1.00 (14 of 14) | 0.40 (4 of 10) | 1.00 (14 of 14) | 0 | — |
 | All | first divergence | 0.38 (9 of 24) | 0.64 (9 of 14) | 0.50 (5 of 10) | 1.00 (14 of 14) | 0 | — |
 
@@ -159,7 +159,7 @@ The counts are small, 10 regressed cases, so every ratio comes with them.
 | Shared helper (support) | lgcov root | 1.00 (7 of 7) | 1.00 (7 of 7) | 1.00 (6 of 6) | 0 |
 | Shared helper (support) | edited node from the diff: all touched nodes | 0.39 (7 of 18) | 1.00 (7 of 7) | 0.17 (1 of 6) | 0 |
 | Shared helper (support) | first divergence | 1.00 (6 of 6) | 0.86 (6 of 7) | 0.83 (5 of 6) | 0 |
-| Shared helper (support-nested) | lgcov root | 1.00 (1 of 1) | 0.14 (1 of 7) | 0.00 (0 of 6) | 5 |
+| Shared helper (support-nested) | lgcov root | 1.00 (7 of 7) | 1.00 (7 of 7) | 1.00 (6 of 6) | 0 |
 | Shared helper (support-nested) | edited node from the diff: all touched nodes | 0.58 (7 of 12) | 1.00 (7 of 7) | 0.17 (1 of 6) | 0 |
 | Shared helper (support-nested) | first divergence | 0.17 (1 of 6) | 0.14 (1 of 7) | 0.00 (0 of 6) | 0 |
 | Model swap (support) | lgcov root | 1.00 (8 of 8) | 1.00 (8 of 8) | 1.00 (6 of 6) | 0 |
@@ -171,15 +171,15 @@ The counts are small, 10 regressed cases, so every ratio comes with them.
 | Shared config (support) | lgcov root | 1.00 (5 of 5) | 1.00 (5 of 5) | 1.00 (3 of 3) | 0 |
 | Shared config (support) | edited node from the diff: all touched nodes | 0.42 (5 of 12) | 1.00 (5 of 5) | 0.67 (2 of 3) | 0 |
 | Shared config (support) | first divergence | 1.00 (3 of 3) | 0.60 (3 of 5) | 0.33 (1 of 3) | 0 |
-| All | lgcov root | 1.00 (26 of 26) | 0.81 (26 of 32) | 0.75 (18 of 24) | 5 |
+| All | lgcov root | 1.00 (32 of 32) | 1.00 (32 of 32) | 1.00 (24 of 24) | 0 |
 | All | edited node from the diff: all touched nodes | 0.53 (32 of 60) | 1.00 (32 of 32) | 0.33 (8 of 24) | 0 |
 | All | first divergence | 0.79 (19 of 24) | 0.59 (19 of 32) | 0.46 (11 of 24) | 0 |
 
-- **Against drift roots, lgcov's precision is 1.00 (26 of 26) and its recall 0.81 (26 of 32).** It misses 6: 6 in Shared helper (support-nested), where its fingerprint saw 0.50 (2 of 4) of the touched nodes and 5 cases are inconclusive. Inside a subgraph it calls the subgraph node inconclusive, since that has no fingerprint (T220's gap).
-- **Against regression roots, lgcov's precision is 0.50 (13 of 26).** Of the other 13 nodes it names, 13 are drift roots that did no harm: correct as drift, false as harm.
+- **Against drift roots, lgcov's precision is 1.00 (32 of 32) and its recall 1.00 (32 of 32).** Inside a subgraph it names the node that ran there, by its path, since the base runs hold the subgraph's units, as `lgcov record --schema 2` writes them (T193).
+- **Against regression roots, lgcov's precision is 0.44 (14 of 32).** Of the other 18 nodes it names, 18 are drift roots that did no harm: correct as drift, false as harm.
 - **All touched nodes names 60 nodes,** with recall 1.00 (14 of 14) against regression roots. **First divergence names 24,** one per changed case, with exact match 0.50 (5 of 10) against regression roots.
 - **End-to-end names no node.** As a detector, its final answer changed on 1.00 (10 of 10) regressed cases and on 1.00 (14 of 14) harmless ones.
-- **Follow-ups:** fingerprint and record the nodes inside a subgraph (T193). Transitive-helper fingerprints aren't the gap: here and in T220, a helper edit changed the fingerprint of every node lgcov fingerprints that reaches it.
+- **Transitive-helper fingerprints aren't the gap:** here and in T220, a helper edit changed the fingerprint of every node lgcov fingerprints that reaches it.
 
 ### A/A re-runs
 
@@ -207,7 +207,8 @@ The noise rule (`drift_exceeds_noise`), on the seeded-noise agent at K=3: the re
 
 ### Limitations
 
-- Exact match on the edited node: parent-only naming counts as a miss, so an edit to `sub.inner` is a miss whatever a method says about `sub`. lgcov calls `sub` inconclusive, since a subgraph has no fingerprint.
+- Exact match on the edited node: parent-only naming counts as a miss, so an edit to `sub.inner` is a miss whatever a method says about `sub`.
+- The base runs hold the units inside a subgraph, so lgcov labels as `lgcov ci` does on a baseline recorded with `lgcov record --schema 2` (T193). On a baseline recorded without it, lgcov calls a subgraph inconclusive, since a subgraph has no fingerprint.
 - A router edit counts as a hit whenever the router's code changed and a node drifted after it. lgcov doesn't check that the run took another branch, and no case here has a router edit beside a node edit.
 - Fake models and small graphs, so these numbers don't predict a real PR.
 - The regression label comes from each agent's own outcome check.

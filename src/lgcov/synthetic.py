@@ -105,8 +105,9 @@ def generate(
 
 
 def every_case(agent: Agent) -> tuple[Case, ...]:
-    """Each edit on each question, once: one run and one mutation leave the seed nothing to pick."""
-    bases = [record(agent.graph, {"question": question}) for question in agent.questions]
+    """Each edit on each question, once: one run and one mutation leave the seed nothing to pick.
+    T193: base runs hold the units inside a subgraph, as `lgcov record --schema 2` writes them."""
+    bases = [record(agent.graph, {"question": q}, units=True) for q in agent.questions]
     return tuple(
         replace(generate(operator, (mutation,), (base,), agent.outcome_ok, 0), agent=agent.name)
         for operator, mutations in agent.mutations.items()
@@ -312,8 +313,8 @@ def shared_case(
 
 
 def every_shared_case(agent: SharedAgent) -> tuple[SharedCase, ...]:
-    """T182: each edit on each question, once, as `every_case` runs T121's edits."""
-    bases = [record(agent.graph, {"question": question}) for question in agent.questions]
+    """T182: each edit on each question, once, as `every_case` runs T121's edits, with units."""
+    bases = [record(agent.graph, {"question": q}, units=True) for q in agent.questions]
     return tuple(
         replace(shared_case(operator, edit, base, agent.outcome_ok), agent=agent.name)
         for operator, edits in agent.edits.items()

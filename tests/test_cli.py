@@ -3728,8 +3728,9 @@ def test_the_synthetic_bench_scores_the_labels_ci_ships() -> None:
         c for c in _real_suite() if c.truth.edited_node == "sub.inner" and c.truth.activated
     )
     found = _shipped(inner)
-    # A subgraph has no fingerprint: the first-drift rule named `sub`, ci calls it inconclusive.
-    assert (found.root, found.inconclusive) == (frozenset(), frozenset({"sub"}))
+    # T193: the base holds the units, so ci names the edited unit, as T121's truth does. The
+    # first-drift rule, which sees only top-level steps, still names the subgraph.
+    assert (found.root, found.inconclusive) == (frozenset({"sub.inner"}), frozenset())
     assert _lgcov_root(inner) == {"sub"} and len(by_agent) == 3
 
 
@@ -3910,22 +3911,27 @@ def test_bench_from_runs_a_node_file_that_isn_t_names_is_an_error_row(tmp_path: 
 
 
 # T182: what `lgcov ci` ships on edits the diff can't pin to one node.
-def _shared_case(agent: SharedAgent, word: str, question: str) -> SharedCase:
+def _shared_case(agent: SharedAgent, word: str, question: str, units: bool = False) -> SharedCase:
     (operator, edit), *_ = [
         (op, e) for op, edits in agent.edits.items() for e in edits if word in e.variant
     ]
-    base = record(agent.graph, {"question": question})
+    base = record(agent.graph, {"question": question}, units=units)
     return replace(shared_case(operator, edit, base, agent.outcome_ok), agent=agent.name)
 
 
-def test_ci_names_no_root_inside_a_subgraph_and_t193_should_change_that() -> None:
-    # T220's gap, offline: the helper edit changes respond's answer, but there respond runs inside
-    # the subgraph `answer`, which has no fingerprint. T193 should make this `answer.respond`
-    # root, as on the flat build. Today's behaviour, pinned on purpose: not an xfail.
-    nested = _shared_case(SUPPORT_NESTED, "customer asks", "Where is my order?")
+def test_ci_names_the_root_inside_a_subgraph() -> None:
+    # T220's gap, closed by T193: the helper edit changes respond's answer, and there respond runs
+    # inside the subgraph `answer`, which has no fingerprint. On a base recorded with units,
+    # `answer.respond` is root, as `respond` is on the flat build, and `answer` gets no label.
+    nested = _shared_case(SUPPORT_NESTED, "customer asks", "Where is my order?", units=True)
     assert nested.truth.regression_roots == {"answer.respond"}
     found = _shipped(nested, set(SUPPORT_NESTED.graph.nodes))
-    assert found == Found(frozenset(), frozenset({"answer"}))
+    assert found == Found(frozenset({"answer.respond"}))
+    # without units, as before them: the subgraph is inconclusive
+    blind = _shared_case(SUPPORT_NESTED, "customer asks", "Where is my order?")
+    assert _shipped(blind, set(SUPPORT_NESTED.graph.nodes)) == Found(
+        frozenset(), frozenset({"answer"})
+    )
     flat = _shared_case(SUPPORT, "customer asks", "Where is my order?")
     assert _shipped(flat, set(SUPPORT.graph.nodes)).root == {"respond"}
 

@@ -581,8 +581,8 @@ def _shared_lines(shared: SharedReport | None) -> list[str]:
         f"- **Against drift roots, lgcov's precision is {_plain(every.drift.precision)} and its "
         f"recall {_plain(every.drift.recall)}.** "
         + (f"It misses {missed}: {'; '.join(misses)}. " if misses else "")
-        + "Inside a subgraph it calls the subgraph node inconclusive, since that has no "
-        "fingerprint (T220's gap).",
+        + "Inside a subgraph it names the node that ran there, by its path, since the base runs "
+        "hold the subgraph's units, as `lgcov record --schema 2` writes them (T193).",
         f"- **Against regression roots, lgcov's precision is "
         f"{_plain(every.regression.precision)}.** Of the other "
         f"{every.regression.precision.of - every.regression.precision.hits} nodes it names, "
@@ -594,9 +594,8 @@ def _shared_lines(shared: SharedReport | None) -> list[str]:
         f"- **End-to-end names no node.** As a detector, its final answer changed on "
         f"{_plain(shared.end_to_end_caught)} regressed cases and on "
         f"{_plain(shared.end_to_end_false)} harmless ones.",
-        "- **Follow-ups:** fingerprint and record the nodes inside a subgraph (T193). "
-        "Transitive-helper fingerprints aren't the gap: here and in T220, a helper edit changed "
-        "the fingerprint of every node lgcov fingerprints that reaches it.",
+        "- **Transitive-helper fingerprints aren't the gap:** here and in T220, a helper edit "
+        "changed the fingerprint of every node lgcov fingerprints that reaches it.",
         "",
     ]
 
@@ -701,8 +700,10 @@ def render_section(report: Report) -> str:
         "### Limitations",
         "",
         "- Exact match on the edited node: parent-only naming counts as a miss, so an edit to "
-        "`sub.inner` is a miss whatever a method says about `sub`. lgcov calls `sub` inconclusive, "
-        "since a subgraph has no fingerprint.",
+        "`sub.inner` is a miss whatever a method says about `sub`.",
+        "- The base runs hold the units inside a subgraph, so lgcov labels as `lgcov ci` does on a "
+        "baseline recorded with `lgcov record --schema 2` (T193). On a baseline recorded without "
+        "it, lgcov calls a subgraph inconclusive, since a subgraph has no fingerprint.",
         "- A router edit counts as a hit whenever the router's code changed and a node drifted "
         "after it. lgcov doesn't check that the run took another branch, and no case here has a "
         "router edit beside a node edit.",
