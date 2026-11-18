@@ -197,7 +197,7 @@ the ref CI pins.
 |---|---|---|
 | 0.3.0 and older | Recording 1, candidate 2 | The same. On a schema-2 recording it ignores the new top-level fields and exits 2 on a step with a new key |
 | R1, 0.4.0 | Recording 1 and 2, candidate 2 and 3, with every field on this page | Recording 1, candidate 2 |
-| R2 | The same | Recording 2 with `graph` and subgraph units, candidate 3 |
+| R2, 0.6.0 | The same | Recording 2 with `graph` and subgraph units, candidate 3 |
 | Later | The same | Tool and agent units, routes, samples and parts, as optional keys under the same numbers |
 
 - R1 ships before R2. R2's notes say: re-record once, and every job and the lgcov you record with
@@ -284,7 +284,7 @@ field after the flip is optional.
    `answer` is inconclusive. After 3b `answer.respond` is root, and `answer` gets no label (the
    container rule).
 4. **Flip:** `lgcov record` writes schema 2 by default. `--schema 1` writes schema 1. The demo
-   baselines are re-recorded. Then release R2, which is a separate task.
+   baselines are re-recorded. Release R2 is 0.6.0.
 5. **Redaction** at write time.
 6. **Tool units**, after 5.
 7. **Units of a graph started inside a node or a tool**, served only whole.

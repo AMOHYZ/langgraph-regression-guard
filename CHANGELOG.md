@@ -1,8 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-11-18)
 
-- `lgcov record` writes schema 2 by default: `schema`, `scheme` (`ast`), `graph`, and the nodes inside a subgraph, as units. `--schema 1` still writes the runs only, and schema 1 files still load. A schema-2 file needs lgcov 0.4.0 or later, the Action's deciding job included. **Re-record** to get units and the graph's node names. The nodes inside a subgraph are written with their inputs and outputs unredacted until the redaction change lands ([docs/design/cassette-schema.md](docs/design/cassette-schema.md), section 6, PR 5). A graph started inside a node or a tool still gets no units, and tool calls stay out. On a schema-1 baseline a subgraph still runs live and is labelled as before.
+Release R2. Docs-only and simulator PRs since 0.5.0 have no line: #204, #205, #206.
+
+### Changed
+
+`lgcov record` writes schema 2 by default (#208).
+
+- A new baseline holds `schema`, `scheme` (`ast`), `graph`, and the nodes inside a subgraph, as units. `--schema 1` still writes the runs only, and a schema-1 file still loads.
+- **Re-record** once to get the units and the graph's node names. Every job, and the lgcov you record with, must be 0.4.0 or later. An older deciding job exits 2 on a schema-2 file.
+- The nodes inside a subgraph are written with their inputs and outputs unredacted until the redaction change lands ([docs/design/cassette-schema.md](docs/design/cassette-schema.md), section 6, PR 5). A graph started inside a node or a tool still gets no units, and tool calls stay out. On a schema-1 baseline a subgraph still runs live and is labelled as before.
 
 ## 0.5.0 (2026-11-18)
 
