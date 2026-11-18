@@ -1,13 +1,17 @@
 """The Action's PR comment (pure): T089's timing line, T104's lint line, T199's tally line."""
 
+import json
 from dataclasses import replace
 
 import pytest
 
 from lgcov.ci_report import (
+    CASES_MARKER,
+    MAX_COPIED,
     CiResult,
     Tally,
     Timing,
+    cases_copy,
     format_tally,
     format_timing,
     render_ci_report,
@@ -79,3 +83,38 @@ def test_the_tally_line_sits_under_the_heading_and_changes_nothing_else() -> Non
 def test_a_comment_on_a_pr_lgcov_did_not_check_has_no_tally_line() -> None:
     report = render_ci_report(CiResult("root-drift", harness_error="boom", tally=Tally(2, 0)))
     assert "runs touched" not in report
+
+
+# T186: the report's last line holds every case a model judge scored on the PR, with its labels,
+# bound to the head, for `/lgcov override` to read (docs/review.md).
+H = "a" * 40
+
+
+def _copied(line: str) -> object:
+    assert line.startswith(f"{CASES_MARKER} ") and line.endswith(" -->"), line
+    return json.loads(line[len(CASES_MARKER) + 1 : -len(" -->")])
+
+
+def test_the_copy_of_the_judged_cases_is_the_report_s_last_line() -> None:
+    copy = cases_copy(H, {"tone": {"run-0/respond": ("fail", "pass")}})
+    report = render_ci_report(CiResult("root-drift", cases_copy=copy))
+    assert report.splitlines()[-1] == copy
+    assert _copied(copy) == {"head": H, "kpis": {"tone": {"run-0/respond": ["fail", "pass"]}}}
+
+
+def test_no_copy_without_a_head_or_a_judged_case() -> None:
+    assert cases_copy(None, {"tone": {"run-0/respond": ("fail",)}}) == ""
+    assert cases_copy(H, {}) == ""
+    assert CASES_MARKER not in render_ci_report(CiResult("root-drift"))
+
+
+def test_a_name_can_t_end_the_comment_early() -> None:
+    hostile = "run-0/a--><!--b--!>"
+    copy = cases_copy(H, {"x>": {hostile: ("fail",)}})
+    assert copy.count("-->") == 1 and copy.count("<!--") == 1 and ">" not in copy[:-1]
+    assert _copied(copy) == {"head": H, "kpis": {"x>": {hostile: ["fail"]}}}
+
+
+def test_too_many_cases_leave_only_their_count() -> None:
+    many = {"tone": {f"run-{i}/respond": ("pass",) for i in range(MAX_COPIED + 1)}}
+    assert _copied(cases_copy(H, many)) == {"head": H, "kpis": None, "cases": MAX_COPIED + 1}

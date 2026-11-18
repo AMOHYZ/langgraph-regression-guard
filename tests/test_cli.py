@@ -2710,6 +2710,45 @@ def test_cli_ci_pr_tier_never_calls_a_general_llm_judge(
     assert "tier: `pr`" in report
 
 
+class _FailsTheTweakJudge:
+    """A general LLM judge client: fail for the answers PR 7's prompt tweak gives, else pass.
+    The demo's fake model starts each answer with the prompt's length: 81 and 65 after it."""
+
+    def __init__(self, kpi: KPI) -> None:
+        self.kpi = kpi
+
+    def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
+        label = "fail" if str(node_output.get("answer", ""))[:4] in ("[81]", "[65]") else "pass"
+        return Verdict(self.kpi, label, self.kpi.score_map[label], 0.9, {})
+
+
+def test_cli_ci_names_the_cases_a_model_judge_scored_lower_and_copies_them_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T186: the line a maintainer reads before `/lgcov override`, and the copy it reads."""
+    monkeypatch.setattr("lgcov.cli._llm_judge", _FailsTheTweakJudge)
+    _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8").replace(*PR_7))
+    (tmp_path / "taxonomy.yaml").write_text(LLM_TAXONOMY, encoding="utf-8")
+    head = "c" * 40
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"pull_request": {"head": {"sha": head}}}), encoding="utf-8")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    _, report, _ = _run_ci(tmp_path, "--taxonomy", "taxonomy.yaml", "--tier", "nightly")
+    lowered = "(judge: fail, fail, fail; base: pass, pass, pass)"
+    assert (
+        "Cases this PR scored lower than the base, `answer_tone`: "
+        f"`run-0/respond` {lowered}, `run-1/respond` {lowered}."
+    ) in report.splitlines()
+    last = report.splitlines()[-1]
+    assert last.startswith("<!-- lgcov-cases {") and last.endswith("} -->")
+    copied = json.loads(last.removeprefix("<!-- lgcov-cases ").removesuffix(" -->"))
+    labels = ["fail", "fail", "fail"]
+    assert copied == {
+        "head": head,
+        "kpis": {"answer_tone": {"run-0/respond": labels, "run-1/respond": labels}},
+    }
+
+
 def test_cli_ci_nightly_tier_runs_every_node_live_with_k_3_and_no_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

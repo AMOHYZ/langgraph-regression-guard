@@ -15,6 +15,7 @@ from lgcov.sampling import (
     kpi_stats,
     render_gate_table,
     usage_tokens,
+    worse_case_lines,
 )
 from lgcov.stats import required_n
 
@@ -416,3 +417,52 @@ def test_the_gate_table_shows_a_new_failure_the_rounded_rates_hide() -> None:
     assert "on 5 of 200 cases: `c0`, `c1`, `c2` and 2 more |" in "\n".join(
         render_gate_table([many])
     )
+
+
+# T186: the report names the cases a model judge scored lower, with what it said, so a
+# maintainer can answer with `/lgcov override`.
+
+
+def test_a_sample_keeps_the_judge_s_label() -> None:
+    samples = judge_samples(Scripted(["pass", "infra", "fail"]), {}, {}, 3)
+    assert [s.label for s in samples] == ["pass", "", "fail"]
+
+
+def test_a_model_judged_kpi_keeps_each_case_s_labels_on_both_sides() -> None:
+    base, new = _cases(["pass"], ["pass", "pass"]), _cases(["fail"], ["pass", "infra"])
+    stats = kpi_stats(KPI_, 1, base=base, new=new)
+    assert stats.case_labels == (
+        ("run-0", ("pass",), ("fail",)),
+        ("run-1", ("pass", "pass"), ("pass",)),
+    )
+
+
+def test_a_code_judge_keeps_no_labels() -> None:
+    cases = _cases(["pass"], ["fail"])
+    assert kpi_stats(KPI_, 1, base=cases, new=cases, code=True).case_labels == ()
+
+
+def test_the_report_names_each_case_a_model_judge_scored_lower() -> None:
+    base, new = _cases(["pass"], ["pass"], ["fail"]), _cases(["fail"], ["pass"], ["fail"])
+    assert worse_case_lines([kpi_stats(KPI_, 1, base=base, new=new)]) == [
+        "Cases this PR scored lower than the base, `grounded`: `run-0` (judge: fail; base: pass)."
+    ]
+
+
+def test_a_case_judged_k_times_shows_every_label() -> None:
+    base, new = _cases(["pass", "pass", "pass"]), _cases(["fail", "pass", "fail"])
+    line = worse_case_lines([kpi_stats(KPI_, 3, base=base, new=new)])[0]
+    assert line.endswith("`run-0` (judge: fail, pass, fail; base: pass, pass, pass).")
+
+
+def test_the_list_stops_at_10_cases() -> None:
+    base, new = _cases(*[["pass"]] * 15), _cases(*[["fail"]] * 15)
+    line = worse_case_lines([kpi_stats(KPI_, 1, base=base, new=new)])[0]
+    assert line.count("(judge: fail; base: pass)") == 10 and line.endswith(" +5 more.")
+
+
+def test_no_line_for_a_code_judge_or_a_kpi_no_case_got_worse() -> None:
+    base, new = _cases(["pass"]), _cases(["fail"])
+    same = kpi_stats(POLITE, 1, base=base, new=base)
+    code = kpi_stats(KPI_, 1, base=base, new=new, code=True)
+    assert worse_case_lines([same, code]) == []

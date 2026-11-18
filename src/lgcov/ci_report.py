@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from lgcov.drift_gate import FailOn, drift_exit_code
@@ -9,6 +11,8 @@ from lgcov.verdict_actions import Action, CiStatus, Evidence, GateFindings, Mode
 
 MARKER = "<!-- lgcov-report -->"  # T081: the comment upsert finds its own comment by this
 HARNESS_BANNER = "⚠️ Harness error, not a regression"
+CASES_MARKER = "<!-- lgcov-cases"  # T186: the report's last line, which `/lgcov override` reads
+MAX_COPIED = 500  # T186: more judged cases than this, and the copy holds only their count
 
 
 @dataclass(frozen=True)
@@ -108,6 +112,7 @@ class CiResult:
     mode: Mode = "enforcing"  # T153: the rest are what the workflow tells this run
     approved_by: tuple[str, ...] = ()
     ci_status: CiStatus = ""
+    cases_copy: str = ""  # T186: cases_copy's line, the report's last; "" for none
 
     @property
     def action(self) -> Action:
@@ -211,4 +216,23 @@ def render_ci_report(r: CiResult) -> str:
         f"propagated drift: {len(r.propagated_drift)} · verdict: **{action.verdict}**"
     )
     body = "\n".join(lines) + "\n"
-    return _claiming_no_ship(body) if action.state == "first_adoption" else body
+    body = _claiming_no_ship(body) if action.state == "first_adoption" else body
+    return body + f"{r.cases_copy}\n" if r.cases_copy else body
+
+
+def cases_copy(head: str | None, kpis: Mapping[str, Mapping[str, Sequence[str]]]) -> str:
+    """T186: every case a model judge scored on the PR, with its labels, bound to the PR's
+    head, as the hidden line `/lgcov override` reads its judge label from (docs/review.md).
+    "" without a head or a judged case. `<` and `>` are written as JSON escapes, so no name can
+    end the comment early. Over MAX_COPIED cases, it holds their count instead."""
+    count = sum(len(cases) for cases in kpis.values())
+    if not head or not count:
+        return ""
+    copied: dict[str, object] = {"head": head}
+    if count > MAX_COPIED:
+        copied |= {"kpis": None, "cases": count}
+    else:
+        copied["kpis"] = {k: {c: list(v) for c, v in cases.items()} for k, cases in kpis.items()}
+    text = json.dumps(copied, sort_keys=True, separators=(", ", ": "))
+    escaped = text.replace("<", "\\u003c").replace(">", "\\u003e")
+    return f"{CASES_MARKER} {escaped} -->"
