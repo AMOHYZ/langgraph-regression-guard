@@ -95,6 +95,33 @@ def test_unchanged_graph_replays_with_zero_drift() -> None:
     assert replay(linear(), cassette) == []
 
 
+class _SecretState(TypedDict, total=False):
+    token: str
+    n: int
+
+
+def _echo_secret(state: _SecretState) -> _SecretState:
+    return {"n": 1, "token": state["token"]}
+
+
+def test_a_recording_stores_a_secret_named_value_as_a_marker() -> None:
+    graph = StateGraph(_SecretState)
+    graph.add_node("echo", _echo_secret)
+    graph.add_edge(START, "echo")
+    graph.add_edge("echo", END)
+    compiled = graph.compile()
+    cassette = record(compiled, {"token": "s3cret", "n": 0})
+    text = runs_to_json([cassette])
+    assert "s3cret" not in text
+    saved = json.loads(text)["runs"][0]
+    assert saved["inputs"]["token"] == "<redacted>"
+    assert saved["steps"][0]["input"]["token"] == "<redacted>"
+    assert saved["steps"][0]["output"] == {"n": 1, "token": "<redacted>"}
+    loaded = runs_from_json(text)[0]
+    assert replay(compiled, loaded) == []
+    assert all(call.how == "served" for call in replay_run(compiled, loaded, serve=True).calls)
+
+
 def test_changed_node_is_the_only_drift() -> None:
     cassette = record(linear(), {"x": 1})
     drifts = replay(_linear_changed(), cassette)

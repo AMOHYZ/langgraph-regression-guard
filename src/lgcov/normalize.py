@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, is_dataclass, replace
 
 from langchain_core.messages import BaseMessage
 
+from lgcov.fingerprint import _secret
 from lgcov.messages import fields, key_fields
 
 _UUID = re.compile(r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b")
@@ -105,6 +106,10 @@ def _norm(
         # A LangChain ToolCall in plain state, as in a Send payload: its `id` is a tool_call_id.
         ids = mask.ids | {"id"} if value.get("type") == "tool_call" else mask.ids
         for k, v in value.items():
+            if isinstance(k, str) and _secret(k):  # T193 PR 5: the same marker the file stores
+                counts[0] += 1
+                out[k] = "<redacted>"
+                continue
             volatile = (
                 not keep_ids and k in ids and isinstance(v, str | int) and not isinstance(v, bool)
             )
@@ -135,6 +140,26 @@ def _norm(
         masked, n_blob = _BLOB_IN_TEXT.subn(r"\1<blob>", no_id)
         counts[0] += n_uuid + n_ts + n_id + n_blob
         return masked
+    return value
+
+
+def redact_secrets(value: object) -> object:
+    """A stored value with secret-named keys replaced by ``<redacted>``.
+
+    The name rule is the fingerprint's: a whole word of the key, split on ``_`` and camelCase,
+    is ``key``, ``apikey``, ``token``, ``secret``, ``password``, ``passwd``, ``credential``,
+    ``credentials`` or ``auth``. ``max_tokens`` and ``author`` stay. The value under that key is
+    not kept, and the same walk runs before matching so a redacted input still matches.
+    """
+    if isinstance(value, dict):
+        return {
+            k: "<redacted>" if isinstance(k, str) and _secret(k) else redact_secrets(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_secrets(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(redact_secrets(v) for v in value)
     return value
 
 
