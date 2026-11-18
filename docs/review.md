@@ -119,8 +119,10 @@ bot says there is nothing to reject. On the command line, this is
 
 ## The bot's commit has no gate result
 
-GitHub starts no workflow for a commit made with a workflow's own token. So lgcov's PR report
-doesn't run on the bot's commit, and the PR has no lgcov result for its new head until someone
+GitHub runs no workflow for a commit made with a workflow's own token. The Actions tab still
+lists a run of each workflow the commit would have started, marked failed with no jobs and "This
+run likely failed because of a workflow file issue". Nothing ran, and the commit gets no check;
+the workflow file is fine. So lgcov's PR report doesn't run on the bot's commit, and the PR has no lgcov result for its new head until someone
 pushes a commit, or closes and reopens the PR. Until then the next `accept` or `override` is
 refused too, since each needs a report for the head. `reject` isn't, so it can undo an accept at
 once.
