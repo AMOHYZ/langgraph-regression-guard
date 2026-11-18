@@ -3108,10 +3108,13 @@ def _synthetic_agents() -> tuple[Sequence[Agent], Sequence[SharedAgent]]:
 def _shipped(case: Replayed, base_nodes: Collection[str] | None = None) -> Found:
     """T222: what `lgcov ci` says about a case: replay the edited agent, serving what it left
     alone, probe its changed nodes offline, and label as ci does (`_node_labels`). T238:
-    `base_nodes`: the unedited agent's node names, as `lgcov ci` has them from the base checkout."""
+    `base_nodes`: the unedited agent's node names, as `lgcov ci` has them from the base checkout.
+    T193: a base recorded with units is labelled with them."""
     runs = [case.base]
-    done = replay_run(case.graph, case.base, (), serve=True)
-    probes = judge_probes(runs, probe_steps(case.graph, runs, changed_nodes(case.graph, runs)))
+    units = any(s.units for s in case.base.steps)  # T193: as the candidate job does
+    done = replay_run(case.graph, case.base, (), serve=True, units=units)
+    ran = probe_steps(case.graph, runs, changed_nodes(case.graph, runs))
+    probes = judge_probes(runs, ran + (probe_units(case.graph, runs) if units else ()))
     graphs = (base_nodes, set(getattr(case.graph, "nodes", {})))
     labels = _node_labels(runs, [done.steps], [list(done.drifts)], probes, graphs=graphs)
     sides = ({s.node for s in case.base.steps}, {s.node for s in done.steps})

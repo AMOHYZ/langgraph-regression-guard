@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-16",
+  "date": "2026-11-18",
   "cases": 72,
   "edits": 24,
   "agents": 3,
@@ -14,46 +14,46 @@
       "method": "lgcov root",
       "cases": {
         "precision": {
-          "hits": 28,
-          "of": 49,
-          "value": 0.5714285714285714
+          "hits": 31,
+          "of": 55,
+          "value": 0.5636363636363636
         },
         "recall": {
-          "hits": 28,
+          "hits": 31,
           "of": 31,
-          "value": 0.9032258064516129
+          "value": 1.0
         },
         "coverage": {
-          "hits": 49,
+          "hits": 55,
           "of": 55,
-          "value": 0.8909090909090909
+          "value": 1.0
         },
         "false_flag": {
-          "hits": 21,
+          "hits": 24,
           "of": 24,
-          "value": 0.875
+          "value": 1.0
         }
       },
       "by_edit": {
         "precision": {
-          "hits": 11,
-          "of": 19,
-          "value": 0.5789473684210527
+          "hits": 12,
+          "of": 21,
+          "value": 0.5714285714285714
         },
         "recall": {
-          "hits": 11,
+          "hits": 12,
           "of": 12,
-          "value": 0.9166666666666666
+          "value": 1.0
         },
         "coverage": {
-          "hits": 19,
+          "hits": 21,
           "of": 21,
-          "value": 0.9047619047619048
+          "value": 1.0
         },
         "false_flag": {
-          "hits": 8,
+          "hits": 9,
           "of": 9,
-          "value": 0.8888888888888888
+          "value": 1.0
         }
       }
     },
@@ -251,46 +251,46 @@
       "method": "lgcov root",
       "cases": {
         "precision": {
-          "hits": 17,
-          "of": 38,
-          "value": 0.4473684210526316
+          "hits": 20,
+          "of": 44,
+          "value": 0.45454545454545453
         },
         "recall": {
-          "hits": 17,
+          "hits": 20,
           "of": 20,
-          "value": 0.85
+          "value": 1.0
         },
         "coverage": {
-          "hits": 38,
+          "hits": 44,
           "of": 44,
-          "value": 0.8636363636363636
+          "value": 1.0
         },
         "false_flag": {
-          "hits": 21,
+          "hits": 24,
           "of": 24,
-          "value": 0.875
+          "value": 1.0
         }
       },
       "by_edit": {
         "precision": {
-          "hits": 7,
-          "of": 15,
-          "value": 0.4666666666666667
+          "hits": 8,
+          "of": 17,
+          "value": 0.47058823529411764
         },
         "recall": {
-          "hits": 7,
+          "hits": 8,
           "of": 8,
-          "value": 0.875
+          "value": 1.0
         },
         "coverage": {
-          "hits": 15,
+          "hits": 17,
           "of": 17,
-          "value": 0.8823529411764706
+          "value": 1.0
         },
         "false_flag": {
-          "hits": 8,
+          "hits": 9,
           "of": 9,
-          "value": 0.8888888888888888
+          "value": 1.0
         }
       }
     },
@@ -581,48 +581,48 @@
     {
       "edits": "All",
       "precision": {
-        "hits": 28,
-        "of": 49,
-        "value": 0.5714285714285714
+        "hits": 31,
+        "of": 55,
+        "value": 0.5636363636363636
       },
       "recall": {
-        "hits": 28,
+        "hits": 31,
         "of": 31,
-        "value": 0.9032258064516129
+        "value": 1.0
       },
       "exact": {
-        "hits": 28,
+        "hits": 31,
         "of": 31,
-        "value": 0.9032258064516129
+        "value": 1.0
       },
-      "inconclusive": 6,
+      "inconclusive": 0,
       "one_sided": {
         "hits": 0,
-        "of": 49,
+        "of": 55,
         "value": 0.0
       }
     },
     {
       "edits": "Single-node",
       "precision": {
-        "hits": 17,
-        "of": 38,
-        "value": 0.4473684210526316
+        "hits": 20,
+        "of": 44,
+        "value": 0.45454545454545453
       },
       "recall": {
-        "hits": 17,
+        "hits": 20,
         "of": 20,
-        "value": 0.85
+        "value": 1.0
       },
       "exact": {
-        "hits": 17,
+        "hits": 20,
         "of": 20,
-        "value": 0.85
+        "value": 1.0
       },
-      "inconclusive": 6,
+      "inconclusive": 0,
       "one_sided": {
         "hits": 0,
-        "of": 38,
+        "of": 44,
         "value": 0.0
       }
     }
@@ -787,14 +787,14 @@
         "method": "lgcov root",
         "regression": {
           "precision": {
-            "hits": 1,
-            "of": 1,
-            "value": 1.0
+            "hits": 2,
+            "of": 7,
+            "value": 0.2857142857142857
           },
           "recall": {
-            "hits": 1,
+            "hits": 2,
             "of": 2,
-            "value": 0.5
+            "value": 1.0
           },
           "exact": {
             "hits": 1,
@@ -802,30 +802,30 @@
             "value": 0.5
           },
           "false_flag": {
-            "hits": 0,
+            "hits": 4,
             "of": 4,
-            "value": 0.0
+            "value": 1.0
           },
-          "inconclusive": 5
+          "inconclusive": 0
         },
         "drift": {
           "precision": {
-            "hits": 1,
-            "of": 1,
+            "hits": 7,
+            "of": 7,
             "value": 1.0
           },
           "recall": {
-            "hits": 1,
+            "hits": 7,
             "of": 7,
-            "value": 0.14285714285714285
+            "value": 1.0
           },
           "exact": {
-            "hits": 0,
+            "hits": 6,
             "of": 6,
-            "value": 0.0
+            "value": 1.0
           },
           "false_flag": null,
-          "inconclusive": 5
+          "inconclusive": 0
         },
         "fingerprint_saw": {
           "hits": 2,
@@ -1367,14 +1367,14 @@
         "method": "lgcov root",
         "regression": {
           "precision": {
-            "hits": 13,
-            "of": 26,
-            "value": 0.5
+            "hits": 14,
+            "of": 32,
+            "value": 0.4375
           },
           "recall": {
-            "hits": 13,
+            "hits": 14,
             "of": 14,
-            "value": 0.9285714285714286
+            "value": 1.0
           },
           "exact": {
             "hits": 6,
@@ -1382,30 +1382,30 @@
             "value": 0.6
           },
           "false_flag": {
-            "hits": 10,
+            "hits": 14,
             "of": 14,
-            "value": 0.7142857142857143
+            "value": 1.0
           },
-          "inconclusive": 5
+          "inconclusive": 0
         },
         "drift": {
           "precision": {
-            "hits": 26,
-            "of": 26,
+            "hits": 32,
+            "of": 32,
             "value": 1.0
           },
           "recall": {
-            "hits": 26,
+            "hits": 32,
             "of": 32,
-            "value": 0.8125
+            "value": 1.0
           },
           "exact": {
-            "hits": 18,
+            "hits": 24,
             "of": 24,
-            "value": 0.75
+            "value": 1.0
           },
           "false_flag": null,
-          "inconclusive": 5
+          "inconclusive": 0
         },
         "fingerprint_saw": {
           "hits": 18,
@@ -2067,10 +2067,10 @@
         "drift_roots": [
           "answer.respond"
         ],
-        "lgcov_root": [],
-        "lgcov_inconclusive": [
-          "answer"
+        "lgcov_root": [
+          "answer.respond"
         ],
+        "lgcov_inconclusive": [],
         "first_divergence": [
           "answer"
         ],
@@ -2096,11 +2096,10 @@
           "classify"
         ],
         "lgcov_root": [
+          "answer.respond",
           "classify"
         ],
-        "lgcov_inconclusive": [
-          "answer"
-        ],
+        "lgcov_inconclusive": [],
         "first_divergence": [
           "classify"
         ],
@@ -2122,10 +2121,10 @@
         "drift_roots": [
           "answer.respond"
         ],
-        "lgcov_root": [],
-        "lgcov_inconclusive": [
-          "answer"
+        "lgcov_root": [
+          "answer.respond"
         ],
+        "lgcov_inconclusive": [],
         "first_divergence": [
           "answer"
         ],
@@ -2149,10 +2148,10 @@
         "drift_roots": [
           "answer.respond"
         ],
-        "lgcov_root": [],
-        "lgcov_inconclusive": [
-          "answer"
+        "lgcov_root": [
+          "answer.respond"
         ],
+        "lgcov_inconclusive": [],
         "first_divergence": [
           "answer"
         ],
@@ -2174,10 +2173,10 @@
         "drift_roots": [
           "answer.respond"
         ],
-        "lgcov_root": [],
-        "lgcov_inconclusive": [
-          "answer"
+        "lgcov_root": [
+          "answer.respond"
         ],
+        "lgcov_inconclusive": [],
         "first_divergence": [
           "answer"
         ],
@@ -2199,10 +2198,10 @@
         "drift_roots": [
           "answer.respond"
         ],
-        "lgcov_root": [],
-        "lgcov_inconclusive": [
-          "answer"
+        "lgcov_root": [
+          "answer.respond"
         ],
+        "lgcov_inconclusive": [],
         "first_divergence": [
           "answer"
         ],

@@ -564,3 +564,14 @@ def test_generating_every_shared_case_opens_no_connection(monkeypatch: pytest.Mo
     monkeypatch.setattr(socket.socket, "connect", refuse)
     for agent in SHARED_AGENTS:
         every_shared_case(agent)
+
+
+def test_the_bench_records_base_runs_with_the_units_inside_a_subgraph() -> None:
+    # T193, 3b-3: so the bench labels units as `lgcov ci` does on a `--schema 2` baseline
+    (sub,) = [a for a in AGENTS if a.graph is subgraph.graph]
+    nested = [a for a in SHARED_AGENTS if a.graph is support.nested_graph]
+    bases = [c.base for c in every_case(sub)]
+    bases += [c.base for a in nested for c in every_shared_case(a)]
+    assert len(bases) > len(every_case(sub))
+    for base in bases:
+        assert any(s.units for s in base.steps)
