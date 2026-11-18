@@ -347,3 +347,54 @@ def command_from_json(raw: object) -> Command:
         if isinstance(kpi, str) and isinstance(case, str) and isinstance(label, str):
             return Override(kpi, case, label)
     raise ValueError(f"not a command: {raw!r}")
+
+
+NO_GATE_RESULT = (
+    "⚠️ This commit has no lgcov gate result yet: push a commit, or close and reopen the PR, "
+    "to run the gate."
+)
+QUOTED = 60  # characters of a name the PR chose, in a reply
+LISTED = 20  # files a reply lists before "+N more"
+Row = tuple[str, str, str]  # a node, its output hashes before and after
+
+
+def quoted(text: str, limit: int = QUOTED) -> str:
+    """Text the PR or GitHub chose, as a code span in a reply: no backticks, no line breaks, `@`
+    defused with a word joiner, no HTML comment marker, and cut to `limit` characters."""
+    flat = " ".join(text.replace("`", "").splitlines()).replace("<!--", "<!-")
+    flat = flat.replace("@", "@⁠")
+    if len(flat) > limit:
+        flat = flat[: limit - 1] + "…"
+    return f"`{flat}`" if flat.strip() else "`?`"
+
+
+def _listed(label: str, paths: tuple[str, ...]) -> list[str]:
+    if not paths:
+        return []
+    shown = ", ".join(quoted(path, 200) for path in paths[:LISTED])
+    more = f", +{len(paths) - LISTED} more" if len(paths) > LISTED else ""
+    return [f"{label}: {shown}{more}."]
+
+
+def render_reply(
+    command: Command,
+    head_sha: str,
+    commit_sha: str,
+    rows: tuple[Row, ...],
+    written: tuple[str, ...],
+    removed: tuple[str, ...],
+) -> str:
+    """The reply once the bot has committed. Its first line says the commit has no gate result
+    (docs/review.md); every status word in it is lgcov's own."""
+    verb = "Accepted" if isinstance(command, Accept) else "Rejected"
+    lines = [
+        NO_GATE_RESULT,
+        "",
+        f"{verb} on head {quoted(head_sha[:12])}: {quoted(commit_sha[:12])}.",
+    ]
+    if rows:
+        lines += ["", "| node | before | after |", "|---|---|---|"]
+        lines += [f"| {quoted(n)} | {quoted(a, 200)} | {quoted(b, 200)} |" for n, a, b in rows]
+    if isinstance(command, Reject):
+        lines += ["", *_listed("Restored or put back", written), *_listed("Removed", removed)]
+    return "\n".join(lines).rstrip("\n") + "\n"

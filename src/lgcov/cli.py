@@ -1,10 +1,12 @@
 """graph-diff CLI: print node/edge changes between two graph snapshots."""
 
 import argparse
+import contextlib
 import hashlib
 import importlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -145,7 +147,7 @@ from lgcov.gate_round import lock_round as lock_gate_round
 from lgcov.gate_round import parse_round as parse_gate_round
 from lgcov.gate_round import round_to_yaml as gate_round_to_yaml
 from lgcov.github_api import API_URL as GITHUB_API
-from lgcov.github_api import Client, GitHub
+from lgcov.github_api import Client, GitHub, GitHubError
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
@@ -170,7 +172,15 @@ from lgcov.metrics import (
 )
 from lgcov.normalize import normalize
 from lgcov.review import Changes, ReviewDecision, apply_decision, reject_changes, unwritable
-from lgcov.review_command import comment_event
+from lgcov.review_apply import (
+    FileChanges,
+    changes_to_json,
+    file_changes,
+    job_from_json,
+    node_rows,
+)
+from lgcov.review_command import Accept, Override, comment_event, local_commands, quoted
+from lgcov.review_commit import commit as review_commit
 from lgcov.review_fetch import fetch
 from lgcov.sampling import (
     KpiStats,
@@ -2185,7 +2195,9 @@ _REVIEW_USAGE = (
     "usage: lgcov review override --kpi KPI --case-id CASE --judge-label LABEL "
     "--human-label LABEL --reviewer NAME [--note TEXT]\n"
     "       lgcov review reject --base-dir DIR [--config FILE] [--cassette-dir DIR]\n"
-    "       lgcov review fetch --event FILE --out DIR [--cassette-dir DIR]"
+    "       lgcov review fetch --event FILE --out DIR [--cassette-dir DIR]\n"
+    "       lgcov review apply --dir DIR\n"
+    "       lgcov review commit --dir DIR"
 )
 
 
@@ -2526,6 +2538,101 @@ def _review_fetch(argv: list[str], client: Client | None = None) -> int:
     return code
 
 
+def _apply_reply(out: Path, text: str) -> int:
+    (out / "reply.md").write_text(text + "\n", encoding="utf-8")
+    print("lgcov review apply: replied")
+    return 0
+
+
+def _review_apply(argv: list[str]) -> int:
+    """T186: the step with no token. It runs the command fetch read on the files fetch read, in
+    this process, and leaves changes.json for `review commit`, or reply.md when there is nothing to
+    commit (docs/review.md). Exit 2 only when the folder can't be read."""
+    ap = argparse.ArgumentParser(prog="lgcov review apply")
+    ap.add_argument("--dir", required=True, help="the folder `lgcov review fetch` filled")
+    args = ap.parse_args(argv)
+    out = Path(args.dir).resolve()
+    if (out / "reply.md").exists() or not (out / "command.json").exists():
+        print("lgcov review apply: nothing to apply")
+        return 0
+    try:
+        job = job_from_json((out / "command.json").read_text(encoding="utf-8"))
+        fetched = json.loads((out / "fetched.json").read_text(encoding="utf-8"))
+        if not isinstance(fetched, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in fetched.items()
+        ):
+            raise ValueError("fetched.json isn't fetch's")
+        folder = out / "pr" / PurePosixPath(job.cassette_dir)
+        baseline = folder / "baseline.json"
+        before = _outputs_by_node(baseline.read_bytes() if baseline.is_file() else None)
+    except (OSError, ValueError) as exc:
+        print(f"lgcov review apply: {type(exc).__name__} reading {out}", file=sys.stderr)
+        return EXIT_ERROR
+    command = job.command
+    if isinstance(command, Override):  # T186 PR 10
+        why = "`override` from a comment isn't built yet"
+        return _apply_reply(out, f"Not run: {why}. {local_commands(command)}")
+    config = str(out / "base" / "lgcov.yaml")
+    run: Callable[[list[str]], int]
+    if isinstance(command, Accept):
+        which = ["--all-drifted"] if command.nodes is None else ["--nodes", ",".join(command.nodes)]
+        run = _cassette_accept
+        run_argv = ["accept", *which, "--candidate-in", str(out / "candidate.json")]
+    else:
+        run = _review_reject
+        run_argv = ["--base-dir", str(out / "base")]
+    run_argv += ["--config", config, "--cassette-dir", job.cassette_dir]
+    # the command names the PR's nodes and paths: they go to the reply, never to the job's output
+    said, here = io.StringIO(), Path.cwd()
+    (out / "pr").mkdir(exist_ok=True)
+    try:
+        os.chdir(out / "pr")  # both commands read cassette_dir from where they run
+        with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+            code = run(run_argv)
+    finally:
+        os.chdir(here)
+    if code != 0:
+        lines = [line for line in said.getvalue().splitlines() if line.strip()]
+        lead = "Nothing committed" if code == EXIT_NOT_DRIFTED else "Not run"
+        return _apply_reply(out, f"{lead}: {quoted(lines[-1] if lines else 'it failed', 300)}.")
+    try:
+        after = _plain_files(folder)
+    except (OSError, ValueError):
+        return _apply_reply(out, "Not run: the command left a file that isn't a plain file.")
+    write, remove = file_changes(job, fetched, after)
+    if not write and not remove:
+        return _apply_reply(out, "Nothing committed: the command changed no file.")
+    rows = node_rows(before, _outputs_by_node(after.get("baseline.json")))
+    changes = FileChanges(write, remove, rows)
+    (out / "changes.json").write_text(changes_to_json(changes), encoding="utf-8")
+    print("lgcov review apply: ready to commit")
+    return 0
+
+
+def _review_commit(argv: list[str], client: Client | None = None) -> int:
+    """T186: the step that holds the token and writes: one commit on the PR's head, the branch
+    moved without force, and the reply (docs/review.md). Exit 2 when GitHub said no."""
+    ap = argparse.ArgumentParser(prog="lgcov review commit")
+    ap.add_argument("--dir", required=True, help="the folder `lgcov review apply` left")
+    args = ap.parse_args(argv)
+    token = os.environ.get("GH_TOKEN", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    for name, value in (("GH_TOKEN", token), ("GITHUB_REPOSITORY", repo)):
+        if not value:
+            print(f"lgcov review commit: {name} isn't set", file=sys.stderr)
+            return EXIT_ERROR
+    gh = GitHub(token, os.environ.get("GITHUB_API_URL") or GITHUB_API, client)
+    try:
+        code = review_commit(gh, repo, Path(args.dir))
+    except (GitHubError, OSError, ValueError) as exc:
+        # only lgcov's own words: a GitHub error names the PR's branch
+        status = f" {exc.status}" if isinstance(exc, GitHubError) else ""
+        print(f"lgcov review commit: {type(exc).__name__}{status}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"lgcov review commit: {'done' if code == 0 else 'failed, see the reply'}")
+    return code
+
+
 def _review_cmd(argv: list[str]) -> int:
     """T102: override a judge's verdict on one case. The override is a label; when the
     human disagrees, the case is saved so the judge is re-checked on it on every PR; and
@@ -2534,6 +2641,10 @@ def _review_cmd(argv: list[str]) -> int:
         return _review_reject(argv[1:])
     if argv[:1] == ["fetch"]:
         return _review_fetch(argv[1:])
+    if argv[:1] == ["apply"]:
+        return _review_apply(argv[1:])
+    if argv[:1] == ["commit"]:
+        return _review_commit(argv[1:])
     if argv[:1] != ["override"]:
         print(_REVIEW_USAGE, file=sys.stderr)
         return EXIT_ERROR
@@ -3458,6 +3569,8 @@ commands:
   review override   override a judge's verdict on one case
   review reject     put cassette_dir back to the base's, undoing an accept
   review fetch      read a review comment's command and its data (docs/review.md)
+  review apply      run a fetched review command on the fetched files, with no token
+  review commit     commit what review apply changed and reply on the PR
   taxonomy check    validate a taxonomy and print its KPIs
   taxonomy draft    draft failure modes and KPIs from traces, each pending review
   taxonomy approve  approve one drafted entry
