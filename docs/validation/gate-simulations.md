@@ -420,6 +420,39 @@ off unchanged PRs' SHIP rate. Its 3.8% is at p = 0.95, N = 50, and its 9.6% at N
 where 3 excess losses first exceed the tolerance of 2.5. False BLOCK doesn't change: the
 rule only stops SHIPs.
 
+## Graded KPIs: BCa next to a studentized bootstrap (18 Nov 2026)
+
+Graded KPIs read BCa, which SHIPped a drop of δ up to 4.4% of the time below N = 200 on the
+graded path. The follow-up the rulings on [the fixes page](../design/gate-false-ship.md) listed
+puts a studentized paired bootstrap next to it: the bootstrap-t interval for the mean of the
+case-mean differences (Efron and Tibshirani 1993, *An Introduction to the Bootstrap*, chapter
+12.5), with B = 999, so its 2.5% and 97.5% points are the 25th and 975th t*. Each run also makes
+the call `decide()` would make with it, with the same sign-flip test and no-drop path.
+
+Simulated at `f7ee6fe` (run as `8f91d6f`, before a rebase that brought in only review and
+report code the runs never call) on Python 3.15.0: the graded grid (K = 3), R = 2,000 per arm,
+base seed 0, 1 h 26 min on 6 workers. The new interval draws from its own seed stream, so each
+arm's first 1,000 runs make part 2's graded calls.
+
+| p, ρ | Wrong SHIP at Δ = −m: BCa / studentized, N = 50 | N = 100 | N = 200 | N = 800 |
+|---|---|---|---|---|
+| 0.80, 0.3 | 2.85 / 2.50% | 2.80 / 2.85% | 3.05 / 3.10% | 2.95 / 3.05% |
+| 0.80, 0.7 | 2.75 / 2.45% | 2.65 / 2.65% | 2.75 / 2.85% | 2.85 / 2.75% |
+| 0.95, 0.3 | **4.30 / 4.05%** | **3.80 / 3.75%** | 3.05 / 3.15% | 2.70 / 2.90% |
+| 0.95, 0.7 | **4.20 / 4.00%** | 3.10 / 3.00% | 2.75 / 2.85% | 2.30 / 2.50% |
+
+Bold: both rates' Wilson 95% intervals lie wholly above 2.5% (MC SE 0.35 points at 2.5%).
+
+- **The studentized bound does no better.** It sits above the true Δ more often than 2.5%
+  beyond Monte Carlo error in 13 of the 56 arms, BCa in 16. All 13 are among BCa's 16, all at
+  N ≤ 200: 7 at Δ = 0, and 9 at p = 0.95. The wrong SHIPs at Δ = −m are above 2.5% in the same
+  three arms for both, within 0.25 points of each other.
+- **It costs little.** An unchanged PR SHIPs at most 1.35 points less often with it, and BLOCK
+  rates move by 0.7 points or less.
+- So graded KPIs stay on BCa: the studentized interval doesn't remove the excess, which sits
+  near the ceiling (p = 0.95) at small N. Below N = 200, graded KPIs are still not
+  simulation-checked.
+
 ## Rerun
 
 ```bash
@@ -432,7 +465,8 @@ Part 1's cell. The arguments are runs per arm and the base seed. It takes about 
 uv run python -m lgcov.gate_sim grid 5000 0 --scenario-reps 1000 --workers 6
 ```
 
-Part 2. Add `--loss` to run only the lost-results arms above, with `--scenario-reps 5000`.
+Part 2. Add `--loss` to run only the lost-results arms above, with `--scenario-reps 5000`,
+or `--graded` for the graded comparison, with `--scenario-reps 2000`.
 It logs every skip with its reason, then prints one table per scenario and the
 lower-bound table. On 17 Nov 2026 it took 2 h 56 min on 6 workers, on a laptop shared with
 other jobs: the graded scenario took a third of that, and the 4-KPI one a fifth. The worker
