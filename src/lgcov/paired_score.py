@@ -1,7 +1,7 @@
 """T151 part 2: score intervals for a paired difference of pass rates, Δ = p_PR - p_base.
 
-Comparators for the gate simulation (gate_sim). The gate itself reads a BCa interval; these
-decide nothing in lgcov. Written from the papers:
+tango_ci is the gate's CI for a binary KPI (stats.paired_test); skew_corrected_ci is a
+comparator for the gate simulation (gate_sim) only. Written from the papers:
 
 - tango_ci: Tango's asymptotic score interval (T. Tango, "Equivalence test and confidence
   interval for the difference in proportions for the paired-sample design", Statistics in

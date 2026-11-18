@@ -6,6 +6,7 @@ from statistics import fmean
 
 import pytest
 
+from lgcov.paired_score import tango_ci
 from lgcov.stats import (
     bca_ci,
     benjamini_hochberg,
@@ -31,7 +32,8 @@ from lgcov.stats import (
 def test_identical_paired_scores_on_five_cases_are_p_one_delta_zero_and_inconclusive() -> None:
     same = [[1.0], [0.0], [1.0], [1.0], [0.0]]
     r = paired_test(same, same)
-    assert (r.p, r.delta, r.ci, r.discordant) == (1.0, 0.0, (0.0, 0.0), 0)
+    assert (r.p, r.delta, r.discordant) == (1.0, 0.0, 0)
+    assert r.ci == pytest.approx(tango_ci(3, 0, 0, 2))  # binary: Tango's, not BCa's (0, 0)
     # T150: no discordant pair is evidence, but 5 cases leave room for a drop of 0.74
     assert decide(r.delta, r.ci, discordant=r.discordant, n=r.n) == "INCONCLUSIVE"
 
@@ -124,6 +126,42 @@ def test_binary_paired_test_uses_mcnemar_and_reports_power() -> None:
     assert r.required_n is not None and r.mde > 0
 
 
+def test_a_binary_kpi_gets_tangos_interval() -> None:
+    """The ruling on docs/design/gate-false-ship.md: binary KPIs read Tango's score
+    interval, built from the 2x2 counts, not BCa (which SHIPped too often at N <= 100)."""
+    base = [[1.0]] * 46 + [[1.0]] + [[0.0]] * 2 + [[0.0]]
+    new = [[1.0]] * 46 + [[0.0]] + [[1.0]] * 2 + [[0.0]]  # both 46, base only 1, PR only 2
+    r = paired_test(base, new)
+    assert r.ci == pytest.approx(tango_ci(46, 1, 2, 1))
+
+
+def test_one_regression_and_two_fixes_in_50_cases_no_longer_ships() -> None:
+    """T151 part 2's regression: BCa's lower bound here is -0.04, over -m, so the gate
+    SHIPped; Tango's is -0.071, so it can't."""
+    base = [[1.0]] * 46 + [[1.0]] + [[0.0]] * 2 + [[0.0]]
+    new = [[1.0]] * 46 + [[0.0]] + [[1.0]] * 2 + [[0.0]]
+    r = paired_test(base, new)
+    assert bca_ci([-1.0] + [1.0] * 2 + [0.0] * 47)[0] > -0.05  # what the gate read before
+    assert decide(r.delta, r.ci, 0.05, r.p <= 0.05, discordant=r.discordant, n=r.n) == (
+        "INCONCLUSIVE"
+    )
+
+
+def test_one_binary_case_keeps_a_zero_width_interval() -> None:
+    r = paired_test([[1.0]], [[0.0]])
+    assert r.ci == (-1.0, -1.0) and r.p == 1.0
+    significant = r.p <= 0.05
+    assert decide(r.delta, r.ci, 0.05, significant, discordant=1, n=1) == "INCONCLUSIVE"
+
+
+def test_a_graded_kpi_keeps_bca() -> None:
+    base = [[1.0, 0.5, 0.0]] * 10 + [[1.0, 1.0, 0.5]] * 10
+    new = [[1.0, 0.0, 0.0]] * 10 + [[1.0, 1.0, 1.0]] * 10
+    r = paired_test(base, new, seed=3)
+    diffs = [-1 / 6] * 10 + [1 / 6] * 10
+    assert r.ci == pytest.approx(bca_ci(diffs, seed=3))
+
+
 def test_graded_or_multi_sample_cases_use_the_sign_flip_test() -> None:
     base = [[1.0, 1.0, 0.0]] * 6
     new = [[1.0, 0.0, 0.0]] * 6  # K=3: averaged within each case first
@@ -168,7 +206,8 @@ def test_mde_is_two_sided_like_the_95_percent_ci_decide_reads() -> None:
 def test_identical_sides_ship_once_the_no_drop_bound_is_under_the_margin() -> None:
     same = [[1.0]] * 80 + [[0.0]] * 20  # n = 100 and no discordant pair
     r = paired_test(same, same)
-    assert (r.n, r.discordant, r.ci) == (100, 0, (0.0, 0.0))
+    assert (r.n, r.discordant) == (100, 0)
+    assert r.ci == pytest.approx((-0.0370, 0.0370), abs=1e-4)  # Tango's: z^2 / (n + z^2)
     assert no_drop_bound(100) == pytest.approx(-math.log(0.025) / 100)  # about 0.037
     assert decide(r.delta, r.ci, 0.05, discordant=r.discordant, n=r.n) == "SHIP"
 
@@ -209,7 +248,7 @@ def test_a_zero_width_ci_with_a_nonzero_delta_is_inconclusive() -> None:
 
 def test_a_consistent_significant_drop_still_blocks() -> None:
     r = paired_test([[1.0]] * 20, [[0.0]] * 20)  # every case fails on the PR
-    assert r.ci == (-1.0, -1.0) and r.p < 0.05 and r.discordant == 20
+    assert r.ci[1] < 0 and r.p < 0.05 and r.discordant == 20  # Tango's, BCa's was (-1, -1)
     assert decide(r.delta, r.ci, 0.05, True, discordant=r.discordant, n=r.n) == "BLOCK"
 
 

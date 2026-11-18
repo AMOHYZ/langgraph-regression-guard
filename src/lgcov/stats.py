@@ -3,7 +3,8 @@
 The unit is a case: the same input judged on base and on the PR. With K > 1 samples per
 case, each side is averaged within the case first, and d_i = s_PR,i - s_base,i.
 
-- Binary KPIs with K = 1: exact McNemar on the discordant pairs.
+- Binary KPIs with K = 1: exact McNemar on the discordant pairs, and Tango's score 95% CI
+  on the difference (lgcov.paired_score).
 - Graded scores or K > 1: paired sign-flip permutation (exact for n <= 20, else seeded
   Monte Carlo), plus a seeded BCa bootstrap 95% CI on the mean difference.
 - Per-KPI decision against a non-inferiority margin; Holm or Benjamini-Hochberg across
@@ -25,6 +26,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from statistics import NormalDist, fmean, stdev
 from typing import Literal
+
+from lgcov.paired_score import tango_ci
 
 Decision = Literal["SHIP", "BLOCK", "INCONCLUSIVE"]
 _N = NormalDist()
@@ -296,7 +299,7 @@ class PairedResult:
     base_rate: float
     new_rate: float
     delta: float  # PR minus base
-    ci: tuple[float, float]  # 95% BCa CI on delta
+    ci: tuple[float, float]  # 95% CI on delta: Tango's score interval if binary, else BCa
     p: float  # two-sided, before any multiplicity adjustment
     method: Literal["mcnemar", "sign-flip"]
     rho: float | None  # T115: binary, from the base-vs-PR 2x2 table, None when a side never
@@ -326,8 +329,15 @@ def paired_test(
     alpha: float = 0.05,
     power: float = 0.8,
     seed: int = 0,
+    *,
+    interval: Literal["score", "bca"] = "score",
 ) -> PairedResult:
-    """Paired test of per-case scores in [0, 1]: base[i] and new[i] are one case's samples."""
+    """Paired test of per-case scores in [0, 1]: base[i] and new[i] are one case's samples.
+
+    The CI on delta: a binary KPI's is Tango's score interval from its 2x2 table, a graded
+    one's the BCa bootstrap. BCa's lower end sat too high at N <= 100 with binary scores
+    (docs/validation/gate-simulations.md), so the gate SHIPped real drops over 2.5% of the
+    time. interval="bca" keeps BCa for binary KPIs too, for gate_sim's T151 reruns."""
     if len(base) != len(new) or not base or not all(base) or not all(new):
         raise ValueError("paired_test needs the same non-empty cases on both sides to pair")
     binary = all(len(s) == 1 and s[0] in (0.0, 1.0) for s in (*base, *new))
@@ -347,19 +357,24 @@ def paired_test(
         p, method = mcnemar_exact_p(b, c), "mcnemar"
         rate_cis = (wilson(round(p_a * n), n), wilson(round(p_b * n), n))
         discordant = b + c
+        if interval == "score" and n > 1:  # one case: BCa's zero width, which can't SHIP
+            ci = tango_ci(both, b, c, n - both - b - c)
+        else:
+            ci = bca_ci(diffs, seed=seed)
     else:
         rho = _correlation(b_means, n_means)  # graded: no 2x2 table; sd comes from the diffs
         p, method = sign_flip_p(diffs, seed=seed), "sign-flip"
         sd = stdev(diffs) if n > 1 else 0.0
         rate_cis = (None, None)
         discordant = sum(1 for d in diffs if abs(d) > _EPS)
+        ci = bca_ci(diffs, seed=seed)
     delta = fmean(diffs)
     return PairedResult(
         n=n,
         base_rate=p_a,
         new_rate=p_b,
         delta=delta,
-        ci=bca_ci(diffs, seed=seed),
+        ci=ci,
         p=p,
         method=method,
         rho=rho,

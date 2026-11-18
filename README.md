@@ -569,8 +569,8 @@ a case's k samples averaged first. Per KPI, against a non-inferiority margin δ:
   discordant pair (every case scored the same on both sides, as replay makes an unchanged
   KPI), the drop is at most 3.69/n (−ln(α/2)/n, times the score range for graded KPIs), so
   identical sides SHIP from 74 cases at δ = 0.05.
-- **INCONCLUSIVE** (exit 0, or 1 with the switch): neither; or a NaN; or a zero-width CI
-  with Δ ≠ 0 (every case moved the same way, so there's no spread to judge by). A ⚠️ row
+- **INCONCLUSIVE** (exit 0, or 1 with the switch): neither; or a NaN; or a graded KPI's
+  zero-width CI with Δ ≠ 0 (every case moved the same way, so there's no spread to judge by). A ⚠️ row
   says how many more cases it needs: N* is the number needed to detect Δ at α and the set
   power (Kotawala 2026, Eq. 6, for paired binary outcomes), or the 74 identical cases.
 
@@ -580,8 +580,8 @@ comment prints it under the gate table.
 How it's computed:
 
 - A binary KPI with k = 1 gets an exact McNemar test; graded scores or k > 1 get a paired
-  sign-flip test (exact up to 20 cases). The CI is a seeded BCa bootstrap; MDE is the
-  smallest drop this many cases detects, two-sided like the CI.
+  sign-flip test (exact up to 20 cases). The CI is Tango's score interval for a binary KPI
+  and a seeded BCa bootstrap for a graded one; MDE is the smallest drop this many cases detects, two-sided like the CI.
 - Finding a drop and ruling one out take different numbers of cases. At p = 0.80, ρ = 0.3,
   α = 0.05 and power 0.8, detecting a true 0.05 drop takes 765 (`required_n`, which sizes
   N*); showing the PR is at most 0.05 worse, when it isn't worse at all, takes 704

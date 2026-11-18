@@ -1,6 +1,6 @@
 # False SHIPs at small N and with missing results (design, after T151)
 
-**Status: design only.** Nothing here is built. This page changes no code and no verdict. It
+**Status: ruled on 18 November 2026** (section 7). Option A is built. The page
 weighs fixes for the two places where [the gate simulations](../validation/gate-simulations.md)
 measured the gate SHIPping real drops more often than [gate.md](../gate.md)'s 2.5%, and ends
 with the questions that are yours to rule on.
@@ -138,3 +138,18 @@ before G and change nothing.
 5. **What loses a PR's results in practice:** part 2 assumed a judge that errors on bad
    outputs. Have you seen judge errors cluster on one side in real runs? If they never do, E
    may be enough for now.
+
+## 7. Rulings (18 November 2026)
+
+1. **A, Tango's interval for binary KPIs: yes.** Built: `paired_test()` reads it for a binary
+   KPI with two or more cases. The skew-corrected one keeps its name, SCAS-style, derived here,
+   and stays a comparator.
+2. **Graded KPIs stay on BCa for now.** gate.md says that below N = 200 they aren't
+   simulation-checked. Follow-up: a gate_sim arm for a studentized paired bootstrap on the
+   graded path.
+3. **G: run both arms first.** Adopt G only if the random-loss penalty is at most 0.02 at 2%
+   loss per side, with false BLOCK unchanged.
+4. **Per-side loss counts in the PR comment: now.** Until G is decided, an interim rule: when
+   the PR side lost more results than the base beyond a small tolerance, the KPI never SHIPs
+   (needs a human). The tolerance is still to be ruled on.
+5. **Judge errors clustering on the PR side:** never seen in real runs so far.
