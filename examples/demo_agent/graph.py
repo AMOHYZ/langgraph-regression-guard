@@ -8,7 +8,7 @@ from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-SYSTEM_PROMPT = "You are a concise support agent."  # the demo PR tweaks this line
+SYSTEM_PROMPT = "You are a friendly, detailed support agent."  # the demo PR tweaks this line
 
 
 class State(TypedDict, total=False):
