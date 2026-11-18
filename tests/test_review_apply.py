@@ -75,6 +75,7 @@ def _folder(
     pr: dict[str, bytes],
     base: dict[str, bytes] | None = None,
     candidate: bytes | None = None,
+    judge_label: str = "",
 ) -> Path:
     """The folder as fetch leaves it: files under cassette_dir by their path in it."""
     out = tmp_path / "review"
@@ -98,6 +99,8 @@ def _folder(
         "comment_id": 123,
         "comment_url": "https://github.com/octo-org/agent/pull/12#issuecomment-123",
     }
+    if judge_label:
+        job["judge_label"] = judge_label
     (out / "event.json").write_text(json.dumps({"pr": 12, "comment_id": 123}), encoding="utf-8")
     (out / "command.json").write_text(json.dumps(job), encoding="utf-8")
     fetched = {f"cassettes/{path}": blob_sha(data) for path, data in pr.items()}
@@ -167,16 +170,52 @@ def test_reject_with_nothing_to_undo_is_answered(tmp_path: Path, project: Projec
     assert not (out / "changes.json").exists()
 
 
-def test_override_is_answered_with_the_local_command(tmp_path: Path, project: Project) -> None:
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "tests" / "fixtures"
+
+
+@pytest.fixture(scope="module")
+def demo_candidate(tmp_path_factory: pytest.TempPathFactory) -> bytes:
+    """What the candidate job writes for the demo agent as recorded."""
+    root = tmp_path_factory.mktemp("demo")
+    out, report = root / "candidate.json", root / "report.md"
+    graph, cassettes = FIXTURES / "demo_graph.py", root / "cassettes"
+    cassettes.mkdir()
+    (cassettes / "baseline.json").write_bytes((FIXTURES / "demo_baseline.json").read_bytes())
+    ci = ["ci", "--report", str(report), "--candidate-out", str(out)]
+    assert main([*ci, "--graph", f"{graph}:graph", "--cassette-dir", str(cassettes)]) == 0
+    return out.read_bytes()
+
+
+def test_override_saves_the_label_the_case_and_the_band_in_calibration(
+    tmp_path: Path, demo_candidate: bytes
+) -> None:
     command: dict[str, object] = {
         "verb": "override",
-        "kpi": "tone",
+        "kpi": "answer_states_order_status",
         "case": "run-0/respond",
         "label": "fail",
     }
-    out = _folder(tmp_path, command, {"baseline.json": project.recorded})
-    assert _review_apply(["--dir", str(out)]) == 0
-    assert "isn't built yet" in _reply(out) and "lgcov review override --kpi tone" in _reply(out)
+    baseline = (FIXTURES / "demo_baseline.json").read_bytes()
+    out = _folder(tmp_path, command, {"baseline.json": baseline}, None, demo_candidate, "pass")
+    labels = out / "pr" / "calibration" / "labels" / "demo.csv"
+    labels.parent.mkdir(parents=True)
+    labels.write_bytes((ROOT / "calibration" / "labels" / "demo.csv").read_bytes())
+    fetched = json.loads((out / "fetched.json").read_text(encoding="utf-8"))
+    fetched["calibration/labels/demo.csv"] = blob_sha(labels.read_bytes())
+    (out / "fetched.json").write_text(json.dumps(fetched), encoding="utf-8")
+    (out / "base" / "taxonomy.yaml").write_bytes((FIXTURES / "demo_taxonomy.yaml").read_bytes())
+    assert _review_apply(["--dir", str(out)]) == 0, (out / "reply.md").read_text()
+    changes = changes_from_json((out / "changes.json").read_text(encoding="utf-8"))
+    assert changes.write == (
+        "calibration/bands.json",
+        "calibration/cases/answer_states_order_status.jsonl",
+        "calibration/overrides.jsonl",
+    )
+    assert changes.remove == () and changes.rows == ()
+    saved = (out / "pr" / "calibration" / "overrides.jsonl").read_text(encoding="utf-8")
+    assert '"reviewer": "maintainer"' in saved
+    assert '"reason": "https://github.com/octo-org/agent/pull/12#issuecomment-123"' in saved
 
 
 def test_a_folder_fetch_answered_or_left_empty_is_left_alone(tmp_path: Path) -> None:
@@ -214,6 +253,7 @@ def test_apply_runs_where_it_started(tmp_path: Path, project: Project) -> None:
         ("cassette_dir", "../out"),
         ("pr", "12"),
         ("command", {"verb": "merge"}),
+        ("command", {"verb": "override", "kpi": "t", "case": "run-0/r", "label": "pass"}),
     ],
 )
 def test_a_command_file_out_of_shape_is_refused(field: str, value: object) -> None:

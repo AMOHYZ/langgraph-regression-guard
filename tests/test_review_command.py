@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from lgcov.ci_report import MARKER, cases_copy
 from lgcov.review_command import (
     ASSOCIATIONS,
     MAX_LINE,
@@ -27,6 +28,7 @@ from lgcov.review_command import (
     command_from_json,
     command_to_json,
     comment_event,
+    judge_label,
     local_commands,
     may_command,
     parse_command,
@@ -496,3 +498,51 @@ def test_a_long_list_of_files_is_cut() -> None:
     paths = tuple(f"cassettes/f{i}.json" for i in range(25))
     reply = render_reply(Reject(), "a" * 40, "c" * 40, (), paths, ())
     assert "`cassettes/f19.json`" in reply and "f20" not in reply and "+5 more" in reply
+
+
+# T186: override takes the judge's label from the report's hidden copy, bound to the head.
+HEAD = "a" * 40
+TONE = Override("tone", "run-0/respond", "pass")
+
+
+def _report(head: str = HEAD, labels: tuple[str, ...] = ("fail",)) -> str:
+    copy = cases_copy(head, {"tone": {"run-0/respond": labels}})
+    return f"{MARKER}\n## 🔴 lgcov: drift\n\nverdict: **fail**\n{copy}\n"
+
+
+def test_the_judge_s_label_comes_from_the_copy_for_the_head() -> None:
+    assert judge_label(_report(), HEAD, TONE) == "fail"
+    assert judge_label(_report(labels=("fail", "fail", "fail")), HEAD, TONE) == "fail"
+
+
+@pytest.mark.parametrize(
+    ("report", "command", "why"),
+    [
+        (None, TONE, "no lgcov report on this PR"),
+        (f"{MARKER}\n## lgcov\n", TONE, "holds no list of judged cases"),
+        (_report(head="b" * 40), TONE, "is for an older head"),
+        (_report(labels=("fail", "pass")), TONE, "mixed labels"),
+        (_report(labels=()), TONE, "gave no label"),
+        (_report(), Override("grounded", "run-0/respond", "pass"), "no case the report judged"),
+        (_report(), Override("tone", "run-1/respond", "pass"), "no case the report judged"),
+    ],
+)
+def test_override_refuses_without_one_clear_label_for_the_head(
+    report: str | None, command: Override, why: str
+) -> None:
+    refused = judge_label(report, HEAD, command)
+    assert isinstance(refused, Refusal) and why in refused.reason, refused
+
+
+def test_a_report_too_big_to_copy_refuses_with_the_local_command() -> None:
+    many = {"tone": {f"run-{i}/respond": ("fail",) for i in range(501)}}
+    refused = judge_label(f"{MARKER}\n{cases_copy(HEAD, many)}\n", HEAD, TONE)
+    assert isinstance(refused, Refusal) and refused.local
+    assert "more than 500 cases" in refused.reason
+
+
+def test_an_override_reply_says_what_the_judge_said_and_what_it_should_have() -> None:
+    reply = render_reply(TONE, "a" * 40, "c" * 40, (), ("calibration/bands.json",), (), "fail")
+    assert reply.splitlines()[0] == NO_GATE_RESULT
+    assert "Overrode `tone` on `run-0/respond`: the judge said `fail`, you said `pass`." in reply
+    assert "Changed: `calibration/bands.json`." in reply

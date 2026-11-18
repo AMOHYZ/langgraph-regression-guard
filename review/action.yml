@@ -1,6 +1,6 @@
 name: lgcov review
 description: >-
-  Run a maintainer's /lgcov accept or /lgcov reject comment on a PR as one commit on its branch:
+  Run a maintainer's /lgcov accept, override or reject comment on a PR as one commit on its branch:
   read with the token, run with none, commit with it. The commit has no lgcov gate result.
 author: AMOHYZ
 
@@ -12,7 +12,7 @@ inputs:
     required: false
     default: ${{ github.token }}
   taxonomy:
-    description: "taxonomy.yaml, read at the base, for /lgcov override. Override from a comment isn't built yet."
+    description: "taxonomy.yaml, read at the base, for /lgcov override. Empty: taxonomy_path from the base's lgcov.yaml."
     required: false
     default: ""
   cassette-dir:
@@ -51,11 +51,13 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         CASSETTE_DIR: ${{ inputs.cassette-dir }}
+        TAXONOMY: ${{ inputs.taxonomy }}
         LGCOV: ${{ runner.temp }}/lgcov-review-venv/bin/lgcov
         OUT: ${{ runner.temp }}/lgcov-review
       run: |
         args=(review fetch --event "$GITHUB_EVENT_PATH" --out "$OUT")
         [ -n "$CASSETTE_DIR" ] && args+=(--cassette-dir "$CASSETTE_DIR")
+        [ -n "$TAXONOMY" ] && args+=(--taxonomy "$TAXONOMY")
         "$LGCOV" "${args[@]}"
 
     - name: Run the command, with no token

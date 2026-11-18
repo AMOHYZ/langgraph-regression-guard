@@ -70,7 +70,7 @@ token in `.git/config`, or if its job that decides can be skipped.
 
 ## Review commands
 
-A maintainer's `/lgcov accept` or `/lgcov reject` on a PR becomes one commit on its branch
+A maintainer's `/lgcov accept`, `/lgcov override` or `/lgcov reject` on a PR becomes one commit on its branch
 ([review.md](review.md)). That workflow runs on `issue_comment`, so GitHub runs it, and
 `review/action.yml`, from the default branch, never from the PR. Its job holds a write token, so
 it never checks out or runs the PR's code:

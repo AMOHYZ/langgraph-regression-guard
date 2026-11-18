@@ -93,3 +93,9 @@ def test_the_workflow_passes_only_inputs_the_action_has() -> None:
     assert isinstance(inputs, dict)
     passed = re.findall(r"^\s{10}([a-z-]+):", WORKFLOW.split("uses: ./review", 1)[1], re.M)
     assert passed and set(passed) <= set(inputs)
+
+
+def test_the_taxonomy_input_reaches_fetch_through_env() -> None:
+    fetch = _step("fetch")
+    assert _env(fetch)["TAXONOMY"] == "${{ inputs.taxonomy }}"
+    assert '[ -n "$TAXONOMY" ] && args+=(--taxonomy "$TAXONOMY")' in str(fetch["run"])

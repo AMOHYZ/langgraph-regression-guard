@@ -14,6 +14,7 @@ from lgcov.ci_report import (
     cases_copy,
     format_tally,
     format_timing,
+    read_cases_copy,
     render_ci_report,
 )
 
@@ -118,3 +119,25 @@ def test_a_name_can_t_end_the_comment_early() -> None:
 def test_too_many_cases_leave_only_their_count() -> None:
     many = {"tone": {f"run-{i}/respond": ("pass",) for i in range(MAX_COPIED + 1)}}
     assert _copied(cases_copy(H, many)) == {"head": H, "kpis": None, "cases": MAX_COPIED + 1}
+
+
+def test_the_copy_reads_back() -> None:
+    kpis = {"tone": {"run-0/a-->b": ("fail", "pass")}}
+    assert read_cases_copy(cases_copy(H, kpis)) == (H, {"tone": {"run-0/a-->b": ("fail", "pass")}})
+    many = {"tone": {f"run-{i}/r": ("pass",) for i in range(MAX_COPIED + 1)}}
+    assert read_cases_copy(cases_copy(H, many)) == (H, None)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "",
+        "fail-on: `root-drift`",
+        f"{CASES_MARKER} not json -->",
+        f'{CASES_MARKER} {{"head": 1, "kpis": {{}}}} -->',
+        f'{CASES_MARKER} {{"head": "{H}", "kpis": {{"t": {{"c": "fail"}}}}}} -->',
+        f'{CASES_MARKER} {{"head": "{H}", "kpis": {{"t": {{"c": [1]}}}}}} -->',
+    ],
+)
+def test_a_line_that_isn_t_a_copy_reads_as_none(line: str) -> None:
+    assert read_cases_copy(line) is None

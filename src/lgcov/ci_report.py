@@ -236,3 +236,34 @@ def cases_copy(head: str | None, kpis: Mapping[str, Mapping[str, Sequence[str]]]
     text = json.dumps(copied, sort_keys=True, separators=(", ", ": "))
     escaped = text.replace("<", "\\u003c").replace(">", "\\u003e")
     return f"{CASES_MARKER} {escaped} -->"
+
+
+Copied = dict[str, dict[str, tuple[str, ...]]]  # KPI -> case -> the judge's labels on the PR
+
+
+def read_cases_copy(line: str) -> tuple[str, Copied | None] | None:
+    """T186: cases_copy's line read back: (head, KPI -> case -> labels), with None for the
+    cases when there were too many to copy. None for a line that isn't exactly one."""
+    if not line.startswith(f"{CASES_MARKER} ") or not line.endswith(" -->"):
+        return None
+    try:
+        raw = json.loads(line[len(CASES_MARKER) + 1 : -len(" -->")])
+    except ValueError:
+        return None
+    head = raw.get("head") if isinstance(raw, dict) else None
+    if not isinstance(head, str) or not head:
+        return None
+    kpis = raw.get("kpis")
+    if kpis is None:
+        return head, None
+    if not isinstance(kpis, dict):
+        return None
+    copied: Copied = {}
+    for kpi, cases in kpis.items():
+        if not isinstance(cases, dict):
+            return None
+        for case, labels in cases.items():
+            if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
+                return None
+            copied.setdefault(kpi, {})[case] = tuple(labels)
+    return head, copied

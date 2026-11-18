@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from lgcov.review import unwritable
-from lgcov.review_command import Accept, Command, Reject, Row, command_from_json
+from lgcov.review_command import Accept, Command, Override, Reject, Row, command_from_json
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -32,6 +32,7 @@ class Job:
     reviewer: str
     comment_id: int
     comment_url: str
+    judge_label: str = ""  # override only: what the judge said, from the report's copy
 
 
 def job_from_json(text: str) -> Job:
@@ -52,8 +53,9 @@ def job_from_json(text: str) -> Job:
             raise ValueError(f"command.json: {key} isn't a number")
         return value
 
+    command = command_from_json(raw.get("command"))
     job = Job(
-        command=command_from_json(raw.get("command")),
+        command=command,
         pr=_int("pr"),
         head_sha=_str("head_sha"),
         head_ref=_str("head_ref"),
@@ -62,6 +64,7 @@ def job_from_json(text: str) -> Job:
         reviewer=_str("reviewer"),
         comment_id=_int("comment_id"),
         comment_url=_str("comment_url"),
+        judge_label=_str("judge_label") if isinstance(command, Override) else "",
     )
     if not _SHA.fullmatch(job.head_sha) or not _SHA.fullmatch(job.base_sha):
         raise ValueError("command.json: a commit isn't a full SHA")
@@ -86,14 +89,15 @@ class FileChanges:
 
 
 def file_changes(
-    job: Job, fetched: Mapping[str, str], after: Mapping[str, bytes]
+    job: Job, fetched: Mapping[str, str], after: Mapping[str, bytes], folder: str
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """What the command changed under cassette_dir: (write, remove), from the repo's root.
-    `fetched` is each file fetch read, with its blob sha; `after` each file there now, by its path
-    under the folder. Accept changes only baseline.json: the accept.md it writes is a summary."""
-    now = {f"{job.cassette_dir}/{path}": data for path, data in after.items()}
+    """What the command changed under `folder`: (write, remove), from the repo's root.
+    `fetched` is each file fetch read, with its blob sha; `after` each file in the folder now, by
+    its path under it. Accept changes only baseline.json: the accept.md it writes is a summary."""
+    now = {f"{folder}/{path}": data for path, data in after.items()}
+    fetched = {path: sha for path, sha in fetched.items() if path.startswith(f"{folder}/")}
     if isinstance(job.command, Accept):
-        keep = f"{job.cassette_dir}/baseline.json"
+        keep = f"{folder}/baseline.json"
         now = {path: data for path, data in now.items() if path == keep}
         fetched = {path: sha for path, sha in fetched.items() if path == keep}
     write = tuple(sorted(p for p, data in now.items() if fetched.get(p) != blob_sha(data)))

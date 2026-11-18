@@ -2978,6 +2978,35 @@ def test_three_overrides_move_the_demo_band_and_the_next_ci_comment_says_so(
     assert "### Judge calibration" in report and change in report
 
 
+def test_cli_override_from_the_candidate_file_saves_what_a_live_override_saves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T186: `/lgcov override` runs in a job holding a write token, so it reads the case from
+    the candidate job's file and never imports the graph."""
+    import shutil
+
+    live, offline = tmp_path / "live", tmp_path / "offline"
+    live.mkdir()
+    _calibrated_project(live, monkeypatch)
+    shutil.copytree(live, offline)
+    assert _override("run-0/respond", "ahmed") == 0
+    monkeypatch.chdir(offline)
+    report, candidate = str(offline / "report.md"), str(offline / "candidate.json")
+    ci = ["ci", "--report", report, "--candidate-out", candidate, "--graph", "graph.py:graph"]
+    assert main([*ci, "--cassette-dir", "cassettes", "--taxonomy", "taxonomy.yaml"]) == 0
+    (offline / "graph.py").write_text(NOT_IMPORTABLE, encoding="utf-8")
+    override = [
+        *("review", "override", "--kpi", "answer_states_order_status"),
+        *("--case-id", "run-0/respond", "--judge-label", "pass", "--human-label", "fail"),
+        *("--reviewer", "ahmed", "--note", "leaves out the order status"),
+        *("--cassette-dir", "cassettes", "--taxonomy", "taxonomy.yaml"),
+    ]
+    assert main([*override, "--candidate-in", candidate]) == 0
+    for name in ("overrides.jsonl", "cases/answer_states_order_status.jsonl", "bands.json"):
+        here, there = offline / "calibration" / name, live / "calibration" / name
+        assert here.read_text(encoding="utf-8") == there.read_text(encoding="utf-8"), name
+
+
 def test_cli_calibrate_with_no_label_files_leaves_the_bands_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

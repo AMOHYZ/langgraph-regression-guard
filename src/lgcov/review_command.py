@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
+from lgcov.ci_report import read_cases_copy
 from lgcov.review import unwritable
 
 PREFIX = "/lgcov "
@@ -383,18 +384,61 @@ def render_reply(
     rows: tuple[Row, ...],
     written: tuple[str, ...],
     removed: tuple[str, ...],
+    judge_said: str = "",
 ) -> str:
     """The reply once the bot has committed. Its first line says the commit has no gate result
     (docs/review.md); every status word in it is lgcov's own."""
-    verb = "Accepted" if isinstance(command, Accept) else "Rejected"
+    verb = {Accept: "Accepted", Reject: "Rejected", Override: "Overrode"}[type(command)]
     lines = [
         NO_GATE_RESULT,
         "",
         f"{verb} on head {quoted(head_sha[:12])}: {quoted(commit_sha[:12])}.",
     ]
+    if isinstance(command, Override):
+        said = f"the judge said {quoted(judge_said)}, you said {quoted(command.label)}"
+        lines += ["", f"Overrode {quoted(command.kpi)} on {quoted(command.case)}: {said}."]
+        lines += _listed("Changed", written)
     if rows:
         lines += ["", "| node | before | after |", "|---|---|---|"]
         lines += [f"| {quoted(n)} | {quoted(a, 200)} | {quoted(b, 200)} |" for n, a, b in rows]
     if isinstance(command, Reject):
         lines += ["", *_listed("Restored or put back", written), *_listed("Removed", removed)]
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _last_line(report: str) -> str:
+    lines = report.rstrip("\n").splitlines()
+    return lines[-1] if lines else ""
+
+
+def judge_label(report: str | None, head: str, command: Override) -> str | Refusal:
+    """T186: what the judge said on the case `/lgcov override` names, from the hidden copy on
+    the last line of the bot's report comment (docs/review.md, abuse row 24). Only a copy for
+    the current head counts, and only one label: mixed labels mean a flaky judge, not a wrong
+    one. `report` is the comment's body, or None when the PR has none."""
+    if report is None:
+        return Refusal("there is no lgcov report on this PR")
+    read = read_cases_copy(_last_line(report))
+    if read is None:
+        return Refusal(
+            "the report holds no list of judged cases: it was written by an lgcov older than the "
+            "review commands, or judged no case with a model"
+        )
+    copied_head, kpis = read
+    if copied_head != head:
+        return Refusal("the report's list of judged cases is for an older head; wait for its run")
+    if kpis is None:
+        return Refusal("the report judged more than 500 cases, too many to list", local=True)
+    labels = kpis.get(command.kpi, {}).get(command.case)
+    if labels is None:
+        return Refusal(
+            f"{quoted(command.case)} for {quoted(command.kpi)} is no case the report judged with "
+            "a model, and a code check can't be overridden"
+        )
+    if not labels:
+        return Refusal(f"the judge gave no label on {quoted(command.case)}: every sample failed")
+    if len(set(labels)) > 1:
+        return Refusal(
+            f"the judge gave mixed labels on {quoted(command.case)}: it is flaky, not wrong"
+        )
+    return labels[0]

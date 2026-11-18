@@ -78,6 +78,7 @@ def _folder(
     command: dict[str, object],
     write: Mapping[str, bytes],
     remove: tuple[str, ...] = (),
+    judge_label: str = "",
 ) -> Path:
     """The folder as apply leaves it after a command that changed files."""
     out = tmp_path / "review"
@@ -96,6 +97,8 @@ def _folder(
         "comment_id": 123,
         "comment_url": URL,
     }
+    if judge_label:
+        job["judge_label"] = judge_label
     changes = {"write": sorted(write), "remove": list(remove), "rows": [["b", "111", "222"]]}
     out.mkdir(parents=True, exist_ok=True)
     (out / "event.json").write_text(json.dumps({"pr": 12, "comment_id": 123}), encoding="utf-8")
@@ -198,7 +201,8 @@ def test_a_path_outside_the_command_s_row_refuses_the_whole_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: dict[str, object], path: str
 ) -> None:
     write = {"cassettes/baseline.json": b"{}\n"} if command is ACCEPT else {}
-    out = _folder(tmp_path, command, write)
+    said = "fail" if command["verb"] == "override" else ""  # an override's file names it (PR 10)
+    out = _folder(tmp_path, command, write, judge_label=said)
     changes = json.loads((out / "changes.json").read_text(encoding="utf-8"))
     changes["write" if "action" in path or "graph" in path else "remove"].append(path)
     (out / "changes.json").write_text(json.dumps(changes), encoding="utf-8")
@@ -247,3 +251,28 @@ def test_the_command_line_needs_a_token_and_the_repo(
     monkeypatch.delenv("GITHUB_REPOSITORY")
     assert _review_commit(["--dir", str(tmp_path)], Api()) == 2
     assert "GITHUB_REPOSITORY" in capsys.readouterr().err
+
+
+def test_override_commits_the_calibration_files_and_replies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command: dict[str, object] = {
+        "verb": "override",
+        "kpi": "tone",
+        "case": "run-0/respond",
+        "label": "pass",
+    }
+    files = {f"calibration/{n}": b"{}\n" for n in ("bands.json", "cases/tone.jsonl")}
+    out = _folder(tmp_path, command, files, judge_label="fail")
+    changes = json.loads((out / "changes.json").read_text(encoding="utf-8"))
+    changes["rows"] = []
+    (out / "changes.json").write_text(json.dumps(changes), encoding="utf-8")
+    api = Api()
+    assert _commit(out, api, monkeypatch) == 0
+    commit = {(m, p): body for m, p, body in api.calls}[("POST", f"/repos/{REPO}/git/commits")]
+    assert isinstance(commit, dict) and isinstance(commit["message"], str)
+    subject = commit["message"].splitlines()[0]
+    assert subject == "lgcov: override tone on run-0/respond to pass, from a review comment"
+    reply = api.reply()
+    assert reply.splitlines()[0] == NO_GATE_RESULT
+    assert "the judge said `fail`, you said `pass`" in reply

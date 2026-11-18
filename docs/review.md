@@ -5,10 +5,9 @@ your default branch, or such a commit can be merged ungated. With two jobs, requ
 the job that decides: `report` in this repo's own workflow.
 [Why, and how](#the-bots-commit-has-no-gate-result).
 
-**`accept` and `reject` are built; `override` comes next.** Until it lands, `/lgcov override`
-answers with the command to run, and you override on the command line with
-`lgcov review override`. In this repo the workflow below runs the commands. Another repo gets
-them from the first release after 0.4.0, which ships `review/action.yml`.
+**Built.** In this repo the workflow below runs the three commands. Another repo gets them from
+the first release after 0.4.0, which ships `review/action.yml`. `override` needs a report written
+by an lgcov that lists the judged cases, which the same release brings.
 
 A maintainer answers lgcov's PR report with a comment, and a workflow turns the comment into one
 commit on the PR branch:
@@ -163,6 +162,10 @@ A refusal is a reply on the PR, and nothing is committed. The bot refuses when:
 - for `accept` and `override`: no run of the PR report for the PR's current head finished before
   the comment was posted, or that run's `lgcov-candidate` artifact has expired, which it does after
   1 day. Re-run the report, or push, then comment again;
+- for `override`: the bot's report comment has no list of judged cases for the PR's current head,
+  the case isn't in it, the judge gave mixed labels or none on it, or the report judged more than
+  500 cases, too many to list. Without the review action's `taxonomy` input, the base's
+  `lgcov.yaml` must name the taxonomy;
 - the PR's head moves while the command runs;
 - the line doesn't parse, or names something that doesn't exist.
 
