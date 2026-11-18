@@ -30,8 +30,9 @@ from statistics import NormalDist
 from typing import Literal
 
 from lgcov.config import GateConfig
+from lgcov.paired_score import skew_corrected_ci, tango_ci
 from lgcov.sampling import KpiStats, gate_kpis
-from lgcov.stats import Decision, PairedResult, paired_test, sigma_d, wilson
+from lgcov.stats import Decision, PairedResult, decide, no_drop_bound, paired_test, sigma_d, wilson
 from lgcov.verdict_actions import gate_findings
 
 _GATE = GateConfig()
@@ -95,6 +96,14 @@ class ArmResult:
     lost: int = 0  # pairs lost to missing results, over all runs and KPIs
     first_block: int = 0  # runs that BLOCKed KPI 1, the one at the arm's delta
     other_block: int = 0  # runs that BLOCKed a KPI at delta 0: a false alarm
+    # One KPI only: the calls with Tango's and the SCAS-style CI in place of BCa, and how often
+    # each lower bound sat above the true delta (the gate's, Tango's, the SCAS-style one)
+    tango: tuple[int, int, int] = (0, 0, 0)  # SHIP / BLOCK / INCONCLUSIVE
+    scas: tuple[int, int, int] = (0, 0, 0)
+    misses: tuple[int, int, int] = (0, 0, 0)
+
+
+Bounds = tuple[Decision, Decision, tuple[bool, bool, bool]]  # Tango's call, SCAS-style, misses
 
 
 @dataclass(frozen=True)
@@ -104,6 +113,7 @@ class Run:
     lost: int
     first_block: bool
     other_block: bool
+    bounds: Bounds | None = None  # one KPI only
 
 
 @dataclass(frozen=True)
@@ -215,13 +225,31 @@ def _kpi(name: str, r: PairedResult | None, cell: Cell) -> KpiStats:
     )
 
 
-def _run(cell: Cell, cells: Cells, null: Cells, seed: int, scenario: Scenario) -> Run:
+def _bounds(cell: Cell, delta: float, r: PairedResult, kept: list[tuple[float, float]]) -> Bounds:
+    """decide() with Tango's and then the SCAS-style CI in place of BCa, with the same McNemar
+    test and no-drop path, and whether each 95% lower bound sits above the true delta. The
+    gate's own bound is BCa's, or the no-drop bound when no pair is discordant."""
+    table = [kept.count(pair) for pair in ((1.0, 1.0), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0))]
+    tango, scas = tango_ci(*table), skew_corrected_ci(*table)  # both pass, base only, PR only
+    significant = r.p <= cell.alpha  # Holm with one KPI
+    calls = [
+        decide(
+            r.delta, ci, cell.margin, significant, discordant=r.discordant, n=r.n, alpha=cell.alpha
+        )
+        for ci in (tango, scas)
+    ]
+    gate_lo = -no_drop_bound(r.n, cell.alpha) if r.discordant == 0 else r.ci[0]
+    return calls[0], calls[1], (gate_lo > delta, tango[0] > delta, scas[0] > delta)
+
+
+def _run(cell: Cell, delta: float, cells: Cells, null: Cells, seed: int, scenario: Scenario) -> Run:
     """Each KPI's N pairs (KPI 1 from the arm's table, the rest from delta 0's), less the lost
-    ones, judged by the gate's own paired_test, then gate_kpis and gate_findings."""
+    ones, judged by the gate's own paired_test, then gate_kpis and gate_findings. With one KPI,
+    also its calls and misses under Tango's and the SCAS-style bound."""
     seeds = spawn_seeds(seed, 3 + 2 * (scenario.kpis - 1))  # data, bootstrap, losses, more KPIs
     losses = random.Random(seeds[2])
     streams = [(seeds[0], seeds[1]), *zip(seeds[3::2], seeds[4::2], strict=True)]
-    stats, lost, no_drop = [], 0, False
+    stats, lost, no_drop, bounds = [], 0, False, None
     for j, (data_seed, boot_seed) in enumerate(streams):
         pairs = _pairs(random.Random(data_seed), cells if j == 0 else null, cell.n)
         kept = [pair for pair in pairs if not _lost(losses, pair, scenario)]
@@ -231,11 +259,13 @@ def _run(cell: Cell, cells: Cells, null: Cells, seed: int, scenario: Scenario) -
             base, new = [[b] for b, _ in kept], [[p] for _, p in kept]
             r = paired_test(base, new, alpha=cell.alpha, seed=boot_seed)
         no_drop = no_drop or (j == 0 and r is not None and r.discordant == 0)
+        if scenario.kpis == 1 and r is not None and len(kept) > 1:
+            bounds = _bounds(cell, delta, r, kept)
         stats.append(_kpi(f"kpi{j + 1}", r, cell))
     gated = gate_kpis(stats, alpha=cell.alpha)
     verdict = gate_findings(gated).statistical or "INCONCLUSIVE"
     blocked = [g.decision == "BLOCK" for g in gated]
-    return Run(verdict, no_drop, lost, blocked[0], any(blocked[1:]))
+    return Run(verdict, no_drop, lost, blocked[0], any(blocked[1:]), bounds)
 
 
 def arms_to_run(resolved: Resolved, seed: int) -> list[tuple[float, Cells, int]]:
@@ -259,8 +289,9 @@ def simulate_arm(
     """Runs start to stop - 1 of one arm, so a pool can cut an arm into blocks. null is delta
     0's table, which KPIs after the first draw from."""
     seeds = spawn_seeds(arm_seed, stop)[start:stop]
-    runs = [_run(cell, cells, null, s, scenario) for s in seeds]
+    runs = [_run(cell, delta, cells, null, s, scenario) for s in seeds]
     verdicts = [run.decision for run in runs]
+    bounds = [run.bounds for run in runs if run.bounds is not None]
     return ArmResult(
         delta=delta,
         reps=stop - start,
@@ -271,7 +302,18 @@ def simulate_arm(
         lost=sum(run.lost for run in runs),
         first_block=sum(run.first_block for run in runs),
         other_block=sum(run.other_block for run in runs),
+        tango=_calls([b[0] for b in bounds]),
+        scas=_calls([b[1] for b in bounds]),
+        misses=_add([tuple(map(int, b[2])) for b in bounds]),
     )
+
+
+def _calls(decisions: Sequence[Decision]) -> tuple[int, int, int]:
+    return decisions.count("SHIP"), decisions.count("BLOCK"), decisions.count("INCONCLUSIVE")
+
+
+def _add(counts: Sequence[tuple[int, ...]]) -> tuple[int, int, int]:
+    return (sum(c[0] for c in counts), sum(c[1] for c in counts), sum(c[2] for c in counts))
 
 
 def merge(parts: Sequence[ArmResult]) -> ArmResult:
@@ -286,6 +328,9 @@ def merge(parts: Sequence[ArmResult]) -> ArmResult:
         lost=sum(p.lost for p in parts),
         first_block=sum(p.first_block for p in parts),
         other_block=sum(p.other_block for p in parts),
+        tango=_add([p.tango for p in parts]),
+        scas=_add([p.scas for p in parts]),
+        misses=_add([p.misses for p in parts]),
     )
 
 
@@ -489,6 +534,31 @@ def grid_table(results: Sequence[CellResult | Skipped], scenario: Scenario = MAI
     return "\n".join([*lines, "", *skips] if skips else lines)
 
 
+def bounds_table(results: Sequence[CellResult | Skipped]) -> str:
+    """One row per arm: how often each 95% lower bound sat above the true delta (nominal 2.5%),
+    with its Wilson interval, and decide()'s SHIPs and BLOCKs with each CI."""
+    head = "| p | ρ | N | Δ | Gate's bound above Δ | Tango's | SCAS-style "
+    lines = [head + "| SHIP: gate / Tango / SCAS-style | BLOCK: gate / Tango / SCAS-style |"]
+    lines.append("|---|---|---|---|---|---|---|---|---|")
+    for out in results:
+        if isinstance(out, Skipped):
+            continue
+        r, c = out.resolved, out.resolved.cell
+        rho = f"{r.rho:.3f}" + (f" (clamped from {c.rho:g})" if r.clamped else "")
+        for a in out.arms:
+            misses = []
+            for k in a.misses:
+                rate, _, (lo, hi) = mc_error(k, a.reps)
+                misses.append(f"{_pct(rate)} ({_pct(lo)}–{_pct(hi)})")
+            ships = " / ".join(_pct(x / a.reps) for x in (a.ship, a.tango[0], a.scas[0]))
+            blocks = " / ".join(_pct(x / a.reps) for x in (a.block, a.tango[1], a.scas[1]))
+            lines.append(
+                f"| {c.p_base:g} | {rho} | {c.n} | {a.delta:+g} | {' | '.join(misses)} "
+                f"| {ships} | {blocks} |"
+            )
+    return "\n".join(lines)
+
+
 def _grid_main(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m lgcov.gate_sim grid")
     parser.add_argument("reps", type=int, nargs="?", default=5000, help="runs per arm")
@@ -517,6 +587,9 @@ def _grid_main(argv: Sequence[str]) -> int:
         took = time.perf_counter() - start
         print(f"\n## {scenario.name}: R={r_} per arm, {took:.0f} s on {workers} workers\n")
         print(grid_table(results, scenario), flush=True)
+        if scenario == MAIN:
+            print("\n## Lower bounds: the gate's BCa, Tango's, the SCAS-style one\n")
+            print(bounds_table(results), flush=True)
         print(f"{scenario.name}: R={r_}, {workers} workers, {took:.1f} s", file=sys.stderr)
     return 0
 

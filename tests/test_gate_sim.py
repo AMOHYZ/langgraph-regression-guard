@@ -11,6 +11,7 @@ from lgcov.gate_sim import (
     Resolved,
     Scenario,
     Skipped,
+    bounds_table,
     grid,
     grid_table,
     joint_cells,
@@ -19,6 +20,7 @@ from lgcov.gate_sim import (
     resolve,
     run_grid,
     simulate,
+    simulate_arm,
     spawn_seeds,
     sweep,
 )
@@ -242,3 +244,37 @@ def test_grid_table_adds_the_false_blocks_on_kpis_at_zero() -> None:
     kpis = Scenario(kpis=2)
     assert "BLOCK on a KPI at Δ=0" in grid_table(run_grid(plan, 4, 0, scenario=kpis), kpis)
     assert "BLOCK on a KPI" not in grid_table(run_grid(plan, reps=4, seed=0))
+
+
+# T151 part 2: the gate's BCa bound next to Tango's and the SCAS-style bound
+
+SAME = joint_cells(0.95, 0.95, 1.0)  # identical sides: no pair is ever discordant
+
+
+def test_identical_sides_ship_under_every_bound_and_no_bound_misses_delta_0() -> None:
+    cell = Cell(n=100, rho=1.0, p_base=0.95)
+    arm = simulate_arm(cell, 0.0, SAME, SAME, 5, 0, 20)
+    assert arm.ship == 20 and arm.tango == (20, 0, 0) and arm.scas == (20, 0, 0)
+    assert arm.misses == (0, 0, 0)  # -3.69/n, and Tango's -z²/(n + z²), sit under 0
+
+
+def test_a_bound_misses_when_it_sits_above_the_true_delta() -> None:
+    cell = Cell(n=100, rho=1.0, p_base=0.95)
+    arm = simulate_arm(cell, -0.5, SAME, SAME, 5, 0, 10)  # every lower bound is near -0.04
+    assert arm.misses == (10, 10, 10)
+
+
+def test_bounds_are_compared_for_one_kpi_and_leave_the_gates_calls_alone() -> None:
+    r = resolve(Cell(n=50, rho=0.3, p_base=0.80))
+    assert not isinstance(r, Skipped)
+    one = simulate(r, reps=10, seed=0)
+    two = simulate(r, reps=10, seed=0, scenario=Scenario(kpis=2))
+    assert all(sum(a.tango) == sum(a.scas) == 10 for a in one)
+    assert all(sum(a.tango) == sum(a.scas) == 0 for a in two)  # Holm's m > 1: not compared
+
+
+def test_bounds_table_has_a_row_per_arm_with_each_bounds_misses() -> None:
+    plan = [resolve(Cell(n=20, rho=0.3, p_base=0.80), power=POWER_DELTAS)]
+    text = bounds_table(run_grid(plan, reps=4, seed=0))
+    assert "SCAS-style" in text and "Tango" in text
+    assert len([line for line in text.splitlines() if line.startswith("| 0.8 ")]) == 4
