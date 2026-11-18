@@ -45,7 +45,7 @@ jobs:
       - name: Validate action.yml and workflows
         run: |
           uvx --from check-jsonschema==0.39.0 check-jsonschema \
-            --builtin-schema vendor.github-actions action.yml
+            --builtin-schema vendor.github-actions action.yml review/action.yml
           uvx --from check-jsonschema==0.39.0 check-jsonschema \
             --builtin-schema vendor.github-workflows .github/workflows/*.yml
 
