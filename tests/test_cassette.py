@@ -57,6 +57,7 @@ from lgcov.cassette import (
     graph_shape,
     judge_probes,
     judge_repeats,
+    judge_samples,
     probe_nodes,
     probe_routers,
     probe_steps,
@@ -1353,6 +1354,48 @@ def test_judge_repeats_leaves_out_a_node_whose_repeat_raised() -> None:
     ran = repeat_steps(_one_node(breaks), [base], ["n"], 1)
     assert ran == (ProbeStep(0, 0, "n", raised="raised RuntimeError on base's input"),)
     assert judge_repeats([base], ran, ran) == {}
+
+
+def _with_samples(run: Cassette, *outputs: object) -> Cassette:
+    """Attach `outputs` as base's samples on the first step (the recording itself stays)."""
+    from lgcov.cassette import Sample
+
+    samples: list[Sample] = [{"output": o} for o in outputs]
+    return dataclasses.replace(
+        run, steps=[dataclasses.replace(run.steps[0], samples=samples), *run.steps[1:]]
+    )
+
+
+def test_judge_samples_names_no_drift_when_head_sits_inside_base_s_spread() -> None:
+    # T229: the deciding job reads base's recorded samples; no live re-run of base.
+    base = _with_samples(
+        Cassette({"x": 1}, [Step("n", {"route": f"{BASE_TEXT} alpha"}, code="1")]),
+        {"route": f"{BASE_TEXT} beta"},
+        {"route": f"{BASE_TEXT} gamma"},
+    )
+    # Head's fresh output still uses a base word: inside the spread of alpha/beta/gamma.
+    head = [Step("n", {"route": f"{BASE_TEXT} beta"}, code="1")]
+    [check] = judge_samples([base], [head]).values()
+    assert (check.k, check.min_head_to_base, check.drifted) == (1, 0.0, False)
+    assert check.spread > 0
+    assert check.verdict == "no drift detected above noise (K=1)"
+
+
+def test_judge_samples_names_drift_when_head_sits_outside_it() -> None:
+    base = _with_samples(
+        Cassette({"x": 1}, [Step("n", {"route": f"{BASE_TEXT} alpha"}, code="1")]),
+        {"route": f"{BASE_TEXT} beta"},
+        {"route": f"{BASE_TEXT} gamma"},
+    )
+    head = [Step("n", {"route": f"{HEAD_TEXT} alpha"}, code="2")]
+    found = judge_samples([base], [head])
+    assert found["n"].drifted and found["n"].verdict == "drift above noise (K=1)"
+
+
+def test_judge_samples_leaves_out_a_step_with_no_samples() -> None:
+    base = Cassette({"x": 1}, [Step("n", {"route": BASE_TEXT}, code="1")])
+    head = [Step("n", {"route": HEAD_TEXT}, code="2")]
+    assert judge_samples([base], [head]) == {}
 
 
 # T212: a recording made before fingerprints ignored comments holds the old scheme's values. A

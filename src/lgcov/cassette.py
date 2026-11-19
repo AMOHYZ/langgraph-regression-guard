@@ -2023,6 +2023,56 @@ def judge_repeats(
     return found
 
 
+def _paired_sample_steps(
+    base: Sequence[Step], head: Sequence[Step], prefix: str = ""
+) -> Iterator[tuple[str, Step, Step]]:
+    """Each visit that still lines up on both sides, by path name (`inner.second`)."""
+    for recorded, fresh in zip(base, head, strict=False):
+        if recorded.node != fresh.node:
+            continue
+        name = f"{prefix}.{recorded.node}" if prefix else recorded.node
+        yield name, recorded, fresh
+        if recorded.units and fresh.units:
+            yield from _paired_sample_steps(recorded.units, fresh.units, name)
+
+
+def judge_samples(
+    runs: Sequence[Cassette],
+    fresh: Sequence[Sequence[Step]],
+    ignore_paths: Sequence[str] = (),
+) -> dict[str, NoiseCheck]:
+    """T229: each unit with `samples`: `noise_check` of the recording and those samples against
+    head's fresh output for that visit. Pure. The deciding job reads these from the baseline, so
+    it need not re-run base's code. A unit with no samples is left out, so its label stays as it
+    was. A node with several inputs keeps the check furthest above its spread."""
+    found: dict[str, NoiseCheck] = {}
+    for run, head_steps in zip(runs, fresh, strict=True):
+        for name, recorded, head in _paired_sample_steps(run.steps, head_steps):
+            if not recorded.samples:
+                continue
+            routed = {recorded.node} if recorded.goto is not None else set()
+            # Samples were taken of this unit alone; the visit's path name keys the check.
+            base_vals = [
+                _compared(recorded, ignore_paths, routed),
+                *[
+                    _compared(
+                        Step(recorded.node, s["output"], goto=s.get("goto")),
+                        ignore_paths,
+                        routed,
+                    )
+                    for s in recorded.samples
+                ],
+            ]
+            check = noise_check(base_vals, [_compared(head, ignore_paths, routed)])
+            old = found.get(name)
+            if (
+                old is None
+                or check.min_head_to_base - check.spread > old.min_head_to_base - old.spread
+            ):
+                found[name] = check
+    return found
+
+
 def accept_nodes(
     baseline: Cassette, fresh: Cassette, nodes: set[str], ignore_paths: Sequence[str] = ()
 ) -> tuple[Cassette, set[str]]:

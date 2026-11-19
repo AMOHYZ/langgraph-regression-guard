@@ -238,9 +238,8 @@ are read. On the recording:
 
 ## Not verified
 
-- **T229 has no text in this repo yet.** T243 and T248 are in
-  [`cassette-schema.md`](cassette-schema.md) rulings 4 and 1. T193 has no design of its own either:
-  its fields here are what this page needs.
+- **T243 and T248** are in [`cassette-schema.md`](cassette-schema.md) rulings 4 and 1. T193 has
+  no design of its own either: its fields here are what this page needs.
 - **Nothing was run on a deep agent.** What section 1 says of one is read from lgcov's,
   LangChain's and deepagents' code.
 - **How a recorder sees inside a tool call,** where a sub-agent runs, and how it ties a file
