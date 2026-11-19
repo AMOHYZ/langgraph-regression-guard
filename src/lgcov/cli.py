@@ -3303,11 +3303,12 @@ def _lgcov_root(case: Case) -> set[str]:
 
 
 def _aa_label_flip(agent: Agent) -> Callable[[str, Cassette, int], bool]:
-    """T121: base-vs-base attribution for one A/A arm. True when any root or drifted label appears."""
+    """T121: base-vs-base attribution for one A/A arm. True when any root/drifted label appears."""
     nodes = set(getattr(agent.graph, "nodes", {}))
 
     def named(arm: str, base: Cassette, seed: int) -> bool:
-        graph = agent.noisy(seed) if arm == "seeded noise" and agent.noisy is not None else agent.graph
+        noisy = agent.noisy
+        graph = noisy(seed) if arm == "seeded noise" and noisy is not None else agent.graph
         case = Case(
             "aa",
             seed,

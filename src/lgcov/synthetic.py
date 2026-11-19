@@ -118,9 +118,7 @@ def every_case(agent: Agent) -> tuple[Case, ...]:
 
 # T121: base-vs-base attribution on one A/A arm. True when that re-run named any root/drifted.
 LabelFlip = Callable[[str, Cassette, int], bool]
-LABEL_FLIP_NOTE = (
-    "0.00 on a deterministic offline suite; this says nothing about live-model noise"
-)
+LABEL_FLIP_NOTE = "0.00 on a deterministic offline suite; this says nothing about live-model noise"
 
 
 @dataclass(frozen=True)
