@@ -47,7 +47,7 @@ a read. A function named with no file is in [`cassette.py`](../../src/lgcov/cass
 | `schema` | Integer, `2`. Absent means 1, today's file | `lgcov record`. `cassette accept` keeps the file's number | Every reader (`runs_from_json`). A number it doesn't know is refused by name | All |
 | `scheme` | Text: the fingerprint scheme | `lgcov record` | `_codes` and `_router_prints`, which then compute that scheme only | T212 |
 | `graph` | Object: `{"nodes": {name: entry}}`. An entry is `{}` for a node, `{"tools": [names]}` for a tool node, and `{"nodes": {...}}` for a subgraph. Later, as an optional key, `state`: one fingerprint per state channel | `lgcov record`, from the compiled graph | The job that decides, from the base checkout's recording, once T243's check can tell a stale one (ruling 4). One-job `ci` the same way | T238, T193 |
-| `parts` | Object: part name to `fingerprint`, `file` and `source` | `lgcov record` | The candidate job (what changed), the job that decides (a root's cause, the outside-part rule), the comment | T239. `source` is for T243 (ruling 4) |
+| `parts` | Object: part name to `fingerprint`, `file` and `source` | `lgcov record` | The candidate job (what changed), the job that decides (a root's cause, the outside-part rule, T243's stale check), the comment | T239, T243 |
 | `runs` | As today | | | |
 
 `source` is a hash of the part's own syntax tree in its file, read as T212 reads source. A job that
@@ -294,8 +294,10 @@ field after the flip is optional.
    until a follow-up reads the probe.
 9. **Samples** (T229): `lgcov record --samples K`. The deciding job does not read them yet.
 10. **Parts** (T239), with a chat model's fields. Serving and labels don't read them yet.
+11. **Stale baseline** (T243): each part's `source` is checked against the base checkout; ci then
+    reads `graph` for T238.
 
-Each of 5 to 10 ships when ready, with no new schema number. It re-records the demo baseline only if
+Each of 5 to 11 ships when ready, with no new schema number. It re-records the demo baseline only if
 the demo graph gains that field. A PR that changes a label also updates the docs that state lgcov's
 limits.
 
@@ -330,13 +332,15 @@ Decided on 17 November 2026, as recommended here.
    checkout and compares it with the recording. Exempt a PR that changes only the recording, or the
    PR that fixes a stale one can't merge. That PR still goes through the edited-cassette check: its
    headline is "No decision: needs_human", never SHIP (`cassettes_edited`). So the exemption can't
-   be used to swap in a convenient baseline. Until detection exists, T238's "not known:
-   inconclusive" stays, and the job that decides doesn't read `graph` (section 6, PR 2).
+   be used to swap in a convenient baseline. Built: a mismatch is a harness error naming
+   `lgcov record`; when the check passes (or the recording has no parts), ci reads `graph` from
+   the trusted baseline for T238.
 
 ## Not verified
 
 - deepagents, langchain's `create_agent` and MCP servers: read through T239, not run.
 - A real provider's client: only a fake LangChain model and a plain class were run.
-- The redaction rules, the part probe, `graph.state` and `source`: designs, not tried.
+- The redaction rules, the part probe and `graph.state`: designs, not tried. `source` is tried for
+  chat-model parts (T243).
 - How much a recording grows with `units`, `samples` and `router_state`: not measured.
 - Chronicle and Shadow beyond their READMEs, and Causal Agent Replay beyond its abstract.

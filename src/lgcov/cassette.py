@@ -13,6 +13,7 @@ from contextvars import ContextVar, copy_context
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial, wraps
+from pathlib import Path
 from statistics import fmean
 from types import CodeType, FunctionType, MethodType
 from typing import Any, Literal, NoReturn, NotRequired, TypedDict
@@ -34,7 +35,7 @@ from lgcov.attribution import (
     drift_exceeds_noise,
     noise_check,
 )
-from lgcov.fingerprint import fingerprint
+from lgcov.fingerprint import fingerprint, tree_hash
 from lgcov.messages import decode, encode
 from lgcov.normalize import key_view, normalize, redact_secrets
 from lgcov.rebind import Ambiguous, rebind
@@ -50,8 +51,9 @@ class Sample(TypedDict):
 
 
 class Part(TypedDict, total=False):
-    """T239: one thing units depend on, in a schema-2 recording's `parts`. `source`, a hash of its
-    syntax tree in its file, waits on a ruling (T243), so it may be missing."""
+    """T239: one thing units depend on, in a schema-2 recording's `parts`. `source` (T243) is a
+    hash of the part's file's syntax tree, so the deciding job can tell a stale recording from
+    base's code without loading the project."""
 
     fingerprint: str | None
     file: str
@@ -252,13 +254,66 @@ def _chat_models_in(fn: FunctionType) -> list[object]:
     return found
 
 
-def _field_part(name: str, value: object) -> Part:
-    text = repr(value).encode()
-    return {"fingerprint": hashlib.sha256(text).hexdigest()[:16]}
+def source_hash(text: str) -> str:
+    """T243: hash of a file's syntax tree, for a part's `source`."""
+    return tree_hash(text)
+
+
+def graph_node_names(graph: dict[str, object] | None) -> frozenset[str] | None:
+    """T243: top-level node names from a recording's `graph`, for T238 once the baseline isn't
+    stale. None when the recording holds no graph."""
+    nodes = graph.get("nodes") if isinstance(graph, Mapping) else None
+    if not isinstance(nodes, Mapping):
+        return None
+    return frozenset(str(name) for name in nodes)
+
+
+def stale_parts(parts: Mapping[str, Part] | None, root: Path) -> list[str]:
+    """T243: part names whose recorded `source` no longer matches the file in `root`. Empty when
+    there is nothing to check or every source still matches."""
+    found: list[str] = []
+    for name, part in sorted((parts or {}).items()):
+        path, held = part.get("file"), part.get("source")
+        if not path or held is None:
+            continue
+        file = root / path
+        if not file.is_file():
+            found.append(name)
+            continue
+        try:
+            text = file.read_text(encoding="utf-8")
+        except OSError:
+            found.append(name)
+            continue
+        if source_hash(text) != held:
+            found.append(name)
+    return found
+
+
+def _part_file(fn: FunctionType) -> str | None:
+    """Project-relative path of the file that holds a node, for a part's `file`. None outside the
+    cwd or with no readable source."""
+    path = Path(fn.__code__.co_filename)
+    if not path.is_file():
+        return None
+    try:
+        return str(path.resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return None
+
+
+def _field_part(value: object, path: str | None, source: str | None) -> Part:
+    part: Part = {"fingerprint": hashlib.sha256(repr(value).encode()).hexdigest()[:16]}
+    if path is not None:
+        part["file"] = path
+    if source is not None:
+        part["source"] = source
+    return part
 
 
 def chat_parts(graph: Any) -> tuple[dict[str, Part], dict[str, list[str]]]:
     """T239: chat-model fields held by each plain node, as recording `parts` and per-node names.
+    T243: each part also carries `file` and `source` when the node lives in a project file.
     Serving and labels don't read them yet. Empty when no node holds a chat model."""
     table: dict[str, Part] = {}
     by_node: dict[str, list[str]] = {}
@@ -276,6 +331,13 @@ def chat_parts(graph: Any) -> tuple[dict[str, Part], dict[str, list[str]]]:
         fn = _plain(bound)
         if fn is None:
             continue
+        path = _part_file(fn)
+        source = None
+        if path is not None:
+            try:
+                source = source_hash(Path(fn.__code__.co_filename).read_text(encoding="utf-8"))
+            except OSError:
+                path, source = None, None
         names: list[str] = []
         for model in _chat_models_in(fn):
             for key in _CHAT_FIELDS:
@@ -285,7 +347,7 @@ def chat_parts(graph: Any) -> tuple[dict[str, Part], dict[str, list[str]]]:
                 if value is None:
                     continue
                 part = f"{name}.{key}"
-                table[part] = _field_part(part, value)
+                table[part] = _field_part(value, path, source)
                 names.append(part)
         if names:
             by_node[name] = names

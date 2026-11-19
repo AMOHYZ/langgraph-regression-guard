@@ -98,6 +98,7 @@ from lgcov.cassette import (
     compared_run,
     fill_samples,
     fingerprint_session,
+    graph_node_names,
     graph_shape,
     judge_probes,
     judge_repeats,
@@ -111,6 +112,7 @@ from lgcov.cassette import (
     runs_from_json,
     runs_to_json,
     same_input,
+    stale_parts,
     unservable,
     with_units,
 )
@@ -1110,6 +1112,32 @@ def _cassettes_edited(args: argparse.Namespace, cfg: Config) -> bool:
     return bool(args.policy_dir) and _tree(Path(cfg.cassette_dir)) != _tree(Path(base))
 
 
+def _base_graph(
+    args: argparse.Namespace, cfg: Config, cassettes_edited: bool
+) -> tuple[frozenset[str] | None, str]:
+    """T243: base's node names from the trusted baseline, and a harness error when that
+    recording's parts are stale against the base checkout. Empty error when the check passes or
+    doesn't apply. A re-record-only PR (`cassettes_edited`) skips the stale block."""
+    root = args.policy_dir or args.base_dir
+    folder = _policy_path(args, cfg.cassette_dir) if args.policy_dir else cfg.cassette_dir
+    path = Path(folder) / "baseline.json"
+    try:
+        recording = recording_from_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, ""
+    gone = stale_parts(recording.parts, Path(root)) if root else []
+    if gone and not cassettes_edited:
+        named = ", ".join(f"`{n}`" for n in gone)
+        return None, (
+            f"The baseline is stale: base's code no longer matches the recording for {named}. "
+            "Re-record with `lgcov record`."
+        )
+    # Parts with no base checkout: leave graph unknown; the check can't run on PR code alone.
+    if recording.parts and not root:
+        return None, ""
+    return graph_node_names(recording.graph), ""
+
+
 def _policy_files(args: argparse.Namespace) -> list[str]:
     return [args.config, *([args.taxonomy] if args.taxonomy else []), args.bands]
 
@@ -1305,9 +1333,12 @@ def _evaluate(
     # with the roots, since a live model node can't be probed until T211.
     firsts = [_run_root(r, d) for r, d in zip(runs, drifts, strict=True)]
     nodes = [{x.node for x in d} for d in drifts]
-    # T238: base's graph counts as not given, in one job or two, until the baseline recording
-    # holds its node names: the candidate file can't, since the PR's code writes it.
-    graphs = (None, run.head.nodes)
+    # T243: base's node names from the base checkout's recording when it isn't stale. A PR that
+    # only re-records is exempt (`cassettes_edited`), or the fix couldn't merge.
+    base_nodes, stale_msg = _base_graph(args, cfg, edited)
+    if stale_msg:
+        return replace(partial, harness_error=stale_msg)
+    graphs = (base_nodes, run.head.nodes)
     labels = _node_labels(
         runs, [f.steps for f in run.fresh], drifts, probes, cfg.ignore_paths, graphs=graphs
     )

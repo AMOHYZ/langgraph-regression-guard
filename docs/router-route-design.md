@@ -59,10 +59,9 @@ checkout, which the PR can't write.
 | The baseline is older than base's graph: base's graph changed and nobody re-recorded | Not known: inconclusive. A stale list would call a node base already has "added" |
 | The PR edits its own baseline | The names come from the base checkout's baseline, never the PR's |
 
-How the deciding job tells a stale baseline from a current one is open. It can't load base's
-graph, since it installs no project code. A hash of the graph's node and edge names, written
-by `lgcov record` and checked against the base checkout by a job that can load it, is one way;
-it needs its own design before this is built.
+T243: the deciding job recomputes each part's `source` (a hash of that file's syntax tree) from
+the base checkout and compares it with the recording. A mismatch blocks with `lgcov record`.
+When the check passes, or the recording has no parts, it reads `graph` from the trusted baseline.
 
 One job and two jobs must keep giving the same labels, so one-job `ci` reads the names from
 the baseline too, and not from the base graph it happens to have loaded.
