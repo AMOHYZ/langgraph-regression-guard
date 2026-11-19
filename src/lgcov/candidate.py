@@ -160,7 +160,7 @@ def _step(raw: object, schema: int = SCHEMA) -> Step:
     if not isinstance(units, list | None):
         raise ValueError(f"step {raw['node']!r} has units that aren't a list")
     step = Step(**{**raw, "units": None if units is None else [_step(u, schema) for u in units]})
-    texts = (step.code, step.router, step.call_id, step.status)  # T248: a status may be any text
+    texts = (step.code, step.router, step.call_id, step.status)  # T248: success/error/transient
     valid = all(isinstance(v, str | None) for v in texts) and step.kind in _KINDS
     if not valid or not all(isinstance(v, list | None) for v in (step.goto, step.routed)):
         raise ValueError(f"step {step.node!r} has an invalid code, goto, router or unit field")

@@ -876,8 +876,8 @@ def test_a_cassette_with_no_router_saves_as_it_did_before_routers_were_kept() ->
 
 # T193, PR 1: read recording schema 2 before anything writes it, as T175 did above. The fixture
 # holds every field docs/design/cassette-schema.md defines (section 2), with part `prompt` missing
-# its `source` (ruling 4 is open) and tool call `search` holding a status T248 hasn't settled.
-# Each is read and kept, and nothing acts on one.
+# its `source` when first written, and tool call `search` holding a T248 transient status.
+# Each is read and kept; T248 acts on the status when comparing.
 _HERE = Path(__file__).parent
 _SCHEMA_2_FILE = _HERE / "fixtures" / "schema2_recording.json"
 _SCHEMA_2 = json.loads(_SCHEMA_2_FILE.read_text(encoding="utf-8"))
@@ -898,6 +898,33 @@ def test_a_schema_2_recording_with_every_field_loads_and_saves_as_it_was() -> No
     assert (agent.kind, agent.units) == ("agent", [Step("inner", {"x": 4}, {"x": 2}, "1a")])
     assert recording_to_json(recording) == SCHEMA_2
     assert runs_from_json(SCHEMA_2) == recording.runs  # what every command reads
+
+
+@pytest.mark.parametrize("status", ["timeout", "rate_limited", "server_error"])
+def test_a_transient_tool_status_is_not_checked_and_neither_is_the_rest_of_the_run(
+    status: str,
+) -> None:
+    # T248: timeout / rate_limited / server_error never count as evidence. The unit and
+    # everything after it in the run are not checked, and the call is never served.
+    from langchain_core.messages import ToolMessage
+
+    from lgcov.cassette import TRANSIENT, compared_run
+
+    assert status in TRANSIENT
+    msg = ToolMessage("later", tool_call_id="c1", status="error")
+    search = Step("search", msg, {"q": 1}, "c1", kind="tool", call_id="c1", status=status)
+    tools = Step("tools", {"ok": True}, {}, "t1", units=[search])
+    after = Step("respond", {"a": 1}, {}, "r1")
+    base = Cassette({}, [tools, after])
+    # Fresh run drifted on both: without T248 that would be two drifts.
+    other = ToolMessage("other", tool_call_id="c2", status="error")
+    fresh_search = Step("search", other, {"q": 1}, "c1", kind="tool", call_id="c2", status=status)
+    fresh_tools = Step("tools", {"ok": False}, {}, "t1", units=[fresh_search])
+    fresh_after = Step("respond", {"a": 9}, {}, "r1")
+    done = compared_run(base, [fresh_tools, fresh_after], (), None)
+    assert done.drifts == ()
+    assert done.not_checked[0] == "tools.search"
+    assert "respond" in done.not_checked
 
 
 @pytest.mark.parametrize(("schema", "named"), [(3, "3"), ("2", "'2'")])

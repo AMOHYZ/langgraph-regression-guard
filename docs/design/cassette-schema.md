@@ -18,7 +18,7 @@ a user re-records once to move to it. It starts from the field list in
 | T229 | Base's noise samples, so the job that decides needn't run base's code |
 | T238 | Base's node names, read from the base checkout |
 | T212 | The fingerprint scheme, so the old one can go |
-| T239, T248 | A unit's kind, parts and call id; a tool call's status (T248's values are pending) |
+| T239, T248 | A unit's kind, parts and call id; a tool call's status (`timeout` / `rate_limited` / `server_error` not checked) |
 
 **How it was checked.** Read on 15 November 2026 at lgcov `0173e8a`. Run: the checks in section 5,
 offline, with fake nodes, tools and chat model, on langgraph 1.2.16, langgraph-prebuilt 1.1.1 and
@@ -72,7 +72,7 @@ candidate job for the PR's units.
 | `router_state` | Any | The state the router saw, masked like an input. Capped, and can be switched off | Head's router probe | T221 |
 | `parts` | List of text | Names in the recording's `parts` | Serving, labels, the comment | T239 |
 | `call_id` | Text | A tool: the call's id. An agent: the id of the call that started it. Never compared; fitted when served (`rebind`) | `rebind` | T239 |
-| `status` | Text | A tool: `success` or `error`, as its message says, and T248's three if accepted | The not-checked rule | T239, T248 |
+| `status` | Text | A tool: `success` or `error`, as its message says, or `timeout` / `rate_limited` / `server_error` (T248) | The not-checked rule | T239, T248 |
 | `samples` | List of `{output, goto}` | Base's code run again on the same input when recorded | The job that decides, from the base checkout, in `noise_check` ([`attribution.py`](../../src/lgcov/attribution.py)) | T229 |
 
 **Worked out when read, never written:** a unit's path (the names of the units around it), its call
@@ -296,8 +296,9 @@ field after the flip is optional.
 10. **Parts** (T239), with a chat model's fields. Serving and labels don't read them yet.
 11. **Stale baseline** (T243): each part's `source` is checked against the base checkout; ci then
     reads `graph` for T238.
+12. **Transient tool status** (T248): `timeout`, `rate_limited` and `server_error` are not checked.
 
-Each of 5 to 11 ships when ready, with no new schema number. It re-records the demo baseline only if
+Each of 5 to 12 ships when ready, with no new schema number. It re-records the demo baseline only if
 the demo graph gains that field. A PR that changes a label also updates the docs that state lgcov's
 limits.
 
@@ -311,8 +312,8 @@ Decided on 17 November 2026, as recommended here.
    timeouts. This covers a failure a tool node handled, so the run went on (check 5d). One that ends
    the run is judged as today: a timeout or connection error is INFRA_ERROR, exit 2, and anything
    else a node raises is an agent failure ([README](../../README.md#outcomes)). A tool that catches
-   its own timeout and returns text can't be told apart. It applies once tool units record a
-   `status` (section 6, PR 6) and T248 settles the transient values.
+   its own timeout and returns text can't be told apart. Built: those three statuses are not
+   compared or served; the unit and the rest of its run are not checked (T248).
 2. **Confirm a root by serving base's output there and running again?** *Decided: only when
    several units changed; not built now.* With one changed unit, the units after it see base's
    inputs and, where they can be served, are served from base's recording. So the run equals base by
