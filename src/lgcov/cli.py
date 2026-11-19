@@ -144,7 +144,14 @@ from lgcov.coverage import (
     snapshot_coverage,
 )
 from lgcov.draft import Drafter, approve, as_doc, draft, parse_traces, to_yaml
-from lgcov.drift_gate import FailOn, Outcome, drift_exit_code, parse_fail_on, verdict
+from lgcov.drift_gate import (
+    FailOn,
+    Outcome,
+    drift_exit_code,
+    parse_fail_on,
+    root_harm_statuses,
+    verdict,
+)
 from lgcov.exposure import CaseExposure, entries, exposure_to_json, parse_exposure
 from lgcov.exposure import record as record_exposure
 from lgcov.gate_result import GateResult, file_hash, parse_result, result_to_json, verify_result
@@ -1488,7 +1495,8 @@ def _evaluate(
         changes = [f"⚠️ could not recompute the bands from {Path(args.bands).parent}/: {exc}"]
     result = replace(result, calibration_lines=tuple(changes))
     if l2 is None:
-        return result
+        # T262: no KPI/check → every root is unmeasured.
+        return replace(result, harm_status={n: "unmeasured" for n in root})
     judge_start = perf_counter()
     try:
         saved = _saved_cases(Path(_policy_path(args, args.bands)).parent / "cases", l2[0])
@@ -1524,6 +1532,15 @@ def _evaluate(
         worse[failure.kpi] |= {*failure.cases}
     by_kpi = tuple((kpi, len(cases)) for kpi, cases in worse.items() if cases)
     runs_worse = {case.split("/", 1)[0] for cases in worse.values() for case in cases}  # run-{i}
+    # T262: harm status from this run's KPIs/code checks only (never a truth label).
+    failed_kpis = {f.kpi for f in findings.code_failures} | {f.kpi for f in hidden}
+    failed_kpis |= {s.kpi for s in stats if s.blocking and s.decision == "BLOCK"}
+    harm = root_harm_statuses(
+        root,
+        {spec.name: spec.node for spec in l2[0]},
+        frozenset(failed_kpis),
+        frozenset(s.kpi for s in stats),
+    )
     return replace(
         result,
         tally=replace(tally, worse=len(runs_worse), worse_by_kpi=by_kpi) if stats else tally,
@@ -1531,6 +1548,7 @@ def _evaluate(
         gate=replace(
             findings, infra=findings.infra or bool(policy.llm_code), hidden_failures=hidden
         ),
+        harm_status=harm,
         l2_lines=(
             *policy.calibration,
             *([""] if policy.calibration and stats else []),

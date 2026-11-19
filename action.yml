@@ -18,7 +18,7 @@ inputs:
     required: false
     default: ""
   fail-on:
-    description: "root-drift | any-drift | never: exit 1 when this kind of drift is found."
+    description: "root-drift (default) | any-drift | never | harmed-root: exit 1 when this kind of drift is found. harmed-root fails only on roots a KPI/code check marks harmed; unmeasured roots are needs_human; no-harm-seen alone does not fail."
     required: false
     default: root-drift
   python-version:
@@ -103,9 +103,9 @@ runs:
         PHASE: ${{ inputs.phase }}
       run: |
         case "$FAIL_ON" in
-          root-drift|any-drift|never) ;;
+          root-drift|any-drift|never|harmed-root) ;;
           *)
-            echo "::error title=lgcov::fail-on must be one of root-drift, any-drift, never; got '$FAIL_ON'"
+            echo "::error title=lgcov::fail-on must be one of root-drift, any-drift, never, harmed-root; got '$FAIL_ON'"
             exit 2
             ;;
         esac

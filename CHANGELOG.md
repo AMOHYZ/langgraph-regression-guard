@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Gate behaviour change (T262).** Each drift root gets a harm status from lgcov's own KPIs/code checks only (`harmed` / `no harm seen` / `unmeasured`); `classify` is unchanged and never reads a synthetic truth label. New `fail-on: harmed-root` fails only on harmed roots; unmeasured roots are `needs_human` (never a pass); no-harm-seen alone does not fail (pass / exit 0). Default remains `root-drift` (any root fails).
 - **Gate behaviour change.** Labels read chat-model `parts` (T239): a unit whose part fingerprints differ from the recording counts as fingerprint-changed for root/propagated, and the comment names those parts with the root. The candidate job writes head's part fingerprints (schema 3). Replay already serves a step only when every named part still matches.
 - **Gate behaviour change.** Labels name a changed router only when the route differed (T221): the candidate's router probe on base's `router_state`, or paired `routed` when there was no state. A router edit that still returns base's targets is no longer root of drift a later node caused.
 - **Gate behaviour change.** A tool unit whose `status` is `timeout`, `rate_limited` or `server_error` is never compared, never served and never labelled (T248). That unit and the rest of its run are not checked, so the verdict is INCONCLUSIVE (needs_human), never a pass. `success` and `error` compare as before.

@@ -1307,7 +1307,7 @@ def test_cli_replay_fail_on_typo_lists_allowed_values(capsys: pytest.CaptureFixt
     with pytest.raises(SystemExit) as exc:
         main(["replay", "--fail-on", "root-drif"])
     assert exc.value.code == 2
-    assert "root-drift, any-drift, never; got 'root-drif'" in capsys.readouterr().err
+    assert "root-drift, any-drift, never, harmed-root; got 'root-drif'" in capsys.readouterr().err
 
 
 # T078 PR B: `lgcov ci` builds the Action's report, step outputs and exit code.

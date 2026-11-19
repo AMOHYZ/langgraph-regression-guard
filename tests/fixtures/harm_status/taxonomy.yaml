@@ -1,0 +1,15 @@
+# T262: small fixture — one code check covers `respond` only.
+# Roots on other nodes stay unmeasured; a new failure on respond is harmed.
+version: 1
+system: harm_status_fixture
+failure_modes:
+  - id: respond_must_run
+    description: The run must still visit respond.
+kpis:
+  - name: respond_runs
+    failure_mode: respond_must_run
+    node: respond
+    judge: code
+    description: Every run ends by responding.
+    rubric: Did the run visit respond?
+    check: {type: node_visited, node: respond}

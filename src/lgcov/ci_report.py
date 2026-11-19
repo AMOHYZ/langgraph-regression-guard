@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from lgcov.drift_gate import FailOn, drift_exit_code
+from lgcov.drift_gate import FailOn, HarmStatus, drift_exit_code
 from lgcov.verdict_actions import Action, CiStatus, Evidence, GateFindings, Mode, decide_action
 
 MARKER = "<!-- lgcov-report -->"  # T081: the comment upsert finds its own comment by this
@@ -88,6 +88,8 @@ class CiResult:
     propagated_drift: tuple[str, ...] = ()
     first_drift: tuple[str, ...] = ()  # T162: each touched run's first node to drift, once each
     inconclusive: tuple[str, ...] = ()  # T162: in root_drift, but the probe couldn't run offline
+    # T262: per root, from KPIs/code checks only. Missing roots read as unmeasured.
+    harm_status: dict[str, HarmStatus] | None = None
     notes: tuple[str, ...] = ()
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
     harness_error: str = ""
@@ -118,15 +120,32 @@ class CiResult:
     def action(self) -> Action:
         """T153: the headline, next step, exit code and verdict this run comes to."""
         drifted = self.root_drift or self.propagated_drift
-        enforced = drift_exit_code(self.fail_on, len(self.root_drift), len(self.propagated_drift))
+        if self.fail_on == "harmed-root":
+            # T262: only harmed roots are enforced; unmeasured → needs_human; no-harm-seen alone
+            # does not fail (documented choice: pass/exit 0 when every root is no-harm-seen).
+            statuses = self.harm_status or {}
+            harmed_roots = tuple(
+                r for r in self.root_drift if statuses.get(r, "unmeasured") == "harmed"
+            )
+            unmeasured = any(statuses.get(r, "unmeasured") == "unmeasured" for r in self.root_drift)
+            enforced_nodes = harmed_roots
+            unenforced = False
+            needs_human_unmeasured = bool(unmeasured) and not harmed_roots
+        else:
+            enforced = drift_exit_code(
+                self.fail_on, len(self.root_drift), len(self.propagated_drift)
+            )
+            enforced_nodes = drifted if enforced else ()
+            unenforced = bool(drifted) and not enforced
+            needs_human_unmeasured = False
         return decide_action(
             Evidence(
                 self.gate.statistical,
                 self.gate.k_gate,
                 infra=bool(self.harness_error) or self.gate.infra,
                 crashed=bool(self.crash),
-                enforced_drift=drifted if enforced else (),
-                unenforced_drift=bool(drifted) and not enforced,
+                enforced_drift=enforced_nodes,
+                unenforced_drift=unenforced,
                 under_floor=bool(self.under_floor),
                 not_checked=self.not_checked,
                 abstained=self.gate.abstained,
@@ -136,6 +155,7 @@ class CiResult:
                 cassettes_edited=self.cassettes_edited,
                 code_failures=self.gate.code_failures,
                 hidden_failures=self.gate.hidden_failures,
+                unmeasured_drift=needs_human_unmeasured,
                 inconclusive_blocks=self.inconclusive_blocks,
                 mode=self.mode,
                 approved_by=self.approved_by,
@@ -208,12 +228,16 @@ def render_ci_report(r: CiResult) -> str:
     lines += [*r.notes, ""] if r.notes else []
     lines += [format_timing(r.timing), ""] if r.timing else []
     lines += [r.locked, ""] if r.locked else []
+    harm = ""
+    if r.harm_status:
+        parts = [f"`{n}` {s}" for n, s in sorted(r.harm_status.items())]
+        harm = f" · harm: {', '.join(parts)}"
     lines.append(
         f"fail-on: `{r.fail_on}`{f' · tier: `{r.tier}`' if r.tier else ''} · "
         f"root drift: {len(r.root_drift)}"
         + (f" ({len(r.inconclusive)} inconclusive)" if r.inconclusive else "")
         + " · "
-        f"propagated drift: {len(r.propagated_drift)} · verdict: **{action.verdict}**"
+        f"propagated drift: {len(r.propagated_drift)}{harm} · verdict: **{action.verdict}**"
     )
     body = "\n".join(lines) + "\n"
     body = _claiming_no_ship(body) if action.state == "first_adoption" else body
