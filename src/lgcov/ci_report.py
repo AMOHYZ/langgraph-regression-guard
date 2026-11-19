@@ -90,6 +90,8 @@ class CiResult:
     inconclusive: tuple[str, ...] = ()  # T162: in root_drift, but the probe couldn't run offline
     # T262: per root, from KPIs/code checks only. Missing roots read as unmeasured.
     harm_status: dict[str, HarmStatus] | None = None
+    # T262: why an unmeasured root is unmeasured (e.g. presence-only covering check).
+    harm_reasons: dict[str, str] | None = None
     notes: tuple[str, ...] = ()
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
     harness_error: str = ""
@@ -230,7 +232,13 @@ def render_ci_report(r: CiResult) -> str:
     lines += [r.locked, ""] if r.locked else []
     harm = ""
     if r.harm_status:
-        parts = [f"`{n}` {s}" for n, s in sorted(r.harm_status.items())]
+        reasons = r.harm_reasons or {}
+        parts: list[str] = []
+        for n, s in sorted(r.harm_status.items()):
+            bit = f"`{n}` {s}"
+            if s == "unmeasured" and (why := reasons.get(n)):
+                bit = f"{bit} ({why})"
+            parts.append(bit)
         harm = f" · harm: {', '.join(parts)}"
     lines.append(
         f"fail-on: `{r.fail_on}`{f' · tier: `{r.tier}`' if r.tier else ''} · "

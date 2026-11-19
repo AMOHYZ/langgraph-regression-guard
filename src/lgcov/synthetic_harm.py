@@ -52,6 +52,15 @@ def code_check_new_failures(
     return frozenset(failed), frozenset(judged)
 
 
+def _run_path(cassette: Cassette) -> tuple[str, ...]:
+    """First-seen node order from a recorded trajectory (for upstream detection)."""
+    seen: list[str] = []
+    for step in cassette.steps:
+        if step.node not in seen:
+            seen.append(step.node)
+    return tuple(seen)
+
+
 def harm_for_roots(
     base: Cassette,
     pr: Cassette,
@@ -61,11 +70,19 @@ def harm_for_roots(
     """Harm status per root from the taxonomy's code checks on these two cassettes."""
     specs = load_taxonomy(taxonomy).kpi_specs
     failed, judged = code_check_new_failures(base, pr, specs)
+    code = [s for s in specs if s.judge == "code"]
+    checks: dict[str, dict[str, str] | None] = {
+        s.name: (dict(s.check) if s.check is not None else None) for s in code
+    }
+    # Prefer the PR path; fall back to base when the PR never visited the root.
+    path = _run_path(pr) or _run_path(base)
     return root_harm_statuses(
         roots,
-        {s.name: s.node for s in specs if s.judge == "code"},
+        {s.name: s.node for s in code},
         failed,
         judged,
+        kpi_checks=checks,
+        path=path,
     )
 
 

@@ -23,10 +23,21 @@ or slice group never goes further than its KPIs' own verdicts.
   comment shows it as "No decision: needs_human"; [verdict-actions.md](verdict-actions.md)
   has what each outcome asks of the reviewer.
 - **`fail-on` (T262).** Default `root-drift` fails on any named root (behaviour change).
-  `harmed-root` fails only when a root is harmed by a blocking KPI or code check on that
-  node's taxonomy entry; unmeasured roots (no covering check) are needs_human, never a
-  pass; roots with covering checks that ran and did not fail (`no harm seen`) do not fail
-  under that mode.
+  `harmed-root` fails only when a root is harmed by a blocking KPI or code check that
+  **observes** that node's output or something downstream; unmeasured roots (no observing
+  covering check — including same-node `node_visited` / `node_not_visited`, or a check
+  scoped only to upstream nodes) are needs_human, never a pass; roots with observing
+  checks that ran and did not fail (`no harm seen`) do not fail under that mode. The PR
+  comment names why each unmeasured root is unmeasured.
+
+  | Check kind | Measures a taxonomy root? |
+  |---|---|
+  | LLM / fake / jev judge on that node | Yes (rubric over cassette output) |
+  | `tool_called` / `tool_not_called` / `tool_sequence` / `max_steps` | Yes (run-level effects) |
+  | `node_visited` / `node_not_visited` on a **downstream** node | Yes |
+  | `node_sequence` that includes a node **after** the root | Yes |
+  | `node_visited` / `node_not_visited` on the root itself | **No** (presence only) |
+  | Check scoped only to nodes **before** the root on the run path | **No** |
 - **A code check's new failure blocks outside these numbers.** A check that passed on the base
   and fails on the PR exits 1 on one case, whatever the paired test says. So it has no false-alarm
   bound: a check whose path varies between runs of an unchanged agent will block by chance, on
