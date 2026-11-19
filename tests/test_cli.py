@@ -3771,6 +3771,41 @@ def test_a_jev_judge_takes_its_model_and_timeout_from_lgcov_yaml() -> None:
     assert isinstance(default, JevJudge) and default.timeout_s == 10.0
 
 
+# T229: the deciding job reads base's recorded samples and quiets a node under its noise.
+def test_recorded_samples_quiet_a_first_node_under_its_noise() -> None:
+    from lgcov.cassette import judge_samples
+
+    brief = "the order ships on friday"
+    base = Cassette(
+        {"q": "x"},
+        [
+            Step(
+                "brief",
+                {"brief": f"{brief} alpha"},
+                input={"q": "x"},
+                code="1",
+                samples=[
+                    {"output": {"brief": f"{brief} beta"}},
+                    {"output": {"brief": f"{brief} gamma"}},
+                ],
+            ),
+            Step("report", {"report": "X"}, input={"brief": f"{brief} alpha"}, code="2"),
+        ],
+    )
+    # Unchanged code; fresh brief still uses a base word, so it sits inside the spread.
+    fresh = [
+        Step("brief", {"brief": f"{brief} beta"}, input={"q": "x"}, code="1"),
+        Step("report", {"report": "X"}, input={"brief": f"{brief} beta"}, code="2"),
+    ]
+    drifts = [list(compared_run(base, fresh, (), None).drifts)]
+    assert {d.node for d in drifts[0]} == {"brief"}
+    checks = judge_samples([base], [fresh])
+    assert checks["brief"].drifted is False
+    quiet = {n for n, c in checks.items() if not c.drifted}
+    labels = _node_labels([base], [fresh], drifts, {}, quiet=quiet)
+    assert (labels.root, labels.propagated, labels.inconclusive) == ((), (), {})
+
+
 # T230 with T211's evidence: a first node under its noise needs no other cause, and stays so.
 def test_a_first_node_under_its_noise_is_not_relabelled_inconclusive(tmp_path: Path) -> None:
     def run(brief: str) -> Cassette:

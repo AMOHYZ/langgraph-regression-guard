@@ -117,6 +117,9 @@ from lgcov.cassette import (
     unservable,
     with_units,
 )
+from lgcov.cassette import (
+    judge_samples as judge_noise_samples,
+)
 from lgcov.ci_report import CiResult, Tally, Timing, cases_copy, render_ci_report
 from lgcov.code_judges import code_judge, unknown_names
 from lgcov.config import DEFAULT_PATH as DEFAULT_CONFIG
@@ -805,7 +808,7 @@ def _record(argv: list[str]) -> int:
         metavar="K",
         help="T229: run each plain node's code K more times on its recorded input and store "
         "the outputs as samples (for the noise rule). 0, the default, stores none. The "
-        "deciding job does not read them yet",
+        "deciding job reads them in noise_check",
     )
     args = ap.parse_args(argv)
     if args.samples < 0:
@@ -1349,12 +1352,21 @@ def _evaluate(
     if stale_msg:
         return replace(partial, harness_error=stale_msg)
     graphs = (base_nodes, run.head.nodes)
+    # T229: base's recorded samples feed the noise rule without re-running base's code.
+    fresh_steps = [f.steps for f in run.fresh]
+    checks = judge_noise_samples(runs, fresh_steps, cfg.ignore_paths)
+    base_codes = {s.node: s.code for r in runs for s in with_units(r.steps)}
+    head_codes = {s.node: s.code for steps in fresh_steps for s in with_units(steps)}
+    changed = {n for n in checks if base_codes.get(n) != head_codes.get(n)}
+    noise_probes = {n: Probe(checks[n].drifted or None, checks[n].verdict) for n in changed}
+    quiet = {n for n, c in checks.items() if not c.drifted} - changed
     labels = _node_labels(
         runs,
-        [f.steps for f in run.fresh],
+        fresh_steps,
         drifts,
-        probes,
+        {**probes, **noise_probes},
         cfg.ignore_paths,
+        quiet=quiet,
         graphs=graphs,
         router_probes=run.probes,  # T221: which runs a changed router's route differed in
     )
