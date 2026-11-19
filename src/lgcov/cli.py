@@ -86,6 +86,7 @@ from lgcov.cassette import (
     Drift,
     NodeError,
     OnDivergence,
+    Part,
     ProbeStep,
     Recording,
     Replay,
@@ -427,9 +428,11 @@ def _replay_under(
     budget: Budget | None = None,
     baseline: Sequence[Cassette] = (),
     units: bool = False,
+    parts: Mapping[str, Part] | None = None,
 ) -> Replay:
     """`replay_run` with what lgcov.yaml says to mask. `baseline`: every run of the recording.
-    T193: `units` records the units inside subgraphs on the fresh steps."""
+    T193: `units` records the units inside subgraphs on the fresh steps. T239: `parts` is the
+    recording's table so a served step needs matching part fingerprints."""
     return replay_run(
         graph,
         run,
@@ -440,6 +443,7 @@ def _replay_under(
         mask_volatile=cfg.mask_volatile_in_key,
         baseline=baseline,
         units=units,
+        parts=parts,
     )
 
 
@@ -1263,7 +1267,9 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
         tier=policy.tier, head=head, graph_lines=tuple(graph_lines), graph_note=graph_note
     )
     try:
-        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+        path = Path(cfg.cassette_dir) / "baseline.json"
+        recording = recording_from_json(path.read_text(encoding="utf-8"))
+        runs = recording.runs
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(run, harness_error=_harness_message("cannot read baseline", exc))
     kpi_nodes = None if policy.kpi_nodes is None else set(policy.kpi_nodes)
@@ -1277,7 +1283,17 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
     units = any(s.units for r in runs for s in r.steps)  # T193: a baseline that holds units
     try:
         replays = [
-            _replay_under(cfg, graph, recorded, serve, args.on_divergence, budget, runs, units)
+            _replay_under(
+                cfg,
+                graph,
+                recorded,
+                serve,
+                args.on_divergence,
+                budget,
+                runs,
+                units,
+                recording.parts,
+            )
             for recorded in runs
         ]
     except NodeError as exc:

@@ -1193,9 +1193,42 @@ def test_fill_samples_runs_each_node_k_more_times_on_its_recorded_input() -> Non
     assert fill_samples(graph, cassette, 0) == cassette
 
 
+def test_parts_match_compares_fingerprints_named_on_the_step() -> None:
+    # T239: serving needs every named part to match the recording's table against the live graph.
+    from lgcov.cassette import Part, parts_match
+
+    step = Step("n", {"x": 1}, parts=["n.temperature"])
+    was: dict[str, Part] = {"n.temperature": {"fingerprint": "a"}}
+    same: dict[str, Part] = {"n.temperature": {"fingerprint": "a"}}
+    other: dict[str, Part] = {"n.temperature": {"fingerprint": "b"}}
+    assert parts_match(step, was, same) is True
+    assert parts_match(step, was, other) is False
+    assert parts_match(step, None, other) is True  # no table: today's code-only rule
+    assert parts_match(Step("n", {"x": 1}), was, other) is True  # no names on the step
+
+
+def test_replay_does_not_serve_when_a_recorded_part_fingerprint_differs() -> None:
+    # T239: code and input still match, but a part's fingerprint moved → run live (diverged).
+    from lgcov.cassette import Part, chat_parts
+
+    graph = _one_node(lambda s: {"x": s["x"] + 1})
+    cassette = record(graph, {"x": 1})
+    step = cassette.steps[0]
+    forged = dataclasses.replace(
+        cassette, steps=[dataclasses.replace(step, parts=["n.temperature"])]
+    )
+    stale: dict[str, Part] = {"n.temperature": {"fingerprint": "was"}}
+    assert _how(replay_run(graph, forged, serve=True, parts=stale))["n"] == "diverged"
+    # Live graph has no chat parts; a recorded fingerprint of None matches the missing live one.
+    assert chat_parts(graph)[0] == {}
+    matched: dict[str, Part] = {"n.temperature": {"fingerprint": None}}
+    assert _how(replay_run(graph, forged, serve=True, parts=matched))["n"] == "served"
+    assert _how(replay_run(graph, cassette, serve=True, parts=stale))["n"] == "served"
+
+
 def test_a_chat_model_s_fields_are_recorded_as_parts() -> None:
     # T239: a LangChain chat model's model_name and temperature become parts of the node that
-    # holds them. Serving and labels don't read them yet.
+    # holds them. Serving reads them; labels don't yet.
     from langchain_core.callbacks.manager import CallbackManagerForLLMRun
     from langchain_core.language_models.chat_models import BaseChatModel
     from langchain_core.messages import AIMessage, BaseMessage

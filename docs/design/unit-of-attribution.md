@@ -1,8 +1,8 @@
 # The unit of attribution (design, T239)
 
-**Status: chat-model parts are recorded; the rest is design.** `lgcov record` writes a chat
-model's fields as `parts`. Serving and labels don't read them yet. Nothing else on this page
-is built.
+**Status: chat-model parts are recorded and serving reads them; labels don't yet.** `lgcov record`
+writes a chat model's fields as `parts`. Replay serves a step only when those fingerprints still
+match. Nothing else on this page is built.
 
 lgcov names the graph node that caused a behaviour change. In a deep agent the graph is a
 generic loop: a `model` node, a `tools` node and a few hook nodes. Those names say nothing
