@@ -17,13 +17,27 @@ kpis:
     description: Every run ends at the reducer.
     rubric: Did the run visit reducer?
     check: {type: node_visited, node: reducer}
-  - name: workers_in_order
+  - name: worker_a_runs
     failure_mode: dropped_worker
-    node: plan
+    node: worker_a
     judge: code
-    description: Workers a, b and c all run (order may vary between them in real life; this check asks for a,b,c in that sequence when present).
-    rubric: Were worker_a, worker_b and worker_c visited in that order?
-    check: {type: node_sequence, nodes: "worker_a, worker_b, worker_c"}
+    description: Worker a still ran.
+    rubric: Did the run visit worker_a?
+    check: {type: node_visited, node: worker_a}
+  - name: worker_b_runs
+    failure_mode: dropped_worker
+    node: worker_b
+    judge: code
+    description: Worker b still ran.
+    rubric: Did the run visit worker_b?
+    check: {type: node_visited, node: worker_b}
+  - name: worker_c_runs
+    failure_mode: dropped_worker
+    node: worker_c
+    judge: code
+    description: Worker c still ran.
+    rubric: Did the run visit worker_c?
+    check: {type: node_visited, node: worker_c}
   - name: plan_runs
     failure_mode: plan_skipped
     node: plan
