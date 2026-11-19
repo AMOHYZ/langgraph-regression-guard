@@ -355,6 +355,7 @@ def explain_runs(
     routers: tuple[Mapping[str, str | None], Mapping[str, str | None]] = ({}, {}),
     ran: Sequence[Sequence[str]] = (),
     same_input: Sequence[Collection[str]] = (),
+    route_hits: Mapping[str, Collection[int]] | None = None,
 ) -> NodeLabels:
     """T162: a run whose first drifted node is neither root nor inconclusive has a cause no node's
     fingerprint shows: an edge, a router, a Send, an edited recording, or a live call's variation.
@@ -366,12 +367,13 @@ def explain_runs(
     wherever it ran: in a parallel branch it can come after an unrelated root. Empty when the
     inputs aren't known, which leaves the first-drift rule.
 
-    T175: unless a router explains it. A node whose router fingerprint changed (`routers`: base's
-    and head's, by source node) is root of each run where a node drifted after it, by base's order
-    (`ran`), beside any root the run already has. A router with no fingerprint on either side, as
-    in a recording from before they were kept, explains nothing. A router that ran after the
-    run's first drifted node doesn't explain that node. Not checked: that the run took another
-    branch. A router edit that routes as before is root of drift a changed node caused."""
+    T175 / T221: a node whose router fingerprint changed (`routers`: base's and head's, by source
+    node) is root of each run where a node drifted after it, by base's order (`ran`), beside any
+    root the run already has. A router with no fingerprint on either side, as in a recording from
+    before they were kept, explains nothing. A router that ran after the run's first drifted node
+    doesn't explain that node. With `route_hits` (T221), it is named only in the runs whose route
+    differed (`route_changed_runs`); without it, T175's fingerprint-only rule stays for callers
+    that don't pass probes."""
     base, head = routers
     edited = {n for n, code in base.items() if code and head.get(n) and head[n] != code}
     unsure = dict(labels.inconclusive)
@@ -379,6 +381,8 @@ def explain_runs(
     for i, (first, nodes) in enumerate(zip(first_drifts, drifted, strict=True)):
         order = list(ran[i]) if i < len(ran) else []
         after = {r for r in edited & set(order) if set(nodes) - set(order[: order.index(r) + 1])}
+        if route_hits is not None:
+            after = {r for r in after if i in route_hits.get(r, ())}
         for router in after:
             routing[router] = routing.get(router, 0) + 1
         reached = order[: order.index(first) + 1] if first in order else order

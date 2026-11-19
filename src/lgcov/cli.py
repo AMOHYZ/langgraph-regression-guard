@@ -109,6 +109,7 @@ from lgcov.cassette import (
     recording_from_json,
     recording_to_json,
     replay_run,
+    route_changed_runs,
     runs_from_json,
     runs_to_json,
     same_input,
@@ -464,24 +465,27 @@ def _node_labels(
     ignore_paths: Sequence[str] = (),
     quiet: Collection[str] = (),
     graphs: tuple[Collection[str] | None, Collection[str] | None] = (None, None),
+    router_probes: Sequence[ProbeStep] = (),
 ) -> NodeLabels:
     """T222: each drifted node's label, from the recorded runs, the PR's steps for each and their
     drifts: what `lgcov ci` ships and what `lgcov bench` scores, so the two can't disagree.
     Root by fingerprint and probe (`classify`, T162), then what a run's order, routers and inputs
-    add (`explain_runs`: T175, T230). `quiet` (T211): nodes under their noise, which get no label
-    and aren't a run's first drifted node. `graphs` (T238): base's and head's node names, None for
-    one that isn't known.
+    add (`explain_runs`: T175, T221, T230). `quiet` (T211): nodes under their noise, which get no
+    label and aren't a run's first drifted node. `graphs` (T238): base's and head's node names,
+    None for one that isn't known. `router_probes` (T221): which runs a changed router's route
+    differed in.
 
     T193: units count as nodes, by their path (`answer.respond`), on both sides (`with_units`). A
     container gets no label when a unit inside it is root: the unit explains its drift."""
     top = {s.node for steps in (*(r.steps for r in runs), *fresh) for s in steps}
+    route_hits = route_changed_runs(runs, fresh, router_probes)
     runs = [replace(r, steps=with_units(r.steps)) for r in runs]
     fresh = [with_units(steps) for steps in fresh]
     codes = (
         {s.node: s.code for r in runs for s in r.steps},
         {s.node: s.code for steps in fresh for s in steps},
     )
-    # T175: a changed router makes its source node root. Old recordings have no router print.
+    # T175 / T221: a changed router may make its source node root when the route differed.
     routers = (
         {s.node: s.router for r in runs for s in r.steps},
         {s.node: s.router for steps in fresh for s in steps},
@@ -492,7 +496,13 @@ def _node_labels(
     by_node = classify(set().union(*nodes), codes, probes, graphs)
     same = [same_input(r, f, ignore_paths) for r, f in zip(runs, fresh, strict=True)]
     labels = explain_runs(
-        by_node, [None if f in quiet else f for f in firsts], nodes, routers, ran, same
+        by_node,
+        [None if f in quiet else f for f in firsts],
+        nodes,
+        routers,
+        ran,
+        same,
+        route_hits,
     )
     # The trust rules: the PR's code writes the units, so only a root unit, which blocks too, can
     # take its container's label away. A unit base never recorded is never propagated (`classify`).
@@ -1340,7 +1350,13 @@ def _evaluate(
         return replace(partial, harness_error=stale_msg)
     graphs = (base_nodes, run.head.nodes)
     labels = _node_labels(
-        runs, [f.steps for f in run.fresh], drifts, probes, cfg.ignore_paths, graphs=graphs
+        runs,
+        [f.steps for f in run.fresh],
+        drifts,
+        probes,
+        cfg.ignore_paths,
+        graphs=graphs,
+        router_probes=run.probes,  # T221: which runs a changed router's route differed in
     )
     blocking = {*labels.root, *labels.inconclusive}
     root, downstream = sorted(blocking), list(labels.propagated)
