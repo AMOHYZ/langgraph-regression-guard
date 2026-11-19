@@ -104,6 +104,62 @@ def _echo_secret(state: _SecretState) -> _SecretState:
     return {"n": 1, "token": state["token"]}
 
 
+def test_a_tool_call_is_recorded_under_its_tool_node_and_served_whole() -> None:
+    from langchain_core.messages import AIMessage
+    from langgraph.graph.message import add_messages
+    from langgraph.prebuilt import ToolNode
+
+    class State(TypedDict):
+        messages: Annotated[list[object], add_messages]
+
+    ran: list[str] = []
+
+    def lookup(q: str) -> str:
+        """Look up an order."""
+        ran.append(q)
+        return "shipped " + q
+
+    def agent(state: State) -> State:
+        call = {"name": "lookup", "args": {"q": "42"}, "id": "c1"}
+        return {"messages": [AIMessage("", tool_calls=[call])]}
+
+    graph = StateGraph(State)
+    graph.add_node("agent", agent)
+    graph.add_node("tools", ToolNode([lookup]))
+    graph.add_edge(START, "agent")
+    graph.add_edge("agent", "tools")
+    graph.add_edge("tools", END)
+    compiled = graph.compile()
+    cassette = record(compiled, {"messages": []}, units=True)
+    (tools,) = [s for s in cassette.steps if s.node == "tools"]
+    assert tools.units is not None and len(tools.units) == 1
+    unit = tools.units[0]
+    assert unit.node == "lookup" and unit.kind == "tool"
+    assert unit.input == {"q": "42"} and unit.call_id == "c1" and unit.status == "success"
+    assert unit.code is not None and ran == ["42"]
+    ran.clear()
+    done = replay_run(compiled, cassette, serve=True, units=True)
+    assert done.drifts == () and ran == []
+
+    from langchain_core.tools import tool
+
+    @tool("lookup")
+    def lookup_edited(q: str) -> str:
+        """Look up an order."""
+        ran.append("edited")
+        return "held " + q
+
+    edited = StateGraph(State)
+    edited.add_node("agent", agent)
+    edited.add_node("tools", ToolNode([lookup_edited]))
+    edited.add_edge(START, "agent")
+    edited.add_edge("agent", "tools")
+    edited.add_edge("tools", END)
+    again = replay_run(edited.compile(), cassette, serve=True, units=True)
+    assert ran == ["edited"]
+    assert any(d.node == "tools.lookup" for d in again.drifts)
+
+
 def test_a_recording_stores_a_secret_named_value_as_a_marker() -> None:
     graph = StateGraph(_SecretState)
     graph.add_node("echo", _echo_secret)
