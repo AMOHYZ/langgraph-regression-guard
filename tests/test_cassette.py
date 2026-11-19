@@ -1139,6 +1139,20 @@ def test_a_recording_without_units_still_runs_a_subgraph_live() -> None:
     assert "inner.first" not in _how(replayed)  # its nodes aren't wrapped, so they ran live
 
 
+def test_fill_samples_runs_each_node_k_more_times_on_its_recorded_input() -> None:
+    # T229: `lgcov record --samples K` stores K re-runs beside the recording, not including it.
+    from lgcov.cassette import fill_samples
+
+    words = iter(("one", "two", "three", "four"))
+    graph = _one_node(lambda s: {"route": next(words)})
+    cassette = record(graph, {"x": 1})
+    assert cassette.steps[0].samples is None
+    filled = fill_samples(graph, cassette, 2)
+    assert filled.steps[0].output == {"route": "one"}  # the recording itself
+    assert filled.steps[0].samples == [{"output": {"route": "two"}}, {"output": {"route": "three"}}]
+    assert fill_samples(graph, cassette, 0) == cassette
+
+
 # T211: repeats run a node live, K times on each input base recorded; `judge_repeats` compares
 # base's samples (the recording and base's repeats) with head's.
 BASE_TEXT = "the order ships on friday"
