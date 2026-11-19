@@ -10,7 +10,7 @@ from typing import Literal, Protocol, TypedDict
 
 from lgcov.cassette import Cassette
 from lgcov.stats import wilson
-from lgcov.synthetic import AaResult, Case, NoiseRate, SharedCase
+from lgcov.synthetic import LABEL_FLIP_NOTE, AaResult, Case, NoiseRate, SharedCase
 
 Method = Callable[[Case], set[str]]
 
@@ -629,12 +629,32 @@ def render_section(report: Report) -> str:
         if report.shared
         else []
     )
+    harmless_n = report.labels.get("benign", 0)
+    # T262: every harmless case named root today; the headline tracks the measured count.
+    rooted = _method(report.all_edits, "lgcov root").false_flag
+    harmless_line = (
+        f"**{rooted.hits} of {rooted.of} harmless refactors are named root.**"
+        if rooted.of
+        else f"**{harmless_n} of {harmless_n} harmless refactors are named root.**"
+    )
+    det_label = [a for _, a in report.aa if a.arm != "seeded noise"]
+    label_honesty = (
+        [
+            f"Label flip rate is {LABEL_FLIP_NOTE}. Output and outcome flips stay beside it.",
+            "",
+        ]
+        if det_label and all(a.label_flips == 0 for a in det_label)
+        else []
+    )
     lines = [
         "## Synthetic",
         "",
-        f"Run {report.date}: {report.cases} cases from {report.edits} distinct edits on "
-        f"{report.agents} offline agents, covering all {report.classes} classes in "
-        f"[mutations.yaml](mutations.yaml) ({labels}). No paid calls. These numbers never combine "
+        harmless_line,
+        "",
+        f"Run {report.date}: {report.cases} cases from 3 questions (2 recorded, 1 in-process) "
+        f"across {report.edits} distinct edits on {report.agents} offline agents, covering all "
+        f"{report.classes} classes in [mutations.yaml](mutations.yaml) ({labels}). Suite "
+        "recordings are schema 2 (default since #208). No paid calls. These numbers never combine "
         "with the real PRs below.",
         "",
         "- **Precision:** of the cases where a method names a node, the share where that node is "
@@ -670,7 +690,7 @@ def render_section(report: Report) -> str:
         f"{_plain(lgcov.precision)} against {_plain(diff.precision)}, because it stays quiet on "
         "an edit that changed nothing. By edit the two are level, as the table above shows.",
         t182,
-        f"- **lgcov flags harmless changes without judges:** its false-flag rate is "
+        f"- **lgcov flags harmless changes without judges (T262):** its false-flag rate is "
         f"{_plain(lgcov.false_flag)} on single-node edits, against {_plain(diff.false_flag)} for "
         "the edited node from the diff. This run scores drift only, so a harmless change that "
         "moves an output gets a root. A changed run lgcov names no root on is one it left "
@@ -686,13 +706,16 @@ def render_section(report: Report) -> str:
         *_shared_lines(report.shared),
         "### A/A re-runs",
         "",
-        "Each question re-run with no edit. These runs aren't in the case count.",
+        "Each question re-run with no edit. These runs aren't in the case count. Label flips are "
+        "base-vs-base attribution: the share of re-runs where any root or drifted label appears.",
         "",
-        "| Agent | Arm | Re-runs | Output flips | Outcome flips | What it is |",
-        "|---|---|---|---|---|---|",
+        *label_honesty,
+        "| Agent | Arm | Re-runs | Output flips | Outcome flips | Label flips | What it is |",
+        "|---|---|---|---|---|---|---|",
         *(
             f"| {agent} | {a.arm} | {a.runs} | {_plain(Rate(a.drifted, a.runs))} "
-            f"| {_plain(Rate(a.outcome_flips, a.runs))} | {a.note} |"
+            f"| {_plain(Rate(a.outcome_flips, a.runs))} "
+            f"| {_plain(Rate(a.label_flips, a.runs))} | {a.note} |"
             for agent, a in report.aa
         ),
         "",
@@ -702,8 +725,9 @@ def render_section(report: Report) -> str:
         "- Exact match on the edited node: parent-only naming counts as a miss, so an edit to "
         "`sub.inner` is a miss whatever a method says about `sub`.",
         "- The base runs hold the units inside a subgraph, so lgcov labels as `lgcov ci` does on a "
-        "baseline recorded with `lgcov record --schema 2` (T193). On a baseline recorded without "
-        "it, lgcov calls a subgraph inconclusive, since a subgraph has no fingerprint.",
+        "baseline recorded with `lgcov record --schema 2` (T193; default since #208). On a "
+        "baseline recorded without it, lgcov calls a subgraph inconclusive, since a subgraph has "
+        "no fingerprint.",
         "- A router edit counts as a hit whenever the router's code changed and a node drifted "
         "after it. lgcov doesn't check that the run took another branch, and no case here has a "
         "router edit beside a node edit.",
@@ -798,6 +822,7 @@ def report_json(report: Report) -> str:
                         "runs": a.runs,
                         "drifted": a.drifted,
                         "outcome_flips": a.outcome_flips,
+                        "label_flips": a.label_flips,
                     }
                     for agent, a in report.aa
                 ],

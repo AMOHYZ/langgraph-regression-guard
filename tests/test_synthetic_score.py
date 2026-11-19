@@ -67,6 +67,24 @@ def test_the_4_rates_on_hand_made_votes() -> None:
     assert (found.false_flag.hits, found.false_flag.of) == (1, 2)
 
 
+def test_focused_abstention_lowers_coverage_and_leaves_precision() -> None:
+    """Abstain on a case that was a correct name: coverage falls, precision stays."""
+    full = [
+        _vote(regressed=True, activated=True, named=True, hit=True),
+        _vote(regressed=True, activated=True, named=True, hit=True),
+        _vote(regressed=False, activated=True, named=False, hit=False),
+    ]
+    abstained = [
+        _vote(regressed=True, activated=True, named=True, hit=True),
+        _vote(regressed=True, activated=True, named=False, hit=False),  # focused abstention
+        _vote(regressed=False, activated=True, named=False, hit=False),
+    ]
+    before, after = rates(full), rates(abstained)
+    assert before.precision.value == after.precision.value == 1.0
+    assert after.coverage.value is not None and before.coverage.value is not None
+    assert after.coverage.value < before.coverage.value
+
+
 def test_a_rate_with_nothing_to_count_has_no_value_rather_than_a_zero() -> None:
     assert Rate(0, 0).value is None
     assert Rate(0, 0).interval is None
@@ -187,11 +205,20 @@ def test_the_narrow_rows_leave_out_only_the_router_and_fan_out_edits() -> None:
 def test_the_section_shows_every_method_the_false_flags_and_both_counts() -> None:
     section = render_section(_report())
     assert section.startswith("## Synthetic\n")
-    assert "72 cases from 24 distinct edits" in section
+    assert "72 cases from 3 questions (2 recorded, 1 in-process)" in section
     for method in ("lgcov root", *METHODS):
         assert f"| {method} |" in section
     assert "False flag" in section
     assert "One vote per edit" in section
+
+
+def test_the_section_leads_with_harmless_roots_as_a_headline() -> None:
+    section = render_section(_report())
+    # First prose lines after the heading: the T262 finding, then the suite shape.
+    body = section.split("## Synthetic\n", 1)[1].lstrip("\n")
+    first, second, *_ = body.split("\n\n")
+    assert first == "**24 of 24 harmless refactors are named root.**"
+    assert "72 cases from 3 questions (2 recorded, 1 in-process)" in second
 
 
 def test_the_section_says_what_the_user_needs_to_know_plainly() -> None:
@@ -200,6 +227,11 @@ def test_the_section_says_what_the_user_needs_to_know_plainly() -> None:
     assert "T182" in section
     assert "parent-only naming counts as a miss" in section
     assert "wiring test, noise rate set by us, not a real-world flip estimate" in section
+    assert "schema 2" in section.lower()
+    assert "Label flips" in section
+    assert "0.00 on a deterministic offline suite; this says nothing about live-model noise" in (
+        section
+    )
 
 
 def test_a_rate_with_nothing_to_count_shows_a_dash() -> None:

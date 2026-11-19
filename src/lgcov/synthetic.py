@@ -116,6 +116,13 @@ def every_case(agent: Agent) -> tuple[Case, ...]:
     )
 
 
+# T121: base-vs-base attribution on one A/A arm. True when that re-run named any root/drifted.
+LabelFlip = Callable[[str, Cassette, int], bool]
+LABEL_FLIP_NOTE = (
+    "0.00 on a deterministic offline suite; this says nothing about live-model noise"
+)
+
+
 @dataclass(frozen=True)
 class AaResult:
     """One arm of re-running an agent with no edit: how often a run differs from its recording."""
@@ -125,6 +132,7 @@ class AaResult:
     runs: int
     drifted: int  # re-runs whose node outputs differ from the recording
     outcome_flips: int  # re-runs that fail the outcome check their recording passes
+    label_flips: int = 0  # re-runs where base-vs-base attribution named any root/drifted
 
     @property
     def flip_rate(self) -> float:
@@ -134,6 +142,10 @@ class AaResult:
     def outcome_flip_rate(self) -> float:
         return self.outcome_flips / self.runs if self.runs else 0.0
 
+    @property
+    def label_flip_rate(self) -> float:
+        return self.label_flips / self.runs if self.runs else 0.0
+
 
 def _aa(
     arm: str,
@@ -142,20 +154,25 @@ def _aa(
     rerun: Callable[[Cassette, int], Cassette],
     outcome_ok: Callable[[Cassette], bool],
     reruns: int,
+    label_flip: LabelFlip | None = None,
 ) -> AaResult:
-    runs = [
-        (base, rerun(base, n * len(bases) + i))
+    pairs = [
+        (base, n * len(bases) + i, rerun(base, n * len(bases) + i))
         for n in range(reruns)
         for i, base in enumerate(bases)
     ]
-    drifted = sum(not same_run(fresh, base) for base, fresh in runs)
-    flips = sum(outcome_ok(fresh) != outcome_ok(base) for base, fresh in runs)
-    return AaResult(arm, note, len(runs), drifted, flips)
+    drifted = sum(not same_run(fresh, base) for base, _, fresh in pairs)
+    flips = sum(outcome_ok(fresh) != outcome_ok(base) for base, _, fresh in pairs)
+    named = sum(label_flip(arm, base, seed) for base, seed, _ in pairs) if label_flip else 0
+    return AaResult(arm, note, len(pairs), drifted, flips, named)
 
 
-def aa_arms(agent: Agent, reruns: int = 10) -> tuple[AaResult, ...]:
+def aa_arms(
+    agent: Agent, reruns: int = 10, *, label_flip: LabelFlip | None = None
+) -> tuple[AaResult, ...]:
     """Re-run each question with no edit. The first 2 arms are 0 by construction, on a deterministic
-    agent and on served nodes. Only the third can flip, at a rate its fake model sets."""
+    agent and on served nodes. Only the third can flip, at a rate its fake model sets.
+    `label_flip`: base-vs-base attribution (T121); share of re-runs that named any root/drifted."""
     bases = [record(agent.graph, {"question": question}) for question in agent.questions]
 
     def re_record(base: Cassette, seed: int) -> Cassette:
@@ -165,8 +182,8 @@ def aa_arms(agent: Agent, reruns: int = 10) -> tuple[AaResult, ...]:
         return Cassette(base.inputs, list(replay_run(agent.graph, base, (), serve=True).steps))
 
     arms = [
-        _aa("re-record", ZERO_NOTE, bases, re_record, agent.outcome_ok, reruns),
-        _aa("served replay", ZERO_NOTE, bases, served, agent.outcome_ok, reruns),
+        _aa("re-record", ZERO_NOTE, bases, re_record, agent.outcome_ok, reruns, label_flip),
+        _aa("served replay", ZERO_NOTE, bases, served, agent.outcome_ok, reruns, label_flip),
     ]
     noisy = agent.noisy
     if noisy is not None:
@@ -174,7 +191,9 @@ def aa_arms(agent: Agent, reruns: int = 10) -> tuple[AaResult, ...]:
         def with_noise(base: Cassette, seed: int) -> Cassette:
             return record(noisy(seed), base.inputs)
 
-        arms.append(_aa("seeded noise", NOISE_NOTE, bases, with_noise, agent.outcome_ok, reruns))
+        arms.append(
+            _aa("seeded noise", NOISE_NOTE, bases, with_noise, agent.outcome_ok, reruns, label_flip)
+        )
     return tuple(arms)
 
 

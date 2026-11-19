@@ -212,6 +212,7 @@ from lgcov.snapshot import Edge, GraphSnapshot, snapshot_from_compiled
 from lgcov.synthetic import (
     Agent,
     Case,
+    GroundTruth,
     SharedAgent,
     aa_arms,
     every_case,
@@ -3301,6 +3302,28 @@ def _lgcov_root(case: Case) -> set[str]:
     return set(routing) or ({root} if root else set())
 
 
+def _aa_label_flip(agent: Agent) -> Callable[[str, Cassette, int], bool]:
+    """T121: base-vs-base attribution for one A/A arm. True when any root or drifted label appears."""
+    nodes = set(getattr(agent.graph, "nodes", {}))
+
+    def named(arm: str, base: Cassette, seed: int) -> bool:
+        graph = agent.noisy(seed) if arm == "seeded noise" and agent.noisy is not None else agent.graph
+        case = Case(
+            "aa",
+            seed,
+            arm,
+            base,
+            base,
+            GroundTruth("n/a", "node_body", activated=False, regressed=False),
+            graph,
+            agent.name,
+        )
+        found = _shipped(case, nodes)
+        return bool(found.root or found.inconclusive)
+
+    return named
+
+
 def _bench_synthetic(out: Path, results: Path) -> int:
     """T121: offline, so it costs nothing. A report, not a gate: it exits 0 whatever the scores."""
     try:
@@ -3309,7 +3332,11 @@ def _bench_synthetic(out: Path, results: Path) -> int:
         print(f"lgcov bench: --synthetic needs a repo checkout's examples/: {exc}", file=sys.stderr)
         return EXIT_ERROR
     cases = [case for agent in agents for case in every_case(agent)]
-    aa = [(agent.name, arm) for agent in agents for arm in aa_arms(agent)]
+    aa = [
+        (agent.name, arm)
+        for agent in agents
+        for arm in aa_arms(agent, label_flip=_aa_label_flip(agent))
+    ]
     noise = [(agent.name, rate) for agent in agents for rate in noise_rule_rates(agent)]
     nodes = {agent.name: set(getattr(agent.graph, "nodes", {})) for agent in agents}
     # The cases stay alive in `cases`, so an id names one case.
