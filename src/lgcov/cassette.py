@@ -210,6 +210,102 @@ def graph_shape(graph: Any) -> dict[str, object] | None:
     return {"nodes": shape}
 
 
+# T239: a chat model's fields that become parts of the node that holds the model.
+_CHAT_FIELDS = ("model_name", "model", "temperature", "max_tokens", "top_p")
+
+
+def _chat_model_type() -> type | None:
+    try:
+        from langchain_core.language_models.chat_models import BaseChatModel
+    except ImportError:
+        return None
+    return BaseChatModel
+
+
+def _chat_models_in(fn: FunctionType) -> list[object]:
+    """BaseChatModel instances a plain node closes over or reads from its globals, including
+    through nested functions (as when a helper wraps the node that holds the model)."""
+    chat = _chat_model_type()
+    if chat is None:
+        return []
+    found: list[object] = []
+    seen: set[int] = set()
+
+    def take(value: object) -> None:
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, chat):
+            found.append(value)
+            return
+        if isinstance(value, FunctionType):
+            walk(value)
+
+    def walk(target: FunctionType) -> None:
+        for cell in target.__closure__ or ():
+            take(cell.cell_contents)
+        for name in target.__code__.co_names:
+            if name in target.__globals__:
+                take(target.__globals__[name])
+
+    walk(fn)
+    return found
+
+
+def _field_part(name: str, value: object) -> Part:
+    text = repr(value).encode()
+    return {"fingerprint": hashlib.sha256(text).hexdigest()[:16]}
+
+
+def chat_parts(graph: Any) -> tuple[dict[str, Part], dict[str, list[str]]]:
+    """T239: chat-model fields held by each plain node, as recording `parts` and per-node names.
+    Serving and labels don't read them yet. Empty when no node holds a chat model."""
+    table: dict[str, Part] = {}
+    by_node: dict[str, list[str]] = {}
+    for name, spec in getattr(graph, "nodes", {}).items():
+        if name == START:
+            continue
+        bound = getattr(spec, "bound", None)
+        if isinstance(bound, Pregel):
+            inner_table, inner_nodes = chat_parts(bound)
+            table.update({f"{name}.{k}": v for k, v in inner_table.items()})
+            by_node.update(
+                {f"{name}.{n}": [f"{name}.{p}" for p in ps] for n, ps in inner_nodes.items()}
+            )
+            continue
+        fn = _plain(bound)
+        if fn is None:
+            continue
+        names: list[str] = []
+        for model in _chat_models_in(fn):
+            for key in _CHAT_FIELDS:
+                if not hasattr(model, key):
+                    continue
+                value = getattr(model, key)
+                if value is None:
+                    continue
+                part = f"{name}.{key}"
+                table[part] = _field_part(part, value)
+                names.append(part)
+        if names:
+            by_node[name] = names
+    return table, by_node
+
+
+def attach_parts(cassette: Cassette, by_node: Mapping[str, Sequence[str]]) -> Cassette:
+    """T239: set each step's `parts` to the names `by_node` lists for that step's node."""
+
+    def one(step: Step, prefix: str = "") -> Step:
+        key = f"{prefix}{step.node}"
+        names = list(by_node[key]) if key in by_node else None
+        units = None if step.units is None else [one(u, f"{key}.") for u in step.units]
+        if names is None and units == step.units:
+            return step
+        return replace(step, parts=names, units=units)
+
+    return Cassette(cassette.inputs, [one(s) for s in cassette.steps])
+
+
 @dataclass(frozen=True)
 class Drift:
     node: str
