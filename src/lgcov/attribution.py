@@ -304,6 +304,8 @@ class NodeLabels:
     inconclusive: dict[str, str]  # node: why
     # T175: the roots that are a changed router's source node, with the runs each is root of.
     routing: dict[str, int] = field(default_factory=dict)
+    # T239: changed part names on a labelled unit (from the recording vs head's parts).
+    parts: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def classify(
@@ -393,7 +395,7 @@ def explain_runs(
             unsure[node] = UNEXPLAINED
     propagated = tuple(n for n in labels.propagated if n not in unsure)
     root = tuple(sorted({*labels.root, *routing}))
-    return NodeLabels(root, propagated, unsure, dict(sorted(routing.items())))
+    return NodeLabels(root, propagated, unsure, dict(sorted(routing.items())), labels.parts)
 
 
 @dataclass(frozen=True)

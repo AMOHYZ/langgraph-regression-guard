@@ -98,7 +98,8 @@ def candidate_to_json(run: CandidateRun) -> str:
     """TypeError or ValueError if a step can't be saved, as with a tuple for a dict's key. T193: it
     writes schema 2, no parts or repeats and each probe by its step index, unless a step holds
     units or a probe is a unit's: then schema 3, with each probe by its unit's position. T221: a
-    router's probe also needs schema 3, so it can carry `routed`."""
+    router's probe also needs schema 3, so it can carry `routed`. T239: head's part fingerprints
+    also force schema 3."""
     units = (
         any(s.units for r in run.fresh for s in r.steps)
         or any(
@@ -106,6 +107,7 @@ def candidate_to_json(run: CandidateRun) -> str:
         )
         or any(p.inner for p in run.probes)
         or any(p.routed is not None for p in run.probes)
+        or run.parts is not None
     )
     schema = 3 if units else SCHEMA
     body: dict[str, object] = asdict(replace(run, head=None, fresh=(), probes=(), repeats=()))
@@ -116,6 +118,10 @@ def candidate_to_json(run: CandidateRun) -> str:
         "runs": [_run_body(r) for r in run.fresh],
         "probes": [_probe_body(p, schema) for p in run.probes],
     }
+    if run.parts is not None:
+        body["parts"] = run.parts
+    if run.repeats:
+        body["repeats"] = [_probe_body(p, schema) for p in run.repeats]
     return json.dumps(body, indent=2, default=_saved) + "\n"
 
 

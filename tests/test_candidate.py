@@ -112,7 +112,7 @@ GOOD_PROBE = {"run": 0, "step": 0, "node": "a", "output": None, "goto": None, "r
 # T193, PR 1 part 2: read candidate schema 3 before anything writes it, as schema 2 was (#114
 # before #113). Its steps are units, here the schema-2 recording fixture's. A probe names its unit
 # by its position down the tree, and a router's probe carries `routed`. Head's parts and its
-# repeats come along. Nothing acts on them yet.
+# repeats come along. T239: labels read head's parts.
 RECORDING_2 = (Path(__file__).parent / "fixtures" / "schema2_recording.json").read_text("utf-8")
 PROBE_3 = {"run": 0, "unit": [1, 0], "node": "search", "output": 1, "goto": None, "raised": ""}
 ROUTER_PROBE = {**PROBE_3, "unit": [0], "node": "plan", "output": None, "routed": ["tools"]}
@@ -254,6 +254,15 @@ def test_a_run_with_units_is_written_as_schema_3_with_probes_by_unit() -> None:
     assert body["schema"] == 3
     assert [(p["node"], p["unit"]) for p in body["probes"]] == [("inside", [0, 0])]
     assert parse_candidate(candidate_to_json(RUN_3)) == RUN_3
+
+
+def test_head_parts_are_written_as_schema_3() -> None:
+    # T239: the candidate job writes head's part fingerprints so the deciding job can label them.
+    run = replace(RUN, parts={"n.temperature": "abc", "n.model_name": None})
+    body = json.loads(candidate_to_json(run))
+    assert body["schema"] == 3
+    assert body["parts"] == {"n.temperature": "abc", "n.model_name": None}
+    assert parse_candidate(candidate_to_json(run)).parts == run.parts
 
 
 # T186: `cassette accept --candidate-in` takes its fresh runs from the file, so the review commands
