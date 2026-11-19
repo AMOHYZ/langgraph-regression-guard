@@ -1,0 +1,34 @@
+# Code checks for the demo support agent, as a user would write them from its task:
+# answer order questions with the lookup status, and still answer non-order questions.
+# Trajectory checks only (judge: code). Never copies the suite's outcome_ok.
+version: 1
+system: demo_agent
+failure_modes:
+  - id: no_response
+    description: The run never reaches respond, so the user gets no answer.
+  - id: skipped_order_lookup
+    description: An order question never visits lookup_order.
+  - id: classify_skipped
+    description: The run never visits classify, so routing never ran.
+kpis:
+  - name: respond_runs
+    failure_mode: no_response
+    node: respond
+    judge: code
+    description: Every run ends by responding.
+    rubric: Did the run visit respond?
+    check: {type: node_visited, node: respond}
+  - name: order_lookup_runs
+    failure_mode: skipped_order_lookup
+    node: lookup_order
+    judge: code
+    description: Order questions look up the order (hours questions also fail this on base, so only a new miss blocks).
+    rubric: Did the run visit lookup_order?
+    check: {type: node_visited, node: lookup_order}
+  - name: classify_runs
+    failure_mode: classify_skipped
+    node: classify
+    judge: code
+    description: Every run starts by classifying the question.
+    rubric: Did the run visit classify?
+    check: {type: node_visited, node: classify}

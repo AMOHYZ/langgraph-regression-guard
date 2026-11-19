@@ -1,0 +1,33 @@
+# Code checks for the fan-out agent, as a user would write them from its task:
+# plan fans out to workers a/b/c; the reducer must summarise every worker's part.
+version: 1
+system: fanout_agent
+failure_modes:
+  - id: missing_reducer
+    description: The run never reaches the reducer, so there is no summary.
+  - id: dropped_worker
+    description: A worker never ran, so the summary can miss its part.
+  - id: plan_skipped
+    description: The run never visits plan, so fan-out never started.
+kpis:
+  - name: reducer_runs
+    failure_mode: missing_reducer
+    node: reducer
+    judge: code
+    description: Every run ends at the reducer.
+    rubric: Did the run visit reducer?
+    check: {type: node_visited, node: reducer}
+  - name: workers_in_order
+    failure_mode: dropped_worker
+    node: plan
+    judge: code
+    description: Workers a, b and c all run (order may vary between them in real life; this check asks for a,b,c in that sequence when present).
+    rubric: Were worker_a, worker_b and worker_c visited in that order?
+    check: {type: node_sequence, nodes: "worker_a, worker_b, worker_c"}
+  - name: plan_runs
+    failure_mode: plan_skipped
+    node: plan
+    judge: code
+    description: Every run starts at plan.
+    rubric: Did the run visit plan?
+    check: {type: node_visited, node: plan}
