@@ -318,6 +318,15 @@ class Row:
 
 
 @dataclass(frozen=True)
+class HarmRates:
+    """T262: enforced-root false flags and measured recall beside the drift-root score."""
+
+    enforced_false_flag: Rate  # of benign cases, any root is harmed (would fail harmed-root)
+    measured_recall: Rate  # of failing cases with a measured root, any root is harmed
+    unmeasured_rooted: Rate  # of cases with roots, every root is unmeasured
+
+
+@dataclass(frozen=True)
 class Report:
     date: str
     cases: int
@@ -333,6 +342,7 @@ class Report:
     noise: tuple[tuple[str, NoiseRate], ...] = ()  # T211
     per_node: tuple[tuple[str, NodeScore], ...] = ()  # T222: by group of edits, as the rows are
     shared: SharedReport | None = None  # T182: edits the diff can't pin to one node
+    harm: HarmRates | None = None  # T262: enforced-root FF and measured recall from code checks
 
 
 def _row(name: str, method: Method, cases: Sequence[Case]) -> Row:
@@ -353,10 +363,12 @@ def build_report(
     labels: Labeller | None = None,
     first_drift: Method | None = None,
     shared: SharedReport | None = None,
+    harm: HarmRates | None = None,
 ) -> Report:
     """`lgcov`: the roots the "lgcov root" row scores. T222: `labels` is the same answer in full,
     for the per-node table, and `first_drift` the rule that row scored before, kept beside it.
-    T182: `shared`, the edits the diff can't pin to one node, scored on their own."""
+    T182: `shared`, the edits the diff can't pin to one node, scored on their own.
+    T262: `harm`, enforced-root false flags and measured recall from code-check taxonomies."""
     older = {FIRST_DRIFT: first_drift} if first_drift else {}
     methods = {"lgcov root": lgcov, **older, **METHODS}
     single = [case for case in cases if case.truth.edit_kind == "node_body"]
@@ -380,6 +392,7 @@ def build_report(
         if labels
         else (),
         shared,
+        harm,
     )
 
 
@@ -637,6 +650,15 @@ def render_section(report: Report) -> str:
         if rooted.of
         else f"**{harmless_n} of {harmless_n} harmless refactors are named root.**"
     )
+    harm = report.harm
+    harm_line = ""
+    if harm is not None:
+        harm_line = (
+            f" Under `fail-on: harmed-root`, enforced-root false flags are "
+            f"{_plain(harm.enforced_false_flag)}; measured recall is "
+            f"{_plain(harm.measured_recall)} "
+            f"(unmeasured rooted cases {_plain(harm.unmeasured_rooted)})."
+        )
     det_label = [a for _, a in report.aa if a.arm != "seeded noise"]
     label_honesty = (
         [
@@ -649,7 +671,7 @@ def render_section(report: Report) -> str:
     lines = [
         "## Synthetic",
         "",
-        harmless_line,
+        harmless_line + harm_line,
         "",
         f"Run {report.date}: {report.cases} cases from 3 questions (2 recorded, 1 in-process) "
         f"across {report.edits} distinct edits on {report.agents} offline agents, covering all "
@@ -690,11 +712,19 @@ def render_section(report: Report) -> str:
         f"{_plain(lgcov.precision)} against {_plain(diff.precision)}, because it stays quiet on "
         "an edit that changed nothing. By edit the two are level, as the table above shows.",
         t182,
-        f"- **lgcov flags harmless changes without judges (T262):** its false-flag rate is "
-        f"{_plain(lgcov.false_flag)} on single-node edits, against {_plain(diff.false_flag)} for "
-        "the edited node from the diff. This run scores drift only, so a harmless change that "
-        "moves an output gets a root. A changed run lgcov names no root on is one it left "
-        "inconclusive, not one it found harmless, and end-to-end's 0 only means it names no node.",
+        f"- **lgcov flags harmless changes as drift roots (T262):** its drift-root false-flag "
+        f"rate is {_plain(lgcov.false_flag)} on single-node edits, against "
+        f"{_plain(diff.false_flag)} for the edited node from the diff. "
+        + (
+            f"With the suite's code-check taxonomies, enforced-root false flags under "
+            f"`fail-on: harmed-root` are {_plain(harm.enforced_false_flag)}, and measured recall "
+            f"is {_plain(harm.measured_recall)} "
+            f"(rooted cases still unmeasured: {_plain(harm.unmeasured_rooted)})."
+            if harm is not None
+            else "This run scores drift only when no taxonomy is wired."
+        )
+        + " A changed run lgcov names no root on is one it left inconclusive, not one it found "
+        "harmless, and end-to-end's 0 only means it names no node.",
         "- **On a router or fan-out edit lgcov names the routing node,** from the router's "
         "fingerprint, and first divergence names a node downstream: recall on all edits is "
         f"{_plain(ours.recall)} against {_plain(first.recall)}. On single-node edits it is "
@@ -839,6 +869,15 @@ def report_json(report: Report) -> str:
                     for group, n in report.per_node
                 ],
                 "shared": _shared_json(report.shared),
+                "harm": (
+                    None
+                    if report.harm is None
+                    else {
+                        "enforced_false_flag": _rate_json(report.harm.enforced_false_flag),
+                        "measured_recall": _rate_json(report.harm.measured_recall),
+                        "unmeasured_rooted": _rate_json(report.harm.unmeasured_rooted),
+                    }
+                ),
             },
             indent=2,
         )

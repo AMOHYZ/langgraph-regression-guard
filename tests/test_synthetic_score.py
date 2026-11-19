@@ -217,7 +217,7 @@ def test_the_section_leads_with_harmless_roots_as_a_headline() -> None:
     # First prose lines after the heading: the T262 finding, then the suite shape.
     body = section.split("## Synthetic\n", 1)[1].lstrip("\n")
     first, second, *_ = body.split("\n\n")
-    assert first == "**24 of 24 harmless refactors are named root.**"
+    assert first.startswith("**24 of 24 harmless refactors are named root.**")
     assert "72 cases from 3 questions (2 recorded, 1 in-process)" in second
 
 

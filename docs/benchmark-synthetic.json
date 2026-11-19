@@ -2305,5 +2305,22 @@
         ]
       }
     ]
+  },
+  "harm": {
+    "enforced_false_flag": {
+      "hits": 0,
+      "of": 24,
+      "value": 0.0
+    },
+    "measured_recall": {
+      "hits": 0,
+      "of": 31,
+      "value": 0.0
+    },
+    "unmeasured_rooted": {
+      "hits": 0,
+      "of": 55,
+      "value": 0.0
+    }
   }
 }

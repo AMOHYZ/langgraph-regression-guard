@@ -1,0 +1,24 @@
+# Code checks for the subgraph agent, as a user would write them from its task:
+# an inner draft node builds text; after uppercases it into the answer.
+version: 1
+system: subgraph_agent
+failure_modes:
+  - id: no_answer
+    description: The run never reaches after, so there is no answer.
+  - id: no_draft
+    description: The subgraph's inner node never ran, so there is no draft.
+kpis:
+  - name: after_runs
+    failure_mode: no_answer
+    node: after
+    judge: code
+    description: Every run ends at after.
+    rubric: Did the run visit after?
+    check: {type: node_visited, node: after}
+  - name: draft_runs
+    failure_mode: no_draft
+    node: sub.inner
+    judge: code
+    description: The subgraph's draft node still runs.
+    rubric: Did the run visit sub.inner?
+    check: {type: node_visited, node: sub.inner}

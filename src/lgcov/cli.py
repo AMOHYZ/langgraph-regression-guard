@@ -146,6 +146,7 @@ from lgcov.coverage import (
 from lgcov.draft import Drafter, approve, as_doc, draft, parse_traces, to_yaml
 from lgcov.drift_gate import (
     FailOn,
+    HarmStatus,
     Outcome,
     drift_exit_code,
     parse_fail_on,
@@ -226,8 +227,11 @@ from lgcov.synthetic import (
     every_shared_case,
     noise_rule_rates,
 )
+from lgcov.synthetic_harm import TAXONOMY_BY_AGENT, harm_for_roots, harm_rate_counts
 from lgcov.synthetic_score import (
     Found,
+    HarmRates,
+    Rate,
     Replayed,
     build_report,
     render_section,
@@ -3368,6 +3372,19 @@ def _bench_synthetic(out: Path, results: Path) -> int:
     for case in shared:
         seen = changed.get(case.edit, frozenset())
         changed[case.edit] = seen | changed_nodes(case.graph, [case.base])
+    # T262: harm status from committed code-check taxonomies (never the suite outcome helper).
+    harm_rows: list[tuple[str, dict[str, HarmStatus]]] = []
+    for scored in cases:
+        roots = sorted(found[id(scored)].root)
+        rel = TAXONOMY_BY_AGENT.get(scored.agent)
+        if not roots:
+            statuses: dict[str, HarmStatus] = {}
+        elif rel is None:
+            statuses = dict.fromkeys(roots, "unmeasured")
+        else:
+            statuses = harm_for_roots(scored.base, scored.pr, roots, Path(rel))
+        harm_rows.append((scored.truth.label, statuses))
+    ff, recall, unmeas = harm_rate_counts(harm_rows)
     report = build_report(
         cases,
         lambda case: set(found[id(case)].root),
@@ -3377,6 +3394,7 @@ def _bench_synthetic(out: Path, results: Path) -> int:
         labels=lambda case: found[id(case)],
         first_drift=_lgcov_root,
         shared=shared_report([(c, _shipped(c, graphs[c.agent])) for c in shared], changed),
+        harm=HarmRates(Rate(*ff), Rate(*recall), Rate(*unmeas)),
     )
     section = render_section(report)
     doc = out.read_text(encoding="utf-8") if out.exists() else ""
