@@ -346,8 +346,27 @@ def test_a_rerun_with_no_edit_never_flips_in_the_deterministic_arms(agent: Agent
     arms = {result.arm: result for result in aa_arms(agent, reruns=3)}
     for arm in ("re-record", "served replay"):
         assert arms[arm].runs == 3 * len(agent.questions)
-        assert (arms[arm].drifted, arms[arm].outcome_flips) == (0, 0)
-        assert (arms[arm].flip_rate, arms[arm].outcome_flip_rate) == (0.0, 0.0)
+        assert (arms[arm].drifted, arms[arm].outcome_flips, arms[arm].label_flips) == (0, 0, 0)
+        assert (
+            arms[arm].flip_rate,
+            arms[arm].outcome_flip_rate,
+            arms[arm].label_flip_rate,
+        ) == (0.0, 0.0, 0.0)
+
+
+def test_a_a_label_flips_count_base_vs_base_attribution() -> None:
+    """T121: label flip rate is base-vs-base attribution, beside output/outcome flips."""
+
+    def always(arm: str, base: Cassette, seed: int) -> bool:
+        return True
+
+    def never(arm: str, base: Cassette, seed: int) -> bool:
+        return False
+
+    flipped = aa_arms(FANOUT, reruns=1, label_flip=always)
+    quiet = aa_arms(FANOUT, reruns=1, label_flip=never)
+    assert all(a.label_flips == a.runs and a.label_flip_rate == 1.0 for a in flipped)
+    assert all(a.label_flips == 0 and a.label_flip_rate == 0.0 for a in quiet)
 
 
 @pytest.mark.parametrize("agent", AGENTS)
@@ -410,6 +429,50 @@ def test_a_fan_out_that_only_finished_in_another_order_is_labelled_inert(
 
 def test_t121_has_no_todos_left() -> None:
     assert "TODO(T121)" not in (ROOT / "src" / "lgcov" / "synthetic.py").read_text("utf-8")
+
+
+def _t262(why: str) -> pytest.MarkDecorator:
+    """Open finding: harmless/inactive roots. Strict, so a fix fails until this comes off."""
+    return pytest.mark.xfail(strict=True, raises=AssertionError, reason=f"T262: {why}")
+
+
+def _shipped_roots(case: Case) -> frozenset[str]:
+    from lgcov.cli import _shipped
+
+    nodes = set(getattr(next(a for a in AGENTS if a.name == case.agent).graph, "nodes", {}))
+    return _shipped(case, nodes).root
+
+
+def test_inert_cases_never_produce_a_root() -> None:
+    """Measured first: 0 of 17 inert cases are named root today, so this passes."""
+    inert = [c for c in _suite() if c.truth.label == "inert"]
+    assert len(inert) == 17
+    assert all(not _shipped_roots(c) for c in inert)
+
+
+@_t262("harmless refactors are named root")
+def test_harmless_cases_are_not_named_root() -> None:
+    """Measured first: 24 of 24 benign cases are named root; no label fix in this PR."""
+    benign = [c for c in _suite() if c.truth.label == "benign"]
+    assert len(benign) == 24
+    assert all(not _shipped_roots(c) for c in benign)
+
+
+def test_a_benign_root_under_default_fail_on_is_fail_exit_1() -> None:
+    """Report only: a named root on a harmless edit is fail/1 under fail-on: root-drift, not a
+    comment-only label. Under fail-on: never it is needs_human/0."""
+    from lgcov.drift_gate import drift_exit_code, verdict
+    from lgcov.verdict_actions import Evidence, decide_action
+
+    benign = next(c for c in _suite() if c.truth.label == "benign")
+    roots = _shipped_roots(benign)
+    assert roots  # measured: every benign case is named root
+    code = drift_exit_code("root-drift", len(roots), 0)
+    assert (code, verdict(code)) == (1, "fail")
+    action = decide_action(Evidence(enforced_drift=tuple(sorted(roots))))
+    assert (action.verdict, action.exit_code, action.state) == ("fail", 1, "policy_drift")
+    soft = decide_action(Evidence(unenforced_drift=True))
+    assert (soft.verdict, soft.exit_code, soft.state) == ("needs_human", 0, "drift_not_enforced")
 
 
 # T211: how often the noise rule names drift, on the seeded-noise agent. Offline.

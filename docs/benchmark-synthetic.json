@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-18",
+  "date": "2026-11-19",
   "cases": 72,
   "edits": 24,
   "agents": 3,
@@ -500,7 +500,8 @@
       "note": "0 by construction: a control, not a measurement",
       "runs": 30,
       "drifted": 0,
-      "outcome_flips": 0
+      "outcome_flips": 0,
+      "label_flips": 0
     },
     {
       "agent": "demo",
@@ -508,7 +509,8 @@
       "note": "0 by construction: a control, not a measurement",
       "runs": 30,
       "drifted": 0,
-      "outcome_flips": 0
+      "outcome_flips": 0,
+      "label_flips": 0
     },
     {
       "agent": "demo",
@@ -516,7 +518,8 @@
       "note": "wiring test, noise rate set by us, not a real-world flip estimate",
       "runs": 30,
       "drifted": 5,
-      "outcome_flips": 4
+      "outcome_flips": 4,
+      "label_flips": 5
     },
     {
       "agent": "fanout",
@@ -524,7 +527,8 @@
       "note": "0 by construction: a control, not a measurement",
       "runs": 30,
       "drifted": 0,
-      "outcome_flips": 0
+      "outcome_flips": 0,
+      "label_flips": 0
     },
     {
       "agent": "fanout",
@@ -532,7 +536,8 @@
       "note": "0 by construction: a control, not a measurement",
       "runs": 30,
       "drifted": 0,
-      "outcome_flips": 0
+      "outcome_flips": 0,
+      "label_flips": 0
     },
     {
       "agent": "subgraph",
@@ -540,7 +545,8 @@
       "note": "0 by construction: a control, not a measurement",
       "runs": 30,
       "drifted": 0,
-      "outcome_flips": 0
+      "outcome_flips": 0,
+      "label_flips": 0
     },
     {
       "agent": "subgraph",
@@ -548,7 +554,8 @@
       "note": "0 by construction: a control, not a measurement",
       "runs": 30,
       "drifted": 0,
-      "outcome_flips": 0
+      "outcome_flips": 0,
+      "label_flips": 0
     }
   ],
   "noise_rule": [
