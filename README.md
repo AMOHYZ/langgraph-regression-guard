@@ -281,7 +281,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: AMOHYZ/langgraph-regression-guard@v0.6.0
         with:
-          fail-on: root-drift  # root-drift | any-drift | never
+          fail-on: root-drift  # root-drift (default) | any-drift | never | harmed-root
 ```
 
 - Each PR gets one report comment, updated in place on every push. PRs from forks get
@@ -292,6 +292,14 @@ jobs:
   comment is posted, `lgcov verify-result` checks the result against the commits and that
   policy. On a mismatch no verdict is posted and the run exits 2. What this does and doesn't
   stop: [docs/trust-boundary.md](docs/trust-boundary.md).
+- **`fail-on` default is `root-drift`:** any behaviour change that names a root fails the check.
+  That is intentional: the default gates on drift, not on measured harm. `any-drift` also fails
+  on propagated nodes. `never` never fails on drift. **`harmed-root` (T262)** fails only when a
+  root is *harmed* by lgcov's own KPIs or code checks (a blocking KPI BLOCKs, or a code check
+  newly fails for that root's node). Roots no check covers are *unmeasured*: `needs_human`,
+  never a pass. Roots whose covering checks ran and none failed are *no harm seen*: under
+  `harmed-root` they do **not** fail (pass / exit 0 when every root is no-harm-seen). Harm
+  status never reads a synthetic truth label; `classify` still only names drift roots.
 - A node is root when its own code changed and it still drifts when run again, offline, on the
   input the cassette recorded for it. `root-drift` also fails on the nodes lgcov can't clear: a
   changed node that reaches for the network (a model call can't be told from noise yet) and drift

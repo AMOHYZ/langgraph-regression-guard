@@ -46,6 +46,7 @@ ROWS: dict[str, Evidence] = {
     "abstained": Evidence(abstained=("tone",), statistical="INCONCLUSIVE", k_gate=1),
     "inconclusive": Evidence(statistical="INCONCLUSIVE", k_gate=1),
     "cassettes_edited": Evidence(cassettes_edited=True, statistical="SHIP", k_gate=2),
+    "unmeasured_root": Evidence(unmeasured_drift=True, statistical="SHIP", k_gate=1),
     "drift_not_enforced": Evidence(unenforced_drift=True),
     "advisory_drop_only": Evidence(advisory_drops=("tone",)),
     "ship_advisory_drop": Evidence(statistical="SHIP", k_gate=2, advisory_drops=("tone",)),
@@ -99,9 +100,9 @@ def test_the_doc_table_matches_decide_action(state: str) -> None:
 def _every_combination() -> Iterator[Evidence]:
     verdicts: tuple[Decision | None, ...] = ("SHIP", "BLOCK", "INCONCLUSIVE", None)
     for statistical, mode in product(verdicts, MODES):
-        for flags in product((False, True), repeat=13):
+        for flags in product((False, True), repeat=14):
             infra, crashed, drift, unenforced, floor, unchecked = flags[:6]
-            unsure, drop, idle, blocks, adopting, edited, failing = flags[6:]
+            unsure, drop, idle, blocks, adopting, edited, failing, unmeasured = flags[6:]
             evidence = Evidence(
                 statistical=statistical,
                 k_gate=0 if statistical is None else 2,
@@ -118,6 +119,7 @@ def _every_combination() -> Iterator[Evidence]:
                 first_adoption=adopting,
                 cassettes_edited=edited,
                 code_failures=(FAILURE,) if failing else (),
+                unmeasured_drift=unmeasured,
                 mode=mode,
             )
             if edited:  # only a PR that edited its cassettes can hide a failure in them
@@ -279,7 +281,12 @@ def test_an_undecided_run_says_what_its_exit_code_means() -> None:
     assert "That is not a pass." in decide_action(ROWS["inconclusive"]).next_step
     switched = decide_action(replace(ROWS["inconclusive"], inconclusive_blocks=True))
     assert "that is not a finding against the agent" in switched.next_step
-    for state in ("cassettes_edited", "drift_not_enforced", "advisory_drop_only"):
+    for state in (
+        "cassettes_edited",
+        "unmeasured_root",
+        "drift_not_enforced",
+        "advisory_drop_only",
+    ):
         assert "That is not a pass." in decide_action(ROWS[state]).next_step
     assert "exits 0" not in decide_action(replace(ROWS["inconclusive"], mode="advisory")).next_step
 
@@ -427,6 +434,18 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             replay_lines=NO_DRIFT,
             tally=UNTOUCHED_0,
             notes=("⚠️ This PR changes `cassettes`, the expected outputs this gate compares.",),
+        ),
+        0,
+        "needs_human",
+    ),
+    "unmeasured_root": (
+        replace(
+            DRIFTED,
+            fail_on="harmed-root",
+            harm_status={"respond": "unmeasured"},
+            gate=GateFindings("SHIP", 1),
+            l2_lines=_kpi_rows(TONE_SHIP),
+            tally=TOUCHED_0,
         ),
         0,
         "needs_human",

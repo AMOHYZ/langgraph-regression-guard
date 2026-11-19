@@ -76,6 +76,11 @@ _ROWS: dict[str, tuple[str, str]] = {
         "Read the cassette diff and decide: this PR changed the expected outputs it is graded "
         "on, so lgcov can't vouch for it.",
     ),
+    "unmeasured_root": (
+        _NO_DECISION,
+        "Read the unmeasured root(s) and decide, or add a KPI/code check that covers them. "
+        "`fail-on: harmed-root` never treats unmeasured drift as a pass.",
+    ),
     "drift_not_enforced": (
         _NO_DECISION,
         "Read the drift table and decide. `fail-on: never` means lgcov won't fail this check on "
@@ -120,6 +125,10 @@ _INCONCLUSIVE_NOTE = (
 _UNDECIDED = {  # each state a human decides, and what its exit 0 means
     **dict.fromkeys(_SWITCHABLE, _INCONCLUSIVE_NOTE),
     "cassettes_edited": "This check exits 0 so that a re-baseline can land. That is not a pass.",
+    "unmeasured_root": (
+        "This check exits 0 because unmeasured roots under `fail-on: harmed-root` need a human. "
+        "That is not a pass."
+    ),
     "drift_not_enforced": (
         "This check exits 0 because `fail-on: never` does not block on drift. That is not a pass."
     ),
@@ -203,6 +212,7 @@ class Evidence:
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
     code_failures: tuple[CodeFailure, ...] = ()  # a policy violation, whatever the test says
     hidden_failures: tuple[CodeFailure, ...] = ()  # the same, with a re-baseline hiding it
+    unmeasured_drift: bool = False  # T262: roots no KPI/check covers, under fail-on: harmed-root
     inconclusive_blocks: bool = False  # the switch: an undecided run fails the check
     mode: Mode = "enforcing"
     approved_by: tuple[str, ...] = ()  # recorded only
@@ -253,6 +263,8 @@ def _state(e: Evidence) -> str:
         return "inconclusive"
     if e.cassettes_edited:
         return "cassettes_edited"
+    if e.unmeasured_drift:  # T262: even under a SHIP — unmeasured is never a pass
+        return "unmeasured_root"
     if e.statistical is None and e.unenforced_drift:
         return "drift_not_enforced"
     if e.statistical is None and e.advisory_drops:

@@ -22,6 +22,11 @@ or slice group never goes further than its KPIs' own verdicts.
   `gate.inconclusive_blocks: true` (or `--fail-on-inconclusive`) makes it exit 1. The PR
   comment shows it as "No decision: needs_human"; [verdict-actions.md](verdict-actions.md)
   has what each outcome asks of the reviewer.
+- **`fail-on` (T262).** Default `root-drift` fails on any named root (behaviour change).
+  `harmed-root` fails only when a root is harmed by a blocking KPI or code check on that
+  node's taxonomy entry; unmeasured roots (no covering check) are needs_human, never a
+  pass; roots with covering checks that ran and did not fail (`no harm seen`) do not fail
+  under that mode.
 - **A code check's new failure blocks outside these numbers.** A check that passed on the base
   and fails on the PR exits 1 on one case, whatever the paired test says. So it has no false-alarm
   bound: a check whose path varies between runs of an unchanged agent will block by chance, on
