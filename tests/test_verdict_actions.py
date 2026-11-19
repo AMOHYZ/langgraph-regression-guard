@@ -443,6 +443,7 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             DRIFTED,
             fail_on="harmed-root",
             harm_status={"respond": "unmeasured"},
+            harm_reasons={"respond": "only a presence check covers this node"},
             gate=GateFindings("SHIP", 1),
             l2_lines=_kpi_rows(TONE_SHIP),
             tally=TOUCHED_0,

@@ -51,19 +51,21 @@ def test_code_checks_on_an_unchanged_demo_run_have_no_new_failures() -> None:
     assert judged == frozenset(s.name for s in specs)
 
 
-def test_harm_status_for_demo_roots_uses_taxonomy_nodes_only() -> None:
-    """lookup_order with a passing order_lookup check → no harm seen; classify covered too."""
+def test_harm_status_for_demo_roots_presence_checks_do_not_measure() -> None:
+    """Today's demo taxonomy is same-node node_visited; those roots stay unmeasured."""
     specs = load_taxonomy(ROOT / TAXONOMY_BY_AGENT["demo"]).kpi_specs
     covered = {s.name: s.node for s in specs}
+    checks = {s.name: dict(s.check) for s in specs if s.check is not None}
     statuses = root_harm_statuses(
         ("lookup_order", "respond", "plan"),
         covered,
         failed_kpis=frozenset(),
         judged_kpis=frozenset(covered),
+        kpi_checks=checks,
     )
     assert statuses == {
-        "lookup_order": "no harm seen",
-        "respond": "no harm seen",
+        "lookup_order": "unmeasured",
+        "respond": "unmeasured",
         "plan": "unmeasured",
     }
 
@@ -99,3 +101,22 @@ def test_a_benign_demo_root_is_no_harm_seen_or_unmeasured_not_harmed() -> None:
     assert roots  # T262: still named root today
     statuses = harm_for_roots(case.base, case.pr, roots, ROOT / TAXONOMY_BY_AGENT["demo"])
     assert all(statuses[r] != "harmed" for r in roots), statuses
+
+
+def test_all_regressed_cases_are_unmeasured_with_todays_taxonomies() -> None:
+    """With today's node_visited taxonomies, every rooted regressed case is unmeasured."""
+    from examples.synthetic_agents import AGENTS
+    from lgcov.cli import _shipped
+
+    rows: list[dict[str, HarmStatus]] = []
+    for agent in AGENTS:
+        for case in every_case(agent):
+            if case.truth.label != "regressed":
+                continue
+            roots = sorted(_shipped(case, set(getattr(agent.graph, "nodes", {}))).root)
+            assert roots, (agent.name, case.truth)
+            rel = TAXONOMY_BY_AGENT[agent.name]
+            statuses = harm_for_roots(case.base, case.pr, roots, ROOT / rel)
+            assert all(s == "unmeasured" for s in statuses.values()), (agent.name, statuses)
+            rows.append(statuses)
+    assert len(rows) == 31

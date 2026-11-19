@@ -1,5 +1,5 @@
-# T262: small fixture — one code check covers `respond` only.
-# Roots on other nodes stay unmeasured; a new failure on respond is harmed.
+# T262: small fixture — one presence check on `respond` (does not measure that root).
+# Roots on other nodes stay unmeasured; presence-only covering checks leave respond unmeasured.
 version: 1
 system: harm_status_fixture
 failure_modes:

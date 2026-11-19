@@ -150,7 +150,7 @@ from lgcov.drift_gate import (
     Outcome,
     drift_exit_code,
     parse_fail_on,
-    root_harm_statuses,
+    root_harm,
     verdict,
 )
 from lgcov.exposure import CaseExposure, entries, exposure_to_json, parse_exposure
@@ -1500,7 +1500,11 @@ def _evaluate(
     result = replace(result, calibration_lines=tuple(changes))
     if l2 is None:
         # T262: no KPI/check → every root is unmeasured.
-        return replace(result, harm_status={n: "unmeasured" for n in root})
+        return replace(
+            result,
+            harm_status={n: "unmeasured" for n in root},
+            harm_reasons=dict.fromkeys(root, "no covering check"),
+        )
     judge_start = perf_counter()
     try:
         saved = _saved_cases(Path(_policy_path(args, args.bands)).parent / "cases", l2[0])
@@ -1539,11 +1543,22 @@ def _evaluate(
     # T262: harm status from this run's KPIs/code checks only (never a truth label).
     failed_kpis = {f.kpi for f in findings.code_failures} | {f.kpi for f in hidden}
     failed_kpis |= {s.kpi for s in stats if s.blocking and s.decision == "BLOCK"}
-    harm = root_harm_statuses(
+    kpi_checks: dict[str, dict[str, str] | None] = {
+        spec.name: (dict(spec.check) if spec.check is not None else None) for spec in l2[0]
+    }
+    # First-seen node order across PR replays (upstream vs downstream for observe-root).
+    path_nodes: list[str] = []
+    for _, steps in pairs:
+        for step in steps:
+            if step.node not in path_nodes:
+                path_nodes.append(step.node)
+    harm, harm_reasons = root_harm(
         root,
         {spec.name: spec.node for spec in l2[0]},
         frozenset(failed_kpis),
         frozenset(s.kpi for s in stats),
+        kpi_checks=kpi_checks,
+        path=tuple(path_nodes) or None,
     )
     return replace(
         result,
@@ -1553,6 +1568,7 @@ def _evaluate(
             findings, infra=findings.infra or bool(policy.llm_code), hidden_failures=hidden
         ),
         harm_status=harm,
+        harm_reasons=harm_reasons,
         l2_lines=(
             *policy.calibration,
             *([""] if policy.calibration and stats else []),

@@ -2314,13 +2314,13 @@
     },
     "measured_recall": {
       "hits": 0,
-      "of": 31,
-      "value": 0.0
+      "of": 0,
+      "value": null
     },
     "unmeasured_rooted": {
-      "hits": 0,
+      "hits": 55,
       "of": 55,
-      "value": 0.0
+      "value": 1.0
     }
   }
 }

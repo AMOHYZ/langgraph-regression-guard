@@ -78,7 +78,8 @@ _ROWS: dict[str, tuple[str, str]] = {
     ),
     "unmeasured_root": (
         _NO_DECISION,
-        "Read the unmeasured root(s) and decide, or add a KPI/code check that covers them. "
+        "Read the unmeasured root(s) and decide, or add a KPI/code check that observes their "
+        "output or something downstream. "
         "`fail-on: harmed-root` never treats unmeasured drift as a pass.",
     ),
     "drift_not_enforced": (

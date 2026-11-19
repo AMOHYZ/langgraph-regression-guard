@@ -295,11 +295,14 @@ jobs:
 - **`fail-on` default is `root-drift`:** any behaviour change that names a root fails the check.
   That is intentional: the default gates on drift, not on measured harm. `any-drift` also fails
   on propagated nodes. `never` never fails on drift. **`harmed-root` (T262)** fails only when a
-  root is *harmed* by lgcov's own KPIs or code checks (a blocking KPI BLOCKs, or a code check
-  newly fails for that root's node). Roots no check covers are *unmeasured*: `needs_human`,
-  never a pass. Roots whose covering checks ran and none failed are *no harm seen*: under
-  `harmed-root` they do **not** fail (pass / exit 0 when every root is no-harm-seen). Harm
-  status never reads a synthetic truth label; `classify` still only names drift roots.
+  root is *harmed* by lgcov's own KPIs or code checks that **observe** that root's output or
+  something downstream (a blocking KPI BLOCKs, or an observing code check newly fails). Roots
+  no observing check covers are *unmeasured*: `needs_human`, never a pass — including when only
+  a same-node `node_visited` / `node_not_visited` (or an upstream-only check) is present; the
+  comment names the reason. Roots whose observing checks ran and none failed are *no harm
+  seen*: under `harmed-root` they do **not** fail (pass / exit 0 when every root is
+  no-harm-seen). Harm status never reads a synthetic truth label; `classify` still only names
+  drift roots. Which check kinds measure a root: [docs/gate.md](docs/gate.md).
 - A node is root when its own code changed and it still drifts when run again, offline, on the
   input the cassette recorded for it. `root-drift` also fails on the nodes lgcov can't clear: a
   changed node that reaches for the network (a model call can't be told from noise yet) and drift
