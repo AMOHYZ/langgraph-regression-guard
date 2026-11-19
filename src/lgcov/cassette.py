@@ -41,6 +41,10 @@ from lgcov.normalize import key_view, normalize, redact_secrets
 from lgcov.rebind import Ambiguous, rebind
 from lgcov.snapshot import node_tools
 
+# T248: a tool call that ended this way is never compared, served or labelled; the rest of its
+# run is not checked, and the verdict is INCONCLUSIVE (ruling 1).
+TRANSIENT = frozenset({"timeout", "rate_limited", "server_error"})
+
 
 class Sample(TypedDict):
     """T229: what base's code returned when run again on a unit's recorded input. Arbitrary user
@@ -85,7 +89,7 @@ class Step:
     router_state: Any = None  # T221: the state the router saw, masked as an input is
     parts: list[str] | None = None  # T239: names in the recording's `parts`
     call_id: str | None = None  # T239: a tool call's id, or for an agent the call that began it
-    status: str | None = None  # T248: how a tool call ended; any text, until its values settle
+    status: str | None = None  # T248: how a tool call ended; see TRANSIENT
     samples: list[Sample] | None = None  # T229: K re-runs on this input (`lgcov record --samples`)
 
 
@@ -996,6 +1000,9 @@ class _ToolBag:
                 )
                 if i is not None:
                     hit = self.unused.pop(i)[0]
+        # T248: a transient recorded call is never served; it runs live (and stays not checked).
+        if hit is not None and hit.status in TRANSIENT:
+            hit = None
         if hit is not None and isinstance(hit.output, ToolMessage):
             served_message = deepcopy(hit.output)
             served_message.tool_call_id = call["id"]
@@ -1493,6 +1500,15 @@ def replay_run(
     return compared_run(cassette, fresh, calls, halt, ignore_paths)
 
 
+def _transient_not_checked(steps: Sequence[Step]) -> tuple[str, ...]:
+    """T248: from the first unit with a transient status, that unit and every later one."""
+    flat = with_units(steps)
+    for i, step in enumerate(flat):
+        if step.status in TRANSIENT:
+            return tuple(dict.fromkeys(s.node for s in flat[i:]))
+    return ()
+
+
 def compared_run(
     cassette: Cassette,
     fresh: Sequence[Step],
@@ -1513,12 +1529,17 @@ def compared_run(
                 seen[s.node] += 1
         later = [n for n in dict.fromkeys(s.node for s in cassette.steps) if n not in reached]
         not_checked = (halt.node, *(n for n in later if n != halt.node))
+    # T248: a transient tool status, on base or head, drops that unit and the rest of the run.
+    transient = _transient_not_checked(cassette.steps) or _transient_not_checked(fresh)
+    if transient:
+        not_checked = tuple(dict.fromkeys([*not_checked, *transient]))
     if any(s.units is not None for s in fresh):  # T193: the replay kept units, so compare them
         recorded, fresh = with_units(recorded), with_units(fresh)
     # T168: a cassette saved before goto was kept has no route to compare a fresh one with.
     routed = {s.node for s in with_units(cassette.steps) if s.goto is not None}
-    expected = _by_node(recorded, ignore_paths, routed)
-    actual = _by_node(fresh, ignore_paths, routed)
+    skip = frozenset(not_checked)
+    expected = {n: v for n, v in _by_node(recorded, ignore_paths, routed).items() if n not in skip}
+    actual = {n: v for n, v in _by_node(fresh, ignore_paths, routed).items() if n not in skip}
     drifts = tuple(
         Drift(node=n, expected=expected.get(n), actual=actual.get(n))
         for n in sorted(expected.keys() | actual.keys())

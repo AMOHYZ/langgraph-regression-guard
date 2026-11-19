@@ -81,9 +81,8 @@ of the same kind, name and path, and the recorded ids can be fitted to this run'
 it runs. An `agent` unit is served whole when none of its parts changed, nor any part of what
 can run inside it. The sub-agent then never starts.
 
-**Proposed, not decided (T248): a status for transient failures.** `status` is `success` or
-`error`, as a tool message says today, or one of `timeout`, `rate_limited` (429) and
-`server_error` (5xx).
+**T248: a status for transient failures.** `status` is `success` or `error`, as a tool message
+says today, or one of `timeout`, `rate_limited` (429) and `server_error` (5xx).
 
 - **Rule.** A unit with one of the last three is never compared, never served and never
   labelled. It reads *not checked*, and so does the rest of its run. One search timeout made
@@ -239,9 +238,9 @@ are read. On the recording:
 
 ## Not verified
 
-- **T229 and T248 have no text in this repo yet.** T243's stale check is in
-  [`cassette-schema.md`](cassette-schema.md) ruling 4. T193 has no design of its own either: its
-  fields here are what this page needs.
+- **T229 has no text in this repo yet.** T243 and T248 are in
+  [`cassette-schema.md`](cassette-schema.md) rulings 4 and 1. T193 has no design of its own either:
+  its fields here are what this page needs.
 - **Nothing was run on a deep agent.** What section 1 says of one is read from lgcov's,
   LangChain's and deepagents' code.
 - **How a recorder sees inside a tool call,** where a sub-agent runs, and how it ties a file
