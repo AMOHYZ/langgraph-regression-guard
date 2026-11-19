@@ -238,8 +238,9 @@ Added on 13 Nov 2026, from a research memo's reads of that day (not re-read here
 - A taxonomy without human review: KPIs come from failure modes a person has checked.
 - Serve a subgraph from a schema-1 cassette: it runs live, and drift inside it is blamed on
   the subgraph node. A recording made now is schema 2, and replay serves the nodes inside a
-  subgraph from their units. A secret-named key is stored as `<redacted>`. A `ToolNode` still
-  always runs live. A crash inside a subgraph names the inner node (`sub.inner`).
+  subgraph from their units. A secret-named key is stored as `<redacted>`. A tool call is
+  served whole when its code and arguments match; a tool whose code changed runs live. A
+  crash inside a subgraph names the inner node (`sub.inner`).
 - Tell an added node from a newly reached one in `lgcov ci`: a node only the PR reached, which
   no baseline run ever reached, reads inconclusive either way, and blocks either way. The
   baseline recording doesn't hold the graph's node names yet (T238).

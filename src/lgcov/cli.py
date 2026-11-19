@@ -779,7 +779,8 @@ def _record(argv: list[str]) -> int:
         help="the recording's schema. 2, the default, writes scheme, graph, and the nodes "
         "inside a subgraph (docs/design/cassette-schema.md). A secret-named key is stored as "
         "<redacted>. A reader, the Action's deciding job included, must be 0.4.0 or later. "
-        "--schema 1 writes the runs only. Tool calls stay out",
+        "--schema 1 writes the runs only. A tool call is a unit of its tool node and is "
+        "served whole when its code and arguments match",
     )
     args = ap.parse_args(argv)
     try:

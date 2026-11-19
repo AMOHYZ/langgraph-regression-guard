@@ -18,7 +18,7 @@ from types import CodeType, FunctionType
 from typing import Any, Literal, NoReturn, NotRequired, TypedDict
 
 import httpx
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, ToolMessage
 from langgraph.config import get_config
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import START
@@ -602,6 +602,7 @@ def _attributed(
     prefix: str,
     failed: Callable[[str, Exception], None],
     recorded: Callable[[str, Any, str | None], Any] | None = None,
+    bag: Any = None,
 ) -> Any:
     """T109: a copy of a subgraph whose nodes' errors name them `<prefix><node>`. It runs
     as it is otherwise: a subgraph's nodes are never served.
@@ -618,8 +619,12 @@ def _attributed(
             named = partial(failed, f"{prefix}{name}")
             nodes[name] = _around(spec, partial(_naming, named), partial(_anaming, named))
         elif isinstance(spec.bound, Pregel):
-            inner = _attributed(spec.bound, f"{prefix}{name}.", failed, recorded)
+            inner = _attributed(spec.bound, f"{prefix}{name}.", failed, recorded, bag)
             nodes[name] = spec.copy({"bound": inner})
+        elif bag is not None:
+            hooked = _hook_tool_node(spec, f"{prefix}{name}", bag)
+            if hooked is not None:
+                nodes[name] = hooked
     return graph.copy({"nodes": nodes}) if original else graph
 
 
@@ -758,6 +763,136 @@ def unservable(graph: Any, cassettes: Sequence[Cassette]) -> int:
     )
 
 
+class _ToolBag:
+    """T193, PR 6: tool calls made during one run, and the recorded tool units still to serve."""
+
+    def __init__(
+        self, served: Sequence[Step], ignore_paths: Sequence[str], mask_volatile: bool
+    ) -> None:
+        self.ignore_paths = ignore_paths
+        self.mask_volatile = mask_volatile
+        self.unused = [
+            (s, _key(s.input, ignore_paths, mask_volatile))
+            for s in served
+            if s.kind == "tool" and s.code is not None
+        ]
+        self.made: dict[str, list[Step]] = {}
+        self.spans: list[tuple[str, int, int]] = []
+        self.lock = threading.Lock()
+
+    def call(
+        self, parent: str, tools: Mapping[str, Any], request: Any, execute: Callable[..., Any]
+    ) -> Any:
+        call = request.tool_call
+        tool_name = str(call["name"])
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        fn = _tool_fn(tools.get(tool_name))
+        code = _print(fn) if fn is not None else None
+        key = _key(args, self.ignore_paths, self.mask_volatile)
+        path = f"{parent}.{tool_name}"
+        hit: Step | None = None
+        with self.lock:
+            if code is not None and key is not None:
+                i = next(
+                    (
+                        i
+                        for i, (s, k) in enumerate(self.unused)
+                        if (s.node, s.code, k) == (path, code, key)
+                    ),
+                    None,
+                )
+                if i is not None:
+                    hit = self.unused.pop(i)[0]
+        if hit is not None and isinstance(hit.output, ToolMessage):
+            served_message = deepcopy(hit.output)
+            served_message.tool_call_id = call["id"]
+            return served_message
+        result = execute(request)
+        status = result.status if isinstance(result, ToolMessage) else None
+        output = deepcopy(result) if isinstance(result, ToolMessage) else _streamed(result)
+        step = Step(
+            tool_name,
+            output,
+            deepcopy(args),
+            code,
+            kind="tool",
+            call_id=None if call.get("id") is None else str(call["id"]),
+            status=status if isinstance(status, str) else None,
+        )
+        with self.lock:
+            self.made.setdefault(parent, []).append(step)
+        return result
+
+    def span(self, parent: str, start: int) -> None:
+        with self.lock:
+            self.spans.append((parent, start, len(self.made.get(parent, []))))
+
+
+def _tool_fn(tool: Any) -> FunctionType | None:
+    fn = getattr(tool, "func", None) or getattr(tool, "coroutine", None)
+    return fn if isinstance(fn, FunctionType) else None
+
+
+def _bracket(fn: Callable[..., Any], parent: str, bag: _ToolBag) -> Callable[..., Any]:
+    def call(*args: Any, **kwargs: Any) -> Any:
+        with bag.lock:
+            start = len(bag.made.get(parent, []))
+        out = fn(*args, **kwargs)
+        bag.span(parent, start)
+        return out
+
+    return call
+
+
+def _abracket(fn: Callable[..., Any], parent: str, bag: _ToolBag) -> Callable[..., Any]:
+    async def call(*args: Any, **kwargs: Any) -> Any:
+        with bag.lock:
+            start = len(bag.made.get(parent, []))
+        out = await fn(*args, **kwargs)
+        bag.span(parent, start)
+        return out
+
+    return call
+
+
+def _hook_tool_node(spec: Any, parent: str, bag: _ToolBag) -> Any | None:
+    """A copy of a tool node whose calls are recorded, and served whole when one matches."""
+    bound = getattr(spec, "bound", None)
+    tools = getattr(bound, "tools_by_name", None)
+    if bound is None or not isinstance(tools, Mapping) or not hasattr(bound, "_func"):
+        return None
+    bound = copy(bound)
+    tools = bound.tools_by_name
+
+    def wrap(request: Any, execute: Callable[..., Any]) -> Any:
+        return bag.call(parent, tools, request, execute)
+
+    bound._wrap_tool_call = wrap
+    bound.func = _bracket(bound._func.__get__(bound, type(bound)), parent, bag)
+    bound.afunc = _abracket(bound._afunc.__get__(bound, type(bound)), parent, bag)
+    return spec.copy({"bound": bound})
+
+
+def _graft(steps: list[Step], bag: _ToolBag | None, prefix: str = "") -> list[Step]:
+    """Put each tool node's calls inside its step, in the order the node ran them."""
+    if bag is None:
+        return steps
+    used: dict[str, int] = {}
+
+    def one(step: Step, path: str) -> Step:
+        full = f"{path}{step.node}"
+        units = _graft(list(step.units or []), bag, full + ".")
+        spans = [sp for sp in bag.spans if sp[0] == full]
+        i = used.get(full, 0)
+        if i < len(spans):
+            _, start, end = spans[i]
+            used[full] = i + 1
+            units = units + bag.made.get(full, [])[start:end]
+        return replace(step, units=units) if units else step
+
+    return [one(s, prefix) for s in steps]
+
+
 def _run(
     graph: Any,
     inputs: dict[str, Any],
@@ -797,6 +932,11 @@ def _run(
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     inside = _inside(served)  # T193: the units of served steps, named with their subgraph's
+    bag = (
+        _ToolBag(inside, ignore_paths, mask_volatile)
+        if units or any(s.kind == "tool" for s in inside)
+        else None
+    )
     boxed = {s.node.split(".")[0] for s in inside}  # the top-level subgraphs they ran in
     served = [*served, *inside]
     unused = [(s, _key(s.input, ignore_paths, mask_volatile)) for s in served if s.code is not None]
@@ -896,6 +1036,11 @@ def _run(
 
     original = getattr(graph, "nodes", {})  # an object with only .stream() runs as it is
     nodes = dict(original)
+    if bag is not None:
+        for name, spec in list(nodes.items()):
+            hooked = _hook_tool_node(spec, name, bag)
+            if hooked is not None:
+                nodes[name] = hooked
     for name, code in _codes(graph, [*served, *like]).items():
         nodes[name] = _around(
             original[name], partial(wrap, name, code=code), partial(awrap, name, code=code)
@@ -907,7 +1052,7 @@ def _run(
     for name, spec in original.items():  # T109: a subgraph's errors name its own node
         if isinstance(getattr(spec, "bound", None), Pregel):
             unit = as_unit if tree or name in boxed else None
-            inner = _attributed(spec.bound, f"{name}.", failed, unit)
+            inner = _attributed(spec.bound, f"{name}.", failed, unit, bag)
             nodes[name] = spec.copy({"bound": inner})
     routers = _routers(graph)
     routed = _router_prints(graph, recorded=[*served, *like])
@@ -971,7 +1116,7 @@ def _run(
             for chunk in runner.stream(inputs, **modes):
                 took(chunk)
     except _Halted as stop:
-        return steps, log, stop.halt
+        return _graft(steps if tree is None else tree.steps(), bag), log, stop.halt
     except GraphBubbleUp:
         raise
     except Exception as exc:  # the node that raised it, or T109: the router that did
@@ -979,7 +1124,7 @@ def _run(
         if named is None:
             raise
         raise NodeError(named, exc, sum(n == named for n, _ in failures) or 1) from exc
-    return (steps if tree is None else tree.steps()), log, None
+    return _graft(steps if tree is None else tree.steps(), bag), log, None
 
 
 def _compared(step: Step, ignore_paths: Sequence[str], routed: Container[str]) -> object:

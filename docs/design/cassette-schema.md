@@ -2,7 +2,8 @@
 
 **Status:** `lgcov record` writes schema 2 by default (`--schema 1` still writes schema 1).
 The reader shipped in lgcov 0.4.0 (#158, #159). Units inside a subgraph are recorded and labelled.
-A secret-named key is stored as `<redacted>` (section 6, PR 5). Tool calls stay out. The rulings in
+A secret-named key is stored as `<redacted>` (section 6, PR 5). A tool call is a unit of its
+tool node and is served whole (section 6, PR 6). The rulings in
 section 7 were decided on 17 November 2026.
 
 lgcov records a baseline once and replays each PR against it. Several planned tasks need the
@@ -286,7 +287,8 @@ field after the flip is optional.
 4. **Flip:** `lgcov record` writes schema 2 by default. `--schema 1` writes schema 1. The demo
    baselines are re-recorded. Release R2 is 0.6.0.
 5. **Redaction** at write time, for a secret-named key. Other patterns stay a design.
-6. **Tool units**, after 5.
+6. **Tool units.** Each tool call is recorded under its tool node and served whole. The
+   safe-to-re-run probe is still open.
 7. **Units of a graph started inside a node or a tool**, served only whole.
 8. **Routes** (T221): `routed`, `router_state` and the router probe.
 9. **Samples** (T229): `lgcov record --samples K`.
