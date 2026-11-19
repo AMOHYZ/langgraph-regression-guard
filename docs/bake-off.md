@@ -105,10 +105,10 @@ Against these seven, as documented. Each has a limit next to it.
   lgcov's evidence is a [pilot][lg-real], not proof: one PR, and 1 of 1 roots. Recall is
   about 1/5 to 1/6 with first-drift roots, none with the multi-root rule (T162) on its saved runs, and
   a subgraph is scored as one node. A noise check, base against base on a real model (T173),
-  gave the same root as the PR, so these runs can't separate cause from model noise: lgcov's
-  root has no noise threshold in the gate yet (`lgcov bench --noise-repeats` has one, T211,
-  measured on a seeded-noise fixture and on one real-model run with no change, where it gave no
-  false alarm, T232). Among the newer tools, several try node cause; none found
+  gave the same root as the PR, so these runs can't separate cause from model noise without
+  recorded `samples` (T229) or `lgcov bench --noise-repeats` (T211, measured on a seeded-noise
+  fixture and on one real-model run with no change, where it gave no false alarm, T232). Among
+  the newer tools, several try node cause; none found
   ships it replay-proof in a sticky PR Action. [SCIPE][scipe] separates a node's own failures
   from inherited ones with an LLM judge, on one version, and
   [trajectory-causal-attribution][tca] finds a culprit step by replay, not a node. A plain
@@ -116,10 +116,10 @@ Against these seven, as documented. Each has a limit next to it.
   recall 1.00 against lgcov's 0.85 and precision 0.35 against 0.45
   ([synthetic benchmark](benchmark.md#synthetic)). A router edit now names its routing node
   as root (T175), which lifts lgcov's recall on all synthetic edits from 0.55 to 0.90, still
-  under the diff's 1.00. In `lgcov ci`, a node only the PR reached, which no baseline run ever
-  reached, reads inconclusive whether the PR added it or newly reached it (T238), and blocks
-  either way. lgcov doesn't check that the route changed, so a router edit beside a
-  node edit can be named for drift it didn't cause.
+  under the diff's 1.00. In `lgcov ci`, with a trusted baseline `graph` (T243 / T238), a node
+  only the PR ran is root if base never had it and propagated if a route newly reached it;
+  without that graph it stays inconclusive either way and blocks either way. Labels name a
+  changed router only when the route differed (T221).
 - **A judge earns the right to block.** lgcov lets a judge block only when the lower bounds of
   its TPR and TNR against human labels clear 0.80. Langfuse reports kappa and F1, Confident AI
   a confusion matrix and Kitaru a calibration protocol, and LangSmith and Opik tune judges from

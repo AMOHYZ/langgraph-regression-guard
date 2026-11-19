@@ -6,9 +6,10 @@ test, and a judge can block only once it has earned that against human labels. B
 are table stakes: several small tools ship them. What was not found in the tools read is
 that node cause, root against propagated, from replay, and it is unvalidated: on real agents it is a [pilot](benchmark.md#real-prs) on one
 PR with 6 labelled roots, and a [base-against-base run](benchmark.md#aa-noise-floor) gave
-the same root, so it has no noise threshold yet. First report in 2 minutes (L1 only,
-measured 27 Oct 2026). Other tools as of 31 Oct 2026; Kitaru and LangSmith as of 5 Nov;
-the tools added on 11 Nov and on 13 Nov as of those days.
+the same root. The gate can weigh head against base's recorded `samples` when the baseline
+was recorded with `--samples K` (T229); without them a model node is still inconclusive.
+First report in 2 minutes (L1 only, measured 27 Oct 2026). Other tools as of 31 Oct 2026;
+Kitaru and LangSmith as of 5 Nov; the tools added on 11 Nov and on 13 Nov as of those days.
 
 ## What's still open
 
@@ -50,12 +51,14 @@ do. It also called `research_supervisor` propagated, though that subgraph holds 
 labelled roots and is scored as one node.
 *Status: built, and a pilot on real PRs.* Root precision is 1 of 1 on that one PR, with a 95%
 Wilson interval of 0.21 to 1.00, so it proves no precision claim. Recall is capped at about
-1/5 to 1/6. The multi-root rule (T162) names no root on the saved runs: the other roots sit inside a subgraph lgcov doesn't record (T193), and the model node is inconclusive until a noise threshold (T211).
+1/5 to 1/6. The multi-root rule (T162) names no root on the saved runs: the other roots sit
+inside a subgraph that recording now holds as units (T193), and the model node stays
+inconclusive without recorded `samples` or a live noise check (T211 / T229).
 The [replay audit](validation/replay-audit.md) checks the replay this rests on, not these
 labels, and a change replay can't see can give no drift, so no root.
 `diff_cassettes` classifies by each node's recorded input, but only tests call it so far. A
 noise check, base against base on a real model (T173), gave the same root as the PR, so that
-1 of 1 can't be told apart from model noise: lgcov's root has no noise threshold yet. With
+1 of 1 can't be told apart from model noise without samples. With
 `lgcov bench --noise-repeats 3`, one later base-against-base run gave no false alarm (T232,
 [A/A at K=3](benchmark.md#aa-at-k3)): one trial, and it doesn't show the rule catches a real change.
 Reenact records each LangGraph node boundary in its trajectory and shows them to its judges,
@@ -241,22 +244,22 @@ Added on 13 Nov 2026, from a research memo's reads of that day (not re-read here
   subgraph from their units. A secret-named key is stored as `<redacted>`. A tool call is
   served whole when its code and arguments match; a tool whose code changed runs live. A
   crash inside a subgraph names the inner node (`sub.inner`).
-- Tell an added node from a newly reached one in `lgcov ci`: a node only the PR reached, which
-  no baseline run ever reached, reads inconclusive either way, and blocks either way. The
-  baseline recording doesn't hold the graph's node names yet (T238).
-- Name a model node as root: since T162 a second root in the same run is named only if a
-  probe with the network blocked shows it drifting, so a model node is inconclusive in the gate. `lgcov bench
-  --noise-repeats K` (T211) names one only above base's own spread, and misses a smaller shift.
+- Tell an added node from a newly reached one without a trusted baseline `graph`: when the
+  recording isn't stale (T243), ci reads base's node names and a node only the PR ran is root
+  if base's graph doesn't have it, propagated if it does (T238). A recording with no `graph`
+  or a stale one still leaves that case inconclusive.
+- Name a model node as root without samples: a probe with the network blocked can't run it, so
+  it is inconclusive unless the baseline holds `samples` (T229) or `lgcov bench --noise-repeats
+  K` (T211) shows drift above base's spread. Both miss a shift smaller than the spread.
 - See a change that reaches a node only through a message's id, usage or other metadata, or a
   `Store` read, or replay a graph with a checkpointer or an `interrupt`:
   [known replay limits](../README.md#known-replay-limits).
-- Check that a router edit changed the route: a changed router is root of any drift after its
-  node, even drift a node edit caused. A router inside a subgraph isn't seen (T193), and a
-  cassette recorded before routers were fingerprinted needs a re-record first.
-- Tell root drift from model noise: a base-against-base run on a real model (T173) gave the
-  same root as #163, so the root label has no noise threshold yet. The `--noise-repeats` rule
-  gave no false alarm on one real-model A/A at K=3 (T232). That is one trial, the gate doesn't
-  use the rule, and no run has tested it on a real change.
+- See a router edit when the cassette was recorded before routers were fingerprinted: re-record
+  first. Labels name a changed router only when the route differed (T221).
+- Tell root drift from model noise without recorded samples: a base-against-base run on a real
+  model (T173) gave the same root as #163. With `samples` on the baseline the gate applies the
+  noise rule (T229); without them it does not. `lgcov bench --noise-repeats` gave no false
+  alarm on one real-model A/A at K=3 (T232): one trial, and no run has tested it on a real change.
 - Judge a real PR: the judge gate is built, but no judge has run on one yet.
 - See a node function that is also passed to `bind_tools`: its docstring is the tool's
   description, and an edit to it leaves the node served (T212). `--live` runs it.
