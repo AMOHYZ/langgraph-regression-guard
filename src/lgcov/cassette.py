@@ -318,7 +318,8 @@ def _field_part(value: object, path: str | None, source: str | None) -> Part:
 def chat_parts(graph: Any) -> tuple[dict[str, Part], dict[str, list[str]]]:
     """T239: chat-model fields held by each plain node, as recording `parts` and per-node names.
     T243: each part also carries `file` and `source` when the node lives in a project file.
-    Serving reads them (`parts_match`); labels don't yet. Empty when no node holds a chat model."""
+    Serving reads them (`parts_match`); labels read them via `changed_parts`. Empty when no
+    node holds a chat model."""
     table: dict[str, Part] = {}
     by_node: dict[str, list[str]] = {}
     for name, spec in getattr(graph, "nodes", {}).items():
@@ -383,6 +384,45 @@ def parts_match(step: Step, recorded: Mapping[str, Part] | None, live: Mapping[s
         if was != now:
             return False
     return True
+
+
+def _unit_of_part(name: str) -> str:
+    """The unit a chat-model part belongs to: `n.temperature` → `n`, `inner.n.model` → `inner.n`."""
+    for key in _CHAT_FIELDS:
+        suffix = f".{key}"
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name.rsplit(".", 1)[0] if "." in name else name
+
+
+def changed_parts(
+    base: Mapping[str, Part] | None, head: Mapping[str, str | None] | None
+) -> dict[str, tuple[str, ...]]:
+    """T239: each unit whose part fingerprints differ between the recording and head, with the
+    changed part names. Pure. Empty when either side has no parts table."""
+    if not base or head is None:
+        return {}
+    found: dict[str, list[str]] = {}
+    for name in sorted(set(base) | set(head)):
+        was = (base[name] or {}).get("fingerprint") if name in base else None
+        now = head.get(name)
+        if was == now:
+            continue
+        found.setdefault(_unit_of_part(name), []).append(name)
+    return {unit: tuple(names) for unit, names in found.items()}
+
+
+def codes_with_parts(
+    codes: tuple[Mapping[str, str | None], Mapping[str, str | None]],
+    changes: Mapping[str, Sequence[str]],
+) -> tuple[dict[str, str | None], dict[str, str | None]]:
+    """T239: treat a unit whose parts changed as fingerprint-changed for `classify`, when its
+    recorded `code` still matches head's."""
+    base, head = dict(codes[0]), dict(codes[1])
+    for node in changes:
+        if node in base and node in head and base[node] is not None and base[node] == head[node]:
+            head[node] = f"{head[node]}:parts"
+    return base, head
 
 
 @dataclass(frozen=True)

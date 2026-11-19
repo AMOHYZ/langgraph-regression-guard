@@ -3771,6 +3771,40 @@ def test_a_jev_judge_takes_its_model_and_timeout_from_lgcov_yaml() -> None:
     assert isinstance(default, JevJudge) and default.timeout_s == 10.0
 
 
+# T239: a part fingerprint change counts as a code change for labels, even when `code` matches.
+def test_changed_parts_make_a_same_code_node_root() -> None:
+    from lgcov.attribution import Probe
+    from lgcov.cassette import Part
+
+    base = Cassette(
+        {"q": "x"},
+        [
+            Step("brief", {"brief": "one"}, input={"q": "x"}, code="1"),
+            Step("report", {"report": "ONE"}, input={"brief": "one"}, code="2"),
+        ],
+    )
+    fresh = [
+        Step("brief", {"brief": "two"}, input={"q": "x"}, code="1"),  # same code fingerprint
+        Step("report", {"report": "TWO"}, input={"brief": "two"}, code="2"),
+    ]
+    drifts = [list(compared_run(base, fresh, (), None).drifts)]
+    assert {d.node for d in drifts[0]} == {"brief", "report"}
+    # Same code, no parts: propagated (or unexplained first-drift), never root by fingerprint.
+    same = _node_labels([base], [fresh], drifts, {"brief": Probe(True)})
+    assert "brief" not in same.root
+    parts: dict[str, Part] = {"brief.temperature": {"fingerprint": "a"}}
+    labelled = _node_labels(
+        [base],
+        [fresh],
+        drifts,
+        {"brief": Probe(True)},
+        base_parts=parts,
+        head_parts={"brief.temperature": "b"},
+    )
+    assert labelled.root == ("brief",)
+    assert labelled.parts == {"brief": ("brief.temperature",)}
+
+
 # T229: the deciding job reads base's recorded samples and quiets a node under its noise.
 def test_recorded_samples_quiet_a_first_node_under_its_noise() -> None:
     from lgcov.cassette import judge_samples

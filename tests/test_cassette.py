@@ -1207,6 +1207,26 @@ def test_parts_match_compares_fingerprints_named_on_the_step() -> None:
     assert parts_match(Step("n", {"x": 1}), was, other) is True  # no names on the step
 
 
+def test_changed_parts_groups_differing_fingerprints_by_unit() -> None:
+    # T239: labels read which parts moved between the recording and head.
+    from lgcov.cassette import Part, changed_parts, codes_with_parts
+
+    base: dict[str, Part] = {
+        "n.temperature": {"fingerprint": "a"},
+        "n.model_name": {"fingerprint": "m"},
+        "inner.n.top_p": {"fingerprint": "t"},
+    }
+    head = {"n.temperature": "b", "n.model_name": "m", "inner.n.top_p": "t"}
+    assert changed_parts(base, head) == {"n": ("n.temperature",)}
+    assert changed_parts(base, None) == {}
+    base_codes = {"n": "1", "inner.n": "2"}
+    head_codes = {"n": "1", "inner.n": "2"}
+    assert codes_with_parts((base_codes, head_codes), {"n": ("n.temperature",)}) == (
+        base_codes,
+        {"n": "1:parts", "inner.n": "2"},
+    )
+
+
 def test_replay_does_not_serve_when_a_recorded_part_fingerprint_differs() -> None:
     # T239: code and input still match, but a part's fingerprint moved → run live (diverged).
     from lgcov.cassette import Part, chat_parts

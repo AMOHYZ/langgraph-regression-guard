@@ -94,8 +94,10 @@ from lgcov.cassette import (
     accept_nodes,
     attach_parts,
     changed_nodes,
+    changed_parts,
     chat_parts,
     check_scheme,
+    codes_with_parts,
     compared_run,
     fill_samples,
     fingerprint_session,
@@ -473,6 +475,8 @@ def _node_labels(
     quiet: Collection[str] = (),
     graphs: tuple[Collection[str] | None, Collection[str] | None] = (None, None),
     router_probes: Sequence[ProbeStep] = (),
+    base_parts: Mapping[str, Part] | None = None,
+    head_parts: Mapping[str, str | None] | None = None,
 ) -> NodeLabels:
     """T222: each drifted node's label, from the recorded runs, the PR's steps for each and their
     drifts: what `lgcov ci` ships and what `lgcov bench` scores, so the two can't disagree.
@@ -480,7 +484,8 @@ def _node_labels(
     add (`explain_runs`: T175, T221, T230). `quiet` (T211): nodes under their noise, which get no
     label and aren't a run's first drifted node. `graphs` (T238): base's and head's node names,
     None for one that isn't known. `router_probes` (T221): which runs a changed router's route
-    differed in.
+    differed in. `base_parts` / `head_parts` (T239): recording vs head part fingerprints; a unit
+    whose parts changed counts as fingerprint-changed.
 
     T193: units count as nodes, by their path (`answer.respond`), on both sides (`with_units`). A
     container gets no label when a unit inside it is root: the unit explains its drift."""
@@ -488,9 +493,13 @@ def _node_labels(
     route_hits = route_changed_runs(runs, fresh, router_probes)
     runs = [replace(r, steps=with_units(r.steps)) for r in runs]
     fresh = [with_units(steps) for steps in fresh]
-    codes = (
-        {s.node: s.code for r in runs for s in r.steps},
-        {s.node: s.code for steps in fresh for s in steps},
+    part_hits = changed_parts(base_parts, head_parts)
+    codes = codes_with_parts(
+        (
+            {s.node: s.code for r in runs for s in r.steps},
+            {s.node: s.code for steps in fresh for s in steps},
+        ),
+        part_hits,
     )
     # T175 / T221: a changed router may make its source node root when the route differed.
     routers = (
@@ -501,6 +510,8 @@ def _node_labels(
     nodes = [{x.node for x in d} - set(quiet) for d in drifts]
     ran = [[s.node for s in r.steps] for r in runs]
     by_node = classify(set().union(*nodes), codes, probes, graphs)
+    labelled = {*by_node.root, *by_node.propagated, *by_node.inconclusive}
+    by_node = replace(by_node, parts={n: part_hits[n] for n in labelled if n in part_hits})
     same = [same_input(r, f, ignore_paths) for r, f in zip(runs, fresh, strict=True)]
     labels = explain_runs(
         by_node,
@@ -524,6 +535,7 @@ def _without_containers(labels: NodeLabels, explaining: Collection[str]) -> Node
         tuple(n for n in labels.propagated if n not in gone),
         {n: why for n, why in labels.inconclusive.items() if n not in gone},
         {n: k for n, k in labels.routing.items() if n not in gone},
+        {n: p for n, p in labels.parts.items() if n not in gone},
     )
 
 
@@ -558,6 +570,14 @@ def _replay_markdown(
         kind = "root" if node in roots else "propagated"
         kind = f"inconclusive ({unsure[node]})" if node in unsure else kind
         kind = f"root ({ROUTING.format(node)})" if node in routing else kind
+        # T239: name the changed parts with the root (or inconclusive) in the comment.
+        causes = {} if labels is None else labels.parts
+        if node in causes and node not in routing:
+            named = ", ".join(f"`{p}`" for p in causes[node])
+            if kind == "root":
+                kind = f"root ({named})"
+            elif kind.startswith("inconclusive"):
+                kind = f"{kind}; {named}"
         lines.append(f"| `{node}` | {kind} | {routing.get(node, counts.get(node))}/{len(runs)} |")
     drifted = {*counts, *routing, *not_checked}
     unchanged = sorted({s.node for r in runs for s in r.steps} - drifted)
@@ -1306,10 +1326,13 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
     probes = probe_steps(graph, runs, changed_nodes(graph, runs))  # T162: offline, no verdict
     probes += probe_units(graph, runs) if units else ()  # T193: units read the same way
     probes += probe_routers(graph, runs)  # T221: changed routers on base's router_state
+    # T239: head's part fingerprints for the deciding job (schema 3 when any).
+    head_parts = {name: part.get("fingerprint") for name, part in chat_parts(graph)[0].items()}
     return replace(
         run,
         fresh=tuple(FreshRun(r.steps, r.calls, r.halt) for r in replays),
         probes=probes,
+        parts=head_parts or None,
         agent_seconds=perf_counter() - agent_start,
         budget_hit=budget.hit,
     )
@@ -1339,7 +1362,9 @@ def _evaluate(
     if run.crash:
         return replace(partial, crash=run.crash, root_drift=(run.crash_node,))
     try:
-        runs = _load_runs(str(Path(cfg.cassette_dir) / "baseline.json"))
+        path = Path(cfg.cassette_dir) / "baseline.json"
+        recording = recording_from_json(path.read_text(encoding="utf-8"))
+        runs = recording.runs
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return replace(partial, harness_error=_harness_message("cannot read baseline", exc))
     if len(run.fresh) != len(runs):
@@ -1385,6 +1410,8 @@ def _evaluate(
         quiet=quiet,
         graphs=graphs,
         router_probes=run.probes,  # T221: which runs a changed router's route differed in
+        base_parts=recording.parts,  # T239: recording vs head part fingerprints
+        head_parts=run.parts,
     )
     blocking = {*labels.root, *labels.inconclusive}
     root, downstream = sorted(blocking), list(labels.propagated)
