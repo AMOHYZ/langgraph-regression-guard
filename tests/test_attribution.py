@@ -335,6 +335,24 @@ def test_a_changed_router_makes_its_source_node_root() -> None:
     assert ROUTING.format("classify") == "routing change at classify"
 
 
+def test_a_changed_router_that_routes_as_before_is_not_named() -> None:
+    # T221: with route_hits, a fingerprint-changed router is root only in runs whose route differed.
+    routers = ({"classify": "r1"}, {"classify": "r2"})
+    out = explain_runs(
+        UNEXPLAINED_RUN, ["lookup"], [["lookup", "respond"]], routers, RAN, route_hits={}
+    )
+    assert (out.root, out.routing, out.inconclusive) == ((), {}, {"lookup": UNEXPLAINED})
+    named = explain_runs(
+        UNEXPLAINED_RUN,
+        ["lookup"],
+        [["lookup", "respond"]],
+        routers,
+        RAN,
+        route_hits={"classify": {0}},
+    )
+    assert (named.root, named.routing) == (("classify",), {"classify": 1})
+
+
 @pytest.mark.parametrize(("base", "head"), [("r1", "r1"), (None, "r2"), ("r1", None)])
 def test_an_unchanged_or_unrecorded_router_leaves_the_run_unexplained(
     base: str | None, head: str | None

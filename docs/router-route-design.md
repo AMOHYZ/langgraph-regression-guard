@@ -1,8 +1,8 @@
 # Router root only when the route changed (design, T221)
 
-**Status: recording and probe built; labels not yet.** `lgcov record` writes `routed` and
-`router_state`, and the candidate job writes a router's probe. T175's rule and its documented
-limit stay as they are until a follow-up reads the probe for labels.
+**Status: recording, probe and labels built.** `lgcov record` writes `routed` and
+`router_state`, the candidate job writes a router's probe, and labels name a changed router
+only when the route differed (`route_changed_runs`).
 
 ## The problem
 
@@ -130,11 +130,8 @@ Each fails on today's code, where the changed router is root in all four.
 Also one test per row of the rulings table, and one that a `router_state` over the cap falls
 back to rule 2.
 
-## What stays true until this is built
+## Built
 
-T238's limit: in `lgcov ci` a node only the PR reached, which no baseline run ever reached, is
-inconclusive, and blocks, whether it was added or newly reached.
-
-T175's limit, as documented: a changed router is root whenever a node drifts after it,
-measured on synthetic edits only, and a router edit that routes as before is named root of
-drift it didn't cause.
+Labels read the router probe (and paired `routed` when there is no `router_state`). A router
+edit that routes as before is no longer named root. T243 lifts T238's "base's graph wasn't
+given" when the baseline isn't stale.

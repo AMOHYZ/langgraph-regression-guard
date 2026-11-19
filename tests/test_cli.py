@@ -3680,7 +3680,8 @@ def test_bench_without_synthetic_keeps_its_default_results_file(
 
 
 def test_bench_names_a_changed_router_s_source_node_root(tmp_path: Path) -> None:
-    # T175: scored from saved runs, as `lgcov bench --from-runs` does. No node's code changed.
+    # T221: scored from saved runs, as `lgcov bench --from-runs` does. No node's code changed;
+    # the router's targets differ, so classify is root.
     from lgcov.attribution import parse_benchmark
     from lgcov.cassette import Cassette, Step, runs_to_json
     from lgcov.cli import _bench_saved
@@ -3689,10 +3690,16 @@ def test_bench_names_a_changed_router_s_source_node_root(tmp_path: Path) -> None
     expected = {"root": ["classify"], "propagated": ["respond"]}
     bench = parse_benchmark("routed", {**raw, "expected": expected}, tmp_path)
     (tmp_path / "routed").mkdir()
-    for name, router, answer in (("base.json", "r1", "a"), ("head.json", "r2", "b")):
+    for name, router, answer, targets in (
+        ("base.json", "r1", "a", ["respond"]),
+        ("head.json", "r2", "b", ["lookup"]),
+    ):
         # T230: the route reaches respond in its input, so its drift is propagated.
         seen = {"route": answer}
-        steps = [Step("classify", 1, {}, "c1", router=router), Step("respond", answer, seen, "c2")]
+        steps = [
+            Step("classify", 1, {}, "c1", router=router, routed=targets),
+            Step("respond", answer, seen, "c2"),
+        ]
         (tmp_path / "routed" / name).write_text(runs_to_json([Cassette({}, steps)]), "utf-8")
     row = _bench_saved(bench, tmp_path)
     assert (row.error, row.inconclusive) == ("", ())
@@ -3845,11 +3852,13 @@ def test_bench_synthetic_writes_the_per_node_scores(tmp_path: Path) -> None:
 # T238: a node the route stopped or started reaching isn't "added or removed", whatever the
 # number of runs in the baseline.
 def _route(router: str, via_lookup: bool) -> list[Step]:
+    # T221: routed must differ when the branch does, or labels won't name the router.
     lookup = [Step("lookup", "found", {"q": 1}, "c2")] if via_lookup else []
     seen = {"found": via_lookup}
     answer = "with the order" if via_lookup else "without it"
+    targets = ["lookup"] if via_lookup else ["respond"]
     return [
-        Step("classify", 1, {"q": 1}, "c1", router=router),
+        Step("classify", 1, {"q": 1}, "c1", router=router, routed=targets),
         *lookup,
         Step("respond", answer, seen, "c3"),
     ]

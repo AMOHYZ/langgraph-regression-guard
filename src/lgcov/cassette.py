@@ -1727,10 +1727,63 @@ def _router_state(schema: Any, saved: Any) -> Any:
     return state
 
 
+def _same_targets(left: Sequence[Any] | None, right: Sequence[Any] | None) -> bool:
+    """T221: route targets match, order ignored for parallel Sends (as for `goto`)."""
+    if left is None or right is None:
+        return left is right
+
+    def key(value: object) -> str:
+        return json.dumps(value, sort_keys=True, default=str)
+
+    return sorted(key(v) for v in left) == sorted(key(v) for v in right)
+
+
+def route_changed_runs(
+    runs: Sequence[Cassette],
+    fresh: Sequence[Sequence[Step]],
+    probes: Sequence[ProbeStep],
+) -> dict[str, set[int]]:
+    """T221: run indices where a changed router's route differed from base's. Rule 1: the probe's
+    `routed` vs the recording. Rule 2: paired `routed` on base and head when there was no probe
+    (no `router_state`). A raised or live probe never counts as a change."""
+    hits: dict[str, set[int]] = {}
+    probed: set[tuple[int, int]] = set()
+    for p in probes:
+        if p.routed is None and not p.raised:
+            continue
+        probed.add((p.run, p.step))
+        if p.raised or p.routed is None:
+            continue
+        steps = runs[p.run].steps if 0 <= p.run < len(runs) else []
+        recorded = steps[p.step] if 0 <= p.step < len(steps) else None
+        if recorded is None or recorded.node != p.node:
+            continue
+        if not _same_targets(p.routed, recorded.routed):
+            hits.setdefault(p.node, set()).add(p.run)
+    for i, (base, head) in enumerate(zip(runs, fresh, strict=True)):
+        by_base: dict[str, list[tuple[int, Step]]] = {}
+        for j, step in enumerate(base.steps):
+            by_base.setdefault(step.node, []).append((j, step))
+        by_head: dict[str, list[Step]] = {}
+        for step in head:
+            by_head.setdefault(step.node, []).append(step)
+        for node, visits in by_base.items():
+            for (j, recorded), live in zip(visits, by_head.get(node, []), strict=False):
+                if (i, j) in probed:
+                    continue
+                if recorded.router is None or live.router is None or recorded.router == live.router:
+                    continue
+                if recorded.routed is None or live.routed is None:
+                    continue
+                if not _same_targets(recorded.routed, live.routed):
+                    hits.setdefault(node, set()).add(i)
+    return hits
+
+
 def probe_routers(graph: Any, runs: Sequence[Cassette]) -> tuple[ProbeStep, ...]:
     """T221: run each changed router on base's recorded `router_state`, offline. The probe holds
     the targets it returned (`routed`). A router that reaches for the network needs a live call
-    and is left as `raised`, as a model node is. Labels don't read these probes yet."""
+    and is left as `raised`, as a model node is. Labels read these via `route_changed_runs`."""
     edited = changed_routers(graph, runs)
     found: list[ProbeStep] = []
     for i, run in enumerate(runs):

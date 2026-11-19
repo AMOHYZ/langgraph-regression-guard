@@ -67,6 +67,7 @@ from lgcov.cassette import (
     repeat_steps,
     replay,
     replay_run,
+    route_changed_runs,
     runs_from_json,
     runs_to_json,
     same_input,
@@ -767,10 +768,19 @@ def test_a_probe_that_matches_no_recorded_step_is_refused(forged: ProbeStep) -> 
         judge_probes([base], [forged])
 
 
-def test_judge_probes_leaves_a_probe_of_a_router_to_a_later_lgcov() -> None:
-    # T221: the candidate can hold a router's probe; no label reads it yet, so it doesn't decide.
+def test_judge_probes_leaves_a_probe_of_a_router_to_route_hits() -> None:
+    # T221 follow-up: node probes stay in judge_probes; router probes go to route_changed_runs.
     base = record(_one_node(lambda s: s), {"x": 1})
     assert judge_probes([base], [ProbeStep(0, 0, "n", routed=["b"])]) == {}
+
+
+def test_a_router_probe_that_returns_base_s_targets_is_not_a_route_change() -> None:
+    # T221: same targets on base's router_state → the router is not named as a routing root.
+    base = record(_branching(0), {"x": 1})
+    same = ProbeStep(0, 0, "a", routed=["b"])  # base's routed for x=1 at threshold 0
+    assert route_changed_runs([base], [base.steps], [same]) == {}
+    flipped = ProbeStep(0, 0, "a", routed=["c"])
+    assert route_changed_runs([base], [base.steps], [flipped]) == {"a": {0}}
 
 
 def test_a_step_keeps_the_targets_and_state_its_router_saw() -> None:
@@ -792,7 +802,9 @@ def test_a_changed_router_is_probed_on_base_s_router_state() -> None:
     edited = probe_routers(_branching(5), [base])
     assert len(edited) == 1
     assert edited[0].node == "a" and edited[0].routed == ["c"]  # threshold 5: x=1 → c
-    assert edited[0].raised == "" and judge_probes([base], edited) == {}
+    assert edited[0].raised == ""
+    assert route_changed_runs([base], [base.steps], edited) == {"a": {0}}
+    assert judge_probes([base], edited) == {}  # node probes only
 
 
 # T193, 3b-2: a unit inside a step is compared and probed by its path, `box.inside`.
