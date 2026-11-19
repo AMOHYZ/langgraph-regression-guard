@@ -52,16 +52,19 @@ def test_code_checks_on_an_unchanged_demo_run_have_no_new_failures() -> None:
 
 
 def test_harm_status_for_demo_roots_presence_checks_do_not_measure() -> None:
-    """Today's demo taxonomy is same-node node_visited; those roots stay unmeasured."""
+    """Demo path checks are same-node presence or sequences with no node after the root."""
     specs = load_taxonomy(ROOT / TAXONOMY_BY_AGENT["demo"]).kpi_specs
     covered = {s.name: s.node for s in specs}
     checks = {s.name: dict(s.check) for s in specs if s.check is not None}
+    # With the run path, presence on the root and sequences that never name a
+    # node after it leave those roots unmeasured (T262 observe-root).
     statuses = root_harm_statuses(
         ("lookup_order", "respond", "plan"),
         covered,
         failed_kpis=frozenset(),
         judged_kpis=frozenset(covered),
         kpi_checks=checks,
+        path=("classify", "lookup_order", "respond"),
     )
     assert statuses == {
         "lookup_order": "unmeasured",
