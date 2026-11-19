@@ -1,10 +1,10 @@
 # The cassette schema (design, T193)
 
 **Status:** `lgcov record` writes schema 2 by default (`--schema 1` still writes schema 1).
-The reader shipped in lgcov 0.4.0 (#158, #159). Units inside a subgraph are recorded and labelled.
-A secret-named key is stored as `<redacted>` (section 6, PR 5). A tool call is a unit of its
-tool node and is served whole (section 6, PR 6). The rulings in
-section 7 were decided on 17 November 2026.
+The reader shipped in lgcov 0.4.0 (#158, #159). Section 6 PRs 5–12 are built: secret redaction,
+tool and agent units, routes and router-probe labels (T221), samples in the deciding job (T229),
+chat-model parts in serving and labels (T239), stale-baseline/`graph` (T243), and transient tool
+status (T248). The rulings in section 7 were decided on 17 November 2026.
 
 lgcov records a baseline once and replays each PR against it. Several planned tasks need the
 recording to hold more than it does. This page is the one schema change that carries them all, so
@@ -286,17 +286,18 @@ field after the flip is optional.
    container rule).
 4. **Flip:** `lgcov record` writes schema 2 by default. `--schema 1` writes schema 1. The demo
    baselines are re-recorded. Release R2 is 0.6.0.
-5. **Redaction** at write time, for a secret-named key. Other patterns stay a design.
-6. **Tool units.** Each tool call is recorded under its tool node and served whole. The
+5. **Redaction** at write time, for a secret-named key. Built. Other patterns stay a design.
+6. **Tool units.** Built: each tool call is recorded under its tool node and served whole. The
    safe-to-re-run probe is still open.
-7. **Units of a graph started inside a node or a tool**, served only whole. Named `agent`.
-8. **Routes** (T221): `routed`, `router_state` and the router probe. Labels read the probe
-   (name a changed router only when the route differed).
-9. **Samples** (T229): `lgcov record --samples K`. The deciding job reads them in `noise_check`.
-10. **Parts** (T239), with a chat model's fields. Serving and labels read them.
-11. **Stale baseline** (T243): each part's `source` is checked against the base checkout; ci then
-    reads `graph` for T238.
-12. **Transient tool status** (T248): `timeout`, `rate_limited` and `server_error` are not checked.
+7. **Units of a graph started inside a node or a tool**, served only whole. Named `agent`. Built.
+8. **Routes** (T221): Built. Labels name a changed router only when the route differed.
+9. **Samples** (T229): Built. `lgcov record --samples K`; the deciding job reads them in
+   `noise_check`.
+10. **Parts** (T239): Built. Chat-model fields; serving and labels read them.
+11. **Stale baseline** (T243): Built. Each part's `source` is checked; ci then reads `graph` for
+    T238.
+12. **Transient tool status** (T248): Built. `timeout`, `rate_limited` and `server_error` are not
+    checked.
 
 Each of 5 to 12 ships when ready, with no new schema number. It re-records the demo baseline only if
 the demo graph gains that field. A PR that changes a label also updates the docs that state lgcov's
