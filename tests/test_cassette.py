@@ -983,9 +983,60 @@ def test_an_async_subgraph_s_unit_keeps_where_its_command_went() -> None:
     assert (jump.goto, jump.output, b.node) == (["b"], {"route": "jumped"}, "b")
 
 
-def test_a_graph_started_inside_a_node_gets_no_units_yet() -> None:
-    (calls,) = record(graph_inside_node(), {"x": 1}, units=True).steps
-    assert calls.units is None  # T193's section 6, PR 7
+def test_a_graph_started_inside_a_node_is_recorded_as_an_agent_unit() -> None:
+    # T193 section 6, PR 7: an invoke inside a node is recorded under an agent unit and
+    # served only whole through that node (its inner visits are not served on their own).
+    graph = graph_inside_node()
+    cassette = record(graph, {"x": 1}, units=True)
+    (calls,) = cassette.steps
+    assert calls.units is not None and len(calls.units) == 1
+    agent = calls.units[0]
+    assert (agent.node, agent.kind) == ("agent", "agent")
+    assert [u.node for u in agent.units or ()] == ["a", "b"]
+    assert all(u.input == {"x": 1} and u.output == {"x": 1} for u in agent.units or ())
+    done = replay_run(graph, cassette, serve=True, units=True)
+    assert done.drifts == ()
+    assert {c.node for c in done.calls} == {"calls"}
+    assert all(c.how == "served" for c in done.calls)
+
+
+def test_a_graph_started_inside_a_tool_is_recorded_under_an_agent_unit() -> None:
+    from langchain_core.messages import AIMessage
+    from langgraph.graph.message import add_messages
+    from langgraph.prebuilt import ToolNode
+
+    class State(TypedDict):
+        messages: Annotated[list[object], add_messages]
+
+    ran: list[str] = []
+
+    def ask(q: str) -> str:
+        """Ask an inner graph."""
+        ran.append(q)
+        return str(linear().invoke({"x": int(q)})["x"])
+
+    def agent(state: State) -> State:
+        call = {"name": "ask", "args": {"q": "1"}, "id": "c1"}
+        return {"messages": [AIMessage("", tool_calls=[call])]}
+
+    built = StateGraph(State)
+    built.add_node("agent", agent)
+    built.add_node("tools", ToolNode([ask]))
+    built.add_edge(START, "agent")
+    built.add_edge("agent", "tools")
+    built.add_edge("tools", END)
+    compiled = built.compile()
+    cassette = record(compiled, {"messages": []}, units=True)
+    (tools,) = [s for s in cassette.steps if s.node == "tools"]
+    assert tools.units is not None
+    ask_unit, agent_unit = tools.units
+    assert (ask_unit.node, ask_unit.kind, ask_unit.call_id) == ("ask", "tool", "c1")
+    assert (agent_unit.node, agent_unit.kind, agent_unit.call_id) == ("agent", "agent", "c1")
+    assert [u.node for u in agent_unit.units or ()] == ["a", "b"]
+    ran.clear()
+    done = replay_run(compiled, cassette, serve=True, units=True)
+    assert done.drifts == () and ran == []
+    assert not any(c.node.startswith("tools.agent") for c in done.calls)
 
 
 def test_a_recording_with_units_replays_as_its_twin() -> None:
