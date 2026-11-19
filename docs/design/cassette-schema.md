@@ -293,7 +293,7 @@ field after the flip is optional.
 8. **Routes** (T221): `routed`, `router_state` and the router probe. Labels still use T175
    until a follow-up reads the probe.
 9. **Samples** (T229): `lgcov record --samples K`. The deciding job does not read them yet.
-10. **Parts** (T239), with a chat model's fields.
+10. **Parts** (T239), with a chat model's fields. Serving and labels don't read them yet.
 
 Each of 5 to 10 ships when ready, with no new schema number. It re-records the demo baseline only if
 the demo graph gains that field. A PR that changes a label also updates the docs that state lgcov's

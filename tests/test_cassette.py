@@ -1153,6 +1153,54 @@ def test_fill_samples_runs_each_node_k_more_times_on_its_recorded_input() -> Non
     assert fill_samples(graph, cassette, 0) == cassette
 
 
+def test_a_chat_model_s_fields_are_recorded_as_parts() -> None:
+    # T239: a LangChain chat model's model_name and temperature become parts of the node that
+    # holds them. Serving and labels don't read them yet.
+    from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage, BaseMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from lgcov.cassette import attach_parts, chat_parts
+
+    class Mini(BaseChatModel):
+        model_name: str = "mini-1"
+        temperature: float = 0.2
+
+        def _generate(
+            self,
+            messages: list[BaseMessage],
+            stop: list[str] | None = None,
+            run_manager: CallbackManagerForLLMRun | None = None,
+            **kwargs: object,
+        ) -> ChatResult:
+            return ChatResult(generations=[ChatGeneration(message=AIMessage("ok"))])
+
+        @property
+        def _llm_type(self) -> str:
+            return "mini"
+
+    llm = Mini()
+
+    def respond(state: S) -> S:
+        return {"route": str(llm.invoke("hi").content)}
+
+    graph = _one_node(respond)
+    table, by_node = chat_parts(graph)
+    assert set(by_node["n"]) == {"n.model_name", "n.temperature"}
+    assert "fingerprint" in table["n.model_name"]
+    assert table["n.model_name"]["fingerprint"] != table["n.temperature"]["fingerprint"]
+    cassette = attach_parts(record(graph, {"x": 1}), by_node)
+    assert cassette.steps[0].parts == ["n.model_name", "n.temperature"]
+    edited = Mini(model_name="mini-2", temperature=0.2)
+
+    def other_node(state: S) -> S:
+        return {"route": str(edited.invoke("hi").content)}
+
+    other, _ = chat_parts(_one_node(other_node))
+    assert other["n.model_name"]["fingerprint"] != table["n.model_name"]["fingerprint"]
+
+
 # T211: repeats run a node live, K times on each input base recorded; `judge_repeats` compares
 # base's samples (the recording and base's repeats) with head's.
 BASE_TEXT = "the order ships on friday"

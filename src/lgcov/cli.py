@@ -91,7 +91,9 @@ from lgcov.cassette import (
     Replay,
     Step,
     accept_nodes,
+    attach_parts,
     changed_nodes,
+    chat_parts,
     check_scheme,
     compared_run,
     fill_samples,
@@ -809,12 +811,15 @@ def _record(argv: list[str]) -> int:
     runs = [record(graph, i, units=args.schema == 2) for i in inputs]
     if args.samples:
         runs = [fill_samples(graph, r, args.samples) for r in runs]
+    parts_table, by_node = chat_parts(graph)  # T239: chat-model fields as parts
+    if by_node:
+        runs = [attach_parts(r, by_node) for r in runs]
     out = Path(cfg.cassette_dir) / "baseline.json"
     if args.schema == 1:
         _write_runs(out, runs)
     else:  # T193: the recording's fields beside today's runs
         out.parent.mkdir(parents=True, exist_ok=True)
-        recording = Recording(runs, 2, SCHEME, graph_shape(graph))
+        recording = Recording(runs, 2, SCHEME, graph_shape(graph), parts_table or None)
         out.write_text(recording_to_json(recording), encoding="utf-8")
     note = f" with {args.samples} samples" if args.samples else ""
     print(
