@@ -411,6 +411,18 @@ def test_cli_record_schema_2_records_the_units_inside_a_subgraph(
     assert "stored as <redacted>" in " ".join(capsys.readouterr().out.split())
 
 
+def test_cli_record_samples_stores_k_re_runs_on_each_step(tmp_path: Path) -> None:
+    # T229: --samples K writes base's noise samples; the deciding job doesn't read them yet.
+    cfg = _demo_config(tmp_path)
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text('[{"question": "What are your hours?"}]')
+    assert main(["record", "--config", str(cfg), "--inputs", str(inputs), "--samples", "2"]) == 0
+    steps = json.loads((tmp_path / "cassettes" / "baseline.json").read_text())["runs"][0]["steps"]
+    for step in steps:
+        assert step.get("samples") is not None and len(step["samples"]) == 2
+        assert all("output" in s for s in step["samples"])
+
+
 @pytest.mark.parametrize("body", ['{"question": "x"}', "[1, 2]", "not json"])
 def test_cli_record_bad_inputs_exits_two(
     tmp_path: Path, body: str, capsys: pytest.CaptureFixture[str]

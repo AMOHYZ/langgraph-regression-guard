@@ -94,6 +94,7 @@ from lgcov.cassette import (
     changed_nodes,
     check_scheme,
     compared_run,
+    fill_samples,
     fingerprint_session,
     graph_shape,
     judge_probes,
@@ -783,7 +784,18 @@ def _record(argv: list[str]) -> int:
         "--schema 1 writes the runs only. A tool call is a unit of its tool node and is "
         "served whole when its code and arguments match",
     )
+    ap.add_argument(
+        "--samples",
+        type=int,
+        default=0,
+        metavar="K",
+        help="T229: run each plain node's code K more times on its recorded input and store "
+        "the outputs as samples (for the noise rule). 0, the default, stores none. The "
+        "deciding job does not read them yet",
+    )
     args = ap.parse_args(argv)
+    if args.samples < 0:
+        ap.error("--samples must be 0 or more")
     try:
         cfg = load_config(args.config, {"graph_entrypoint": args.graph})
         graph = _load_graph(cfg.graph_entrypoint)
@@ -795,6 +807,8 @@ def _record(argv: list[str]) -> int:
         print(f"lgcov record: {exc}", file=sys.stderr)
         return EXIT_ERROR
     runs = [record(graph, i, units=args.schema == 2) for i in inputs]
+    if args.samples:
+        runs = [fill_samples(graph, r, args.samples) for r in runs]
     out = Path(cfg.cassette_dir) / "baseline.json"
     if args.schema == 1:
         _write_runs(out, runs)
@@ -802,7 +816,10 @@ def _record(argv: list[str]) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         recording = Recording(runs, 2, SCHEME, graph_shape(graph))
         out.write_text(recording_to_json(recording), encoding="utf-8")
-    print(f"recorded {len(runs)} runs to {out}" + (" in schema 2" if args.schema == 2 else ""))
+    note = f" with {args.samples} samples" if args.samples else ""
+    print(
+        f"recorded {len(runs)} runs to {out}" + (" in schema 2" if args.schema == 2 else "") + note
+    )
     return 0
 
 

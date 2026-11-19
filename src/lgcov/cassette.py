@@ -76,8 +76,7 @@ class Step:
     # fingerprint, and in cassettes recorded before this was kept.
     router: str | None = None
     # T193: a unit's fields in recording schema 2 (docs/design/cassette-schema.md, section 2).
-    # This lgcov reads and keeps them, and neither records nor acts on them yet: each is None
-    # unless a newer lgcov recorded the step, and a step saves without it.
+    # Each is None unless a newer lgcov recorded the step, and a step saves without it.
     kind: str | None = None  # node, tool or agent; None reads as node
     units: list["Step"] | None = None  # the units that ran inside this one, in start order
     routed: list[Any] | None = None  # T221: the targets the router returned
@@ -85,7 +84,7 @@ class Step:
     parts: list[str] | None = None  # T239: names in the recording's `parts`
     call_id: str | None = None  # T239: a tool call's id, or for an agent the call that began it
     status: str | None = None  # T248: how a tool call ended; any text, until its values settle
-    samples: list[Sample] | None = None  # T229: base's code run again on this input
+    samples: list[Sample] | None = None  # T229: K re-runs on this input (`lgcov record --samples`)
 
 
 # A step always saves these. It saves any other field only when set, so a step without that field
@@ -1695,6 +1694,51 @@ def repeat_steps(
         if s.node in nodes
         for _ in range(k)
     )
+
+
+def _samples_of(
+    graph: Any, step: Step, k: int, fns: Mapping[str, FunctionType | None], given: Mapping[str, Any]
+) -> list[Sample] | None:
+    """K live re-runs of `step` on its recorded input, as `Sample`s. None when K is 0, the node
+    has no plain function or input, or every re-run raised."""
+    if k < 1 or step.input is None:
+        return None
+    fn, rebuild = fns.get(step.node), given.get(step.node)
+    if fn is None:
+        return None
+    found: list[Sample] = []
+    for _ in range(k):
+        probe = _probe_step(0, 0, step, fn, live=True, given=rebuild)
+        if probe.raised:
+            continue
+        sample: Sample = {"output": probe.output}
+        if probe.goto is not None:
+            sample["goto"] = probe.goto
+        found.append(sample)
+    return found or None
+
+
+def fill_samples(graph: Any, cassette: Cassette, k: int) -> Cassette:
+    """T229: attach K live re-runs of each plain node's code on its recorded input as `samples`.
+    The recording's own output stays on the step; `samples` holds only the re-runs. Units inside
+    a subgraph are filled the same way. K < 1 leaves the cassette unchanged."""
+    if k < 1:
+        return cassette
+
+    def one(g: Any, step: Step) -> Step:
+        nodes = getattr(g, "nodes", {})
+        fns = {n: _plain(getattr(spec, "bound", None)) for n, spec in nodes.items()}
+        given = {n: _node_input(spec) for n, spec in nodes.items()}
+        samples = _samples_of(g, step, k, fns, given)
+        units = step.units
+        sub = getattr(nodes.get(step.node), "bound", None)
+        if units and isinstance(sub, Pregel):
+            units = [one(sub, u) for u in units]
+        if samples is None and units == step.units:
+            return step
+        return replace(step, samples=samples, units=units)
+
+    return Cassette(cassette.inputs, [one(graph, s) for s in cassette.steps])
 
 
 def judge_repeats(

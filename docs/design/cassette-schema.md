@@ -292,7 +292,7 @@ field after the flip is optional.
 7. **Units of a graph started inside a node or a tool**, served only whole. Named `agent`.
 8. **Routes** (T221): `routed`, `router_state` and the router probe. Labels still use T175
    until a follow-up reads the probe.
-9. **Samples** (T229): `lgcov record --samples K`.
+9. **Samples** (T229): `lgcov record --samples K`. The deciding job does not read them yet.
 10. **Parts** (T239), with a chat model's fields.
 
 Each of 5 to 10 ships when ready, with no new schema number. It re-records the demo baseline only if
