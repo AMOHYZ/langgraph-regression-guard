@@ -1199,6 +1199,37 @@ def test_a_chat_model_s_fields_are_recorded_as_parts() -> None:
 
     other, _ = chat_parts(_one_node(other_node))
     assert other["n.model_name"]["fingerprint"] != table["n.model_name"]["fingerprint"]
+    assert "file" in table["n.model_name"] and "source" in table["n.model_name"]
+    assert table["n.model_name"]["source"] == table["n.temperature"]["source"]
+
+
+def test_a_parts_source_mismatch_against_the_checkout_is_stale(tmp_path: Path) -> None:
+    # T243: the deciding job recomputes each part's source from the base checkout. A mismatch
+    # means the recording is older than base's code.
+    from lgcov.cassette import Part, source_hash, stale_parts
+
+    file = tmp_path / "graph.py"
+    file.write_text("x = 1\n", encoding="utf-8")
+    parts: dict[str, Part] = {
+        "n.model_name": {
+            "fingerprint": "a",
+            "file": "graph.py",
+            "source": source_hash("x = 1\n"),
+        }
+    }
+    assert stale_parts(parts, tmp_path) == []
+    file.write_text("x = 2\n", encoding="utf-8")
+    assert stale_parts(parts, tmp_path) == ["n.model_name"]
+
+
+def test_graph_node_names_lists_top_level_nodes() -> None:
+    # T243: once the baseline isn't stale, ci reads these as base's graph for T238.
+    from lgcov.cassette import graph_node_names
+
+    assert graph_node_names({"nodes": {"a": {}, "b": {"nodes": {"c": {}}}}}) == frozenset(
+        {"a", "b"}
+    )
+    assert graph_node_names(None) is None
 
 
 # T211: repeats run a node live, K times on each input base recorded; `judge_repeats` compares

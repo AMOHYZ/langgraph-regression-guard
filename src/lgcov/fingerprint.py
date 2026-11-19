@@ -181,6 +181,12 @@ def _parsed(text: str) -> ast.Module:
     return ast.parse(text)
 
 
+def tree_hash(text: str) -> str:
+    """T243: a 16-hex hash of a Python file's syntax tree, as T212 reads source. The deciding job
+    recomputes it from a checkout to tell a stale recording from base's code."""
+    return hashlib.sha256(_tree_text(_parsed(text)).encode()).hexdigest()[:16]
+
+
 def _tree_text(node: object, in_fstring: bool = False) -> str:
     """T212: a syntax tree as text that is the same on every Python lgcov supports, which
     `ast.dump` and `ast.unparse` aren't. Positions aren't in it, so neither are comments or layout.

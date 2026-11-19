@@ -161,7 +161,7 @@ unit's name is half the answer. Its parts are the other half.
    them may not be the PR's doing. It has three readings: an outside change; a stale base
    recording, where base moved and nobody re-recorded; or a value built from a file the PR
    did touch. Telling a stale recording from an outside change is the stale-baseline question
-   (T243). The check stays open.
+   (T243). Built for chat-model parts' `source`; the outside-part reading stays open.
 5. **A check this makes cheap.** Serve base's recorded output at a root, run again, and see
    whether the drift after it goes away. Not designed here.
 
@@ -217,8 +217,8 @@ are read. On the recording:
 |---|---|---|
 | `schema` | All | The recording's schema number. There is none today |
 | `scheme` | T212 | Which fingerprint scheme the recording uses, so the old one can go (`_Raw` in `fingerprint.py`) |
-| `graph` | T238 | The node names of the graph that was recorded. Telling a stale list from a current one is open (T243) |
-| `parts` | T239 | Each part's name, its fingerprint and, for the comment, its file |
+| `graph` | T238 | The node names of the graph that was recorded. T243 tells a stale list from a current one |
+| `parts` | T239 | Each part's name, its fingerprint, its file and `source` (T243) |
 
 - **`samples` sit in the recording** so the job that decides can apply the noise rule without
   running base's code. It reads them from the base checkout, which the PR can't write. Base's
@@ -239,8 +239,9 @@ are read. On the recording:
 
 ## Not verified
 
-- **T229, T243 and T248 have no text in this repo yet.** This page states each as its task
-  was given. T193 has no design of its own either: its fields here are what this page needs.
+- **T229 and T248 have no text in this repo yet.** T243's stale check is in
+  [`cassette-schema.md`](cassette-schema.md) ruling 4. T193 has no design of its own either: its
+  fields here are what this page needs.
 - **Nothing was run on a deep agent.** What section 1 says of one is read from lgcov's,
   LangChain's and deepagents' code.
 - **How a recorder sees inside a tool call,** where a sub-agent runs, and how it ties a file

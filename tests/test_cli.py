@@ -712,12 +712,17 @@ def test_a_forged_candidate_file_can_t_unblock_the_container_s_drift(
 ) -> None:
     # The trust rules: the PR's code writes units and probes, so they can't turn the container's
     # drift non-blocking. It keeps its label unless a unit inside is root, which blocks too.
+    # T243: a forged unit not in base's graph is root (added), which also blocks.
     _box_edit(tmp_path, monkeypatch)
     _forged(drop, head)
     assert main(["ci", "--report", "f.md", "--candidate-in", "forged.json"]) == 1
     rows = _labels_in("f.md")
     blocks = ("root", "inconclusive")
-    assert rows.get("box", "").startswith(blocks) or rows.get("box.inside") == "root"
+    assert (
+        rows.get("box", "").startswith(blocks)
+        or rows.get("box.inside") == "root"
+        or any(kind.startswith(blocks) for kind in rows.values())
+    )
     assert not any(n.startswith("box.") and kind == "root" for n, kind in rows.items()) or (
         "box" not in rows
     )
@@ -3917,16 +3922,40 @@ def test_cli_ci_calls_a_node_some_baseline_run_reached_propagated(
     assert f"| `lookup_order` | propagated | {n}/{n} |" in report
 
 
-def test_cli_ci_calls_a_node_only_the_pr_reached_inconclusive(
+def test_cli_ci_calls_a_node_only_the_pr_reached_propagated_when_base_graph_has_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The limit: ci doesn't know base's graph, even with a base checkout, until the baseline
-    # recording holds it. Added or newly reached, the node blocks either way.
+    # T243: with a non-stale schema-2 baseline that holds `graph`, ci reads base's node names
+    # from the recording. lookup_order is in base's graph, so only the PR reaching it is
+    # propagated (a run that newly took that route), not inconclusive.
     report = _rerouted_ci(tmp_path, monkeypatch, [1])
-    assert "| `lookup_order` | inconclusive (only the PR ran it, and base's graph wasn't given" in (
-        report
-    )
-    assert "| `lookup_order` | root" not in report and "| `lookup_order` | propagated" not in report
+    assert "| `lookup_order` | propagated | 1/1 |" in report
+    assert "base's graph wasn't given" not in report
+
+
+def test_cli_ci_blocks_when_the_baseline_parts_are_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # T243: base's code no longer matches a part's source → harness error with re-record.
+    from lgcov.cassette import source_hash
+
+    demo = DEMO_GRAPH.read_text(encoding="utf-8")
+    _ci_project(tmp_path, monkeypatch, demo)
+    baseline = tmp_path / "cassettes" / "baseline.json"
+    body = json.loads(baseline.read_text(encoding="utf-8"))
+    body["parts"] = {
+        "respond.model_name": {
+            "fingerprint": "x",
+            "file": "graph.py",
+            "source": source_hash("old = True\n"),
+        }
+    }
+    baseline.write_text(json.dumps(body), encoding="utf-8")
+    (tmp_path / "base").mkdir()
+    (tmp_path / "base" / "graph.py").write_text(demo, encoding="utf-8")
+    code, report, _ = _run_ci(tmp_path, "--base-dir", "base")
+    assert code == 2
+    assert "The baseline is stale" in report and "lgcov record" in report
 
 
 def test_bench_synthetic_names_no_root_just_because_one_side_ran_it(tmp_path: Path) -> None:
