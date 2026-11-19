@@ -21,7 +21,14 @@
           "output": {
             "needs_tool": true
           },
-          "router": "6784502f67a4c264"
+          "routed": [
+            "lookup_order"
+          ],
+          "router": "6784502f67a4c264",
+          "router_state": {
+            "needs_tool": true,
+            "question": "Where is my order?"
+          }
         },
         {
           "code": "f1b6ffc12de353cb",
@@ -62,7 +69,14 @@
           "output": {
             "needs_tool": false
           },
-          "router": "6784502f67a4c264"
+          "routed": [
+            "respond"
+          ],
+          "router": "6784502f67a4c264",
+          "router_state": {
+            "needs_tool": false,
+            "question": "What are your hours?"
+          }
         },
         {
           "code": "45ccfd6e06141387",

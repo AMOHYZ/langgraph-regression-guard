@@ -14,7 +14,7 @@ from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial, wraps
 from statistics import fmean
-from types import CodeType, FunctionType
+from types import CodeType, FunctionType, MethodType
 from typing import Any, Literal, NoReturn, NotRequired, TypedDict
 
 import httpx
@@ -514,8 +514,11 @@ async def _cancel_the_rest() -> None:
 
 
 def _router_code(path: Any) -> Any:
-    # T164: `func`, or `afunc` on an async router.
-    return getattr(getattr(path, "func", None) or getattr(path, "afunc", None), "__code__", None)
+    # T164: `func`, or `afunc` on an async router. T221: follow `__wrapped__` past a recording wrap.
+    fn = getattr(path, "func", None) or getattr(path, "afunc", None)
+    while fn is not None and getattr(fn, "__wrapped__", None) is not None:
+        fn = fn.__wrapped__
+    return getattr(fn, "__code__", None)
 
 
 def _routers(graph: Any, prefix: str = "") -> dict[CodeType, str]:
@@ -604,12 +607,14 @@ def _attributed(
     failed: Callable[[str, Exception], None],
     recorded: Callable[[str, Any, str | None], Any] | None = None,
     bag: Any = None,
+    routes: Any = None,
 ) -> Any:
     """T109: a copy of a subgraph whose nodes' errors name them `<prefix><node>`. It runs
     as it is otherwise: a subgraph's nodes are never served.
 
     T193: with `recorded`, each plain node is wrapped by it instead, given its name with the
-    subgraph's (`answer.respond`), its spec and its fingerprint, so `_run` records it as a unit."""
+    subgraph's (`answer.respond`), its spec and its fingerprint, so `_run` records it as a unit.
+    T221: with `routes`, each conditional edge records its targets and the state it saw."""
     original = getattr(graph, "nodes", {})
     nodes = dict(original)
     codes = _codes(graph) if recorded is not None else {}
@@ -620,12 +625,14 @@ def _attributed(
             named = partial(failed, f"{prefix}{name}")
             nodes[name] = _around(spec, partial(_naming, named), partial(_anaming, named))
         elif isinstance(spec.bound, Pregel):
-            inner = _attributed(spec.bound, f"{prefix}{name}.", failed, recorded, bag)
+            inner = _attributed(spec.bound, f"{prefix}{name}.", failed, recorded, bag, routes)
             nodes[name] = spec.copy({"bound": inner})
         elif bag is not None:
             hooked = _hook_tool_node(spec, f"{prefix}{name}", bag)
             if hooked is not None:
                 nodes[name] = hooked
+        if routes is not None and name in nodes:
+            nodes[name] = _hook_routes(nodes[name], f"{prefix}{name}", routes)
     return graph.copy({"nodes": nodes}) if original else graph
 
 
@@ -884,6 +891,62 @@ def _abracket(fn: Callable[..., Any], parent: str, bag: _ToolBag) -> Callable[..
     return call
 
 
+class _RouteBag:
+    """T221: each conditional edge's router call during one run, by the source node's path."""
+
+    def __init__(self) -> None:
+        self.made: dict[str, list[tuple[Any, list[Any]]]] = {}
+        self.lock = threading.Lock()
+
+    def take(self, source: str, state: Any, targets: Any) -> None:
+        routed = _goto_saved(targets)
+        held = state.model_dump() if isinstance(state, BaseModel) else deepcopy(state)
+        with self.lock:
+            self.made.setdefault(source, []).append((held, routed))
+
+    def pop(self, source: str) -> tuple[Any, list[Any]] | None:
+        with self.lock:
+            held = self.made.get(source) or []
+            return held.pop(0) if held else None
+
+
+def _hook_route_writer(writer: Any, source: str, bag: _RouteBag) -> Any:
+    """A copy of a `_route` writer whose path records the state and targets (T221)."""
+    if getattr(writer, "name", None) != "_route":
+        return writer
+    branch = getattr(getattr(writer, "func", None), "__self__", None)
+    path = getattr(branch, "path", None)
+    orig = getattr(path, "func", None)
+    if branch is None or path is None or not callable(orig):
+        return writer
+    path = copy(path)
+
+    @wraps(orig)
+    def wrap(state: Any, *args: Any, **kwargs: Any) -> Any:
+        out = orig(state, *args, **kwargs)
+        bag.take(source, state, out)
+        return out
+
+    path.func = wrap
+    afunc = getattr(path, "afunc", None)
+    if isinstance(afunc, partial) and afunc.args:
+        path.afunc = partial(afunc.func, *afunc.args[:-1], wrap)
+    branch = branch._replace(path=path)
+    writer = copy(writer)
+    writer.func = MethodType(type(branch)._route, branch)
+    writer.afunc = MethodType(type(branch)._aroute, branch)
+    return writer
+
+
+def _hook_routes(spec: Any, source: str, bag: _RouteBag) -> Any:
+    """A copy of a node whose conditional-edge routers record `routed` and `router_state`."""
+    writers = getattr(spec, "writers", None)
+    if not writers:
+        return spec
+    hooked = [_hook_route_writer(w, source, bag) for w in writers]
+    return spec if hooked == list(writers) else spec.copy({"writers": hooked})
+
+
 def _hook_tool_node(spec: Any, parent: str, bag: _ToolBag) -> Any | None:
     """A copy of a tool node whose calls are recorded, and served whole when one matches."""
     bound = getattr(spec, "bound", None)
@@ -1076,6 +1139,7 @@ def _run(
 
     original = getattr(graph, "nodes", {})  # an object with only .stream() runs as it is
     nodes = dict(original)
+    routes = _RouteBag()
     if bag is not None:
         for name, spec in list(nodes.items()):
             hooked = _hook_tool_node(spec, name, bag)
@@ -1092,11 +1156,15 @@ def _run(
     for name, spec in original.items():  # T109: a subgraph's errors name its own node
         if isinstance(getattr(spec, "bound", None), Pregel):
             unit = as_unit if tree or name in boxed else None
-            inner = _attributed(spec.bound, f"{name}.", failed, unit, bag)
+            inner = _attributed(spec.bound, f"{name}.", failed, unit, bag, routes)
             nodes[name] = spec.copy({"bound": inner})
+    for name in list(nodes):  # T221: top-level routers, after node wraps
+        if name != START:
+            nodes[name] = _hook_routes(nodes[name], name, routes)
     routers = _routers(graph)
-    routed = _router_prints(graph, recorded=[*served, *like])
-    prints: dict[tuple[str, ...], dict[str, str | None]] = {(): routed}  # T193: by subgraph
+    prints: dict[tuple[str, ...], dict[str, str | None]] = {
+        (): _router_prints(graph, recorded=[*served, *like])
+    }
     runner = graph.copy({"nodes": nodes}) if original else graph
     steps: list[Step] = []
 
@@ -1117,6 +1185,9 @@ def _run(
             else:
                 goto = _goto_saved(call[2].goto) if isinstance(call[2], Command) else None
                 step = Step(node, update, call[1], call[3], goto, prints[names].get(node))
+            trip = routes.pop(path + node)
+            if trip is not None:
+                step = replace(step, router_state=trip[0], routed=trip[1])
             steps.extend([step] if not ns else [])
             if tree is not None:
                 tree.file(ns, step)
@@ -1436,6 +1507,88 @@ def changed_nodes(graph: Any, runs: Sequence[Cassette]) -> set[str]:
         for s in r.steps
         if s.code is not None and codes.get(s.node) not in (None, s.code)
     }
+
+
+def changed_routers(graph: Any, runs: Sequence[Cassette]) -> set[str]:
+    """T221: recorded source nodes whose router fingerprint differs in this graph."""
+    prints = _router_prints(graph, recorded=[s for r in runs for s in r.steps])
+    return {
+        s.node
+        for r in runs
+        for s in r.steps
+        if s.router is not None and prints.get(s.node) not in (None, s.router)
+    }
+
+
+def _router_fn(graph: Any, node: str) -> tuple[FunctionType, Any] | None:
+    """The plain function on a node's conditional edge, and its input schema if any."""
+    writers = getattr(getattr(graph, "nodes", {}).get(node), "writers", None) or ()
+    for writer in writers:
+        if getattr(writer, "name", None) != "_route":
+            continue
+        branch = getattr(getattr(writer, "func", None), "__self__", None)
+        path = getattr(branch, "path", None)
+        fn: Any = getattr(path, "func", None)
+        while fn is not None and getattr(fn, "__wrapped__", None) is not None:
+            fn = fn.__wrapped__
+        if isinstance(fn, FunctionType):
+            return fn, getattr(branch, "input_schema", None)
+    return None
+
+
+def _router_state(schema: Any, saved: Any) -> Any:
+    """Rebuild what the router was given from a recorded `router_state`."""
+    state = deepcopy(saved)
+    if (
+        isinstance(schema, type)
+        and issubclass(schema, BaseModel)
+        and isinstance(state, Mapping)
+        and not isinstance(state, schema)
+    ):
+        return schema.model_validate(state)
+    return state
+
+
+def probe_routers(graph: Any, runs: Sequence[Cassette]) -> tuple[ProbeStep, ...]:
+    """T221: run each changed router on base's recorded `router_state`, offline. The probe holds
+    the targets it returned (`routed`). A router that reaches for the network needs a live call
+    and is left as `raised`, as a model node is. Labels don't read these probes yet."""
+    edited = changed_routers(graph, runs)
+    found: list[ProbeStep] = []
+    for i, run in enumerate(runs):
+        for j, step in enumerate(run.steps):
+            if step.node not in edited or step.router_state is None:
+                continue
+            held = _router_fn(graph, step.node)
+            if held is None:
+                found.append(ProbeStep(i, j, step.node, raised=NO_FINGERPRINT))
+                continue
+            fn, schema = held
+            reached: list[str] = []
+            out: Any = None
+            try:
+                with _offline(reached):
+                    out = fn(_router_state(schema, step.router_state))
+                    if inspect.iscoroutine(out):
+                        out = asyncio.run(out)
+            except _Refused:
+                pass
+            except Exception as exc:  # a router can raise anything
+                if not reached:
+                    found.append(
+                        ProbeStep(
+                            i,
+                            j,
+                            step.node,
+                            raised=f"raised {type(exc).__name__} on base's router_state",
+                        )
+                    )
+                    continue
+            if reached:
+                found.append(ProbeStep(i, j, step.node, raised=NEEDS_LIVE))
+            else:
+                found.append(ProbeStep(i, j, step.node, routed=_goto_saved(out)))
+    return tuple(found)
 
 
 def probe_steps(

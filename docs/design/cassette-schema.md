@@ -290,7 +290,8 @@ field after the flip is optional.
 6. **Tool units.** Each tool call is recorded under its tool node and served whole. The
    safe-to-re-run probe is still open.
 7. **Units of a graph started inside a node or a tool**, served only whole. Named `agent`.
-8. **Routes** (T221): `routed`, `router_state` and the router probe.
+8. **Routes** (T221): `routed`, `router_state` and the router probe. Labels still use T175
+   until a follow-up reads the probe.
 9. **Samples** (T229): `lgcov record --samples K`.
 10. **Parts** (T239), with a chat model's fields.
 

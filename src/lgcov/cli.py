@@ -98,6 +98,7 @@ from lgcov.cassette import (
     graph_shape,
     judge_probes,
     judge_repeats,
+    probe_routers,
     probe_steps,
     probe_units,
     record,
@@ -1225,6 +1226,7 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
         return replace(run, harness_error=_harness_message("replay failed outside node code", exc))
     probes = probe_steps(graph, runs, changed_nodes(graph, runs))  # T162: offline, no verdict
     probes += probe_units(graph, runs) if units else ()  # T193: units read the same way
+    probes += probe_routers(graph, runs)  # T221: changed routers on base's router_state
     return replace(
         run,
         fresh=tuple(FreshRun(r.steps, r.calls, r.halt) for r in replays),
