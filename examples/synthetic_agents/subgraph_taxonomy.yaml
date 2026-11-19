@@ -1,24 +1,26 @@
-# Code checks for the subgraph agent, as a user would write them from its task:
-# an inner draft node builds text; after uppercases it into the answer.
+# Blind requirement checks for the subgraph agent (T262 measure).
+# Path policy only (judge: code). Top-level node names only (sub, not sub.inner).
+# No fake content judges.
 version: 1
 system: subgraph_agent
 failure_modes:
-  - id: no_answer
-    description: The run never reaches after, so there is no answer.
-  - id: no_draft
-    description: The subgraph's inner node never ran, so there is no draft.
+  - id: preprocess_skipped
+    description: before never runs, so the question is never normalized into the subgraph.
+  - id: no_subgraph
+    description: The subgraph node never ran.
 kpis:
-  - name: after_runs
-    failure_mode: no_answer
-    node: after
+  - name: before_runs
+    failure_mode: preprocess_skipped
+    node: before
     judge: code
-    description: Every run ends at after.
-    rubric: Did the run visit after?
-    check: {type: node_visited, node: after}
-  - name: draft_runs
-    failure_mode: no_draft
-    node: sub.inner
+    description: Every run normalizes the question before the subgraph.
+    rubric: Did the run visit before?
+    check: {type: node_visited, node: before}
+
+  - name: sub_runs
+    failure_mode: no_subgraph
+    node: sub
     judge: code
-    description: The subgraph's draft node still runs.
-    rubric: Did the run visit sub.inner?
-    check: {type: node_visited, node: sub.inner}
+    description: The subgraph container still runs (top-level name seen by harm path).
+    rubric: Did the run visit sub?
+    check: {type: node_visited, node: sub}

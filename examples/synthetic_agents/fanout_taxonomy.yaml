@@ -1,22 +1,23 @@
-# Code checks for the fan-out agent, as a user would write them from its task:
-# plan fans out to workers a/b/c; the reducer must summarise every worker's part.
+# Blind requirement checks for the fan-out agent (T262 measure).
+# Path policy only (judge: code). No fake content judges.
 version: 1
 system: fanout_agent
 failure_modes:
-  - id: missing_reducer
-    description: The run never reaches the reducer, so there is no summary.
-  - id: dropped_worker
-    description: A worker never ran, so the summary can miss its part.
   - id: plan_skipped
-    description: The run never visits plan, so fan-out never started.
+    description: plan never runs, so fan-out never starts.
+  - id: dropped_worker
+    description: A required worker never ran; summary can miss its part.
+  - id: missing_reducer
+    description: reducer never runs, so there is no summary.
 kpis:
-  - name: reducer_runs
-    failure_mode: missing_reducer
-    node: reducer
+  - name: plan_runs
+    failure_mode: plan_skipped
+    node: plan
     judge: code
-    description: Every run ends at the reducer.
-    rubric: Did the run visit reducer?
-    check: {type: node_visited, node: reducer}
+    description: Every run starts fan-out from plan.
+    rubric: Did the run visit plan?
+    check: {type: node_visited, node: plan}
+
   - name: worker_a_runs
     failure_mode: dropped_worker
     node: worker_a
@@ -24,6 +25,7 @@ kpis:
     description: Worker a still ran.
     rubric: Did the run visit worker_a?
     check: {type: node_visited, node: worker_a}
+
   - name: worker_b_runs
     failure_mode: dropped_worker
     node: worker_b
@@ -31,6 +33,7 @@ kpis:
     description: Worker b still ran.
     rubric: Did the run visit worker_b?
     check: {type: node_visited, node: worker_b}
+
   - name: worker_c_runs
     failure_mode: dropped_worker
     node: worker_c
@@ -38,10 +41,11 @@ kpis:
     description: Worker c still ran.
     rubric: Did the run visit worker_c?
     check: {type: node_visited, node: worker_c}
-  - name: plan_runs
-    failure_mode: plan_skipped
-    node: plan
+
+  - name: plan_then_reducer
+    failure_mode: missing_reducer
+    node: reducer
     judge: code
-    description: Every run starts at plan.
-    rubric: Did the run visit plan?
-    check: {type: node_visited, node: plan}
+    description: Fan-out completes through reducer after plan (workers may interleave).
+    rubric: Did plan appear before reducer?
+    check: {type: node_sequence, nodes: [plan, reducer]}
