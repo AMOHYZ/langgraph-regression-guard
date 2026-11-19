@@ -232,7 +232,8 @@ def record(
     what `like` recorded gets `like`'s fingerprint for it, whichever scheme that used (`_codes`).
 
     T193: `units` also saves the nodes that ran inside each subgraph, as units of its step, for a
-    schema-2 recording. A graph started inside a node or a tool isn't one yet.
+    schema-2 recording, and a graph started inside a node or a tool as an `agent` unit of that
+    caller (served only whole through it).
     """
     steps = _run(graph, inputs, (), (), like=[s for r in like for s in r.steps], units=units)[0]
     return Cassette(inputs=inputs, steps=steps)
@@ -652,10 +653,13 @@ def _within(update: Any, result: Any) -> bool:
 
 def _inside(steps: Sequence[Step], prefix: str = "") -> list[Step]:
     """T193: the units of `steps`, at any depth, each named with its subgraph's
-    (`answer.respond`), as `_run` names the call it serves."""
+    (`answer.respond`), as `_run` names the call it serves. An agent unit is served only
+    whole through the node or tool that started it, so its visits are not listed here."""
     found: list[Step] = []
     for step in steps:
         for unit in step.units or ():
+            if unit.kind == "agent":
+                continue
             name = f"{prefix}{step.node}.{unit.node}"
             found.append(replace(unit, node=name, units=None))
             found += _inside([replace(unit, node=name)])
@@ -674,12 +678,16 @@ class _Units:
     `tasks` mode. Each unit is filed under the namespace it streamed in and learns its task id from
     the task result that holds its update. LangGraph emits that result right after the update,
     but parallel tasks can interleave, so the match is by content, then by order. A unit goes
-    inside the one whose task its namespace names, in the order LangGraph started them."""
+    inside the one whose task its namespace names, in the order LangGraph started them. A graph
+    started inside a node or a tool (no subgraph at that namespace) is wrapped as one `agent`
+    unit of the caller."""
 
     def __init__(self, graph: Any) -> None:
         self.graph = graph
         self.filed: dict[tuple[str, ...], list[_Unit]] = {}
         self.started: dict[tuple[tuple[str, ...], str], int] = {}
+        self.inputs: dict[tuple[tuple[str, ...], str], Any] = {}
+        self.agent_ns: set[tuple[str, ...]] = set()
 
     def graph_at(self, ns: tuple[str, ...]) -> Any:
         """The subgraph a namespace runs in. None under a node that isn't a subgraph: a graph
@@ -693,17 +701,26 @@ class _Units:
 
     def file(self, ns: tuple[str, ...], step: Step) -> None:
         self.filed.setdefault(ns, []).append(_Unit(step))
+        if ns and self.graph_at(ns) is None:
+            self.agent_ns.add(ns)
 
     def task(self, ns: tuple[str, ...], event: Mapping[str, Any]) -> None:
         if "result" not in event:  # it started
-            self.started[(ns, str(event["id"]))] = len(self.started)
+            tid = str(event["id"])
+            self.started[(ns, tid)] = len(self.started)
+            if "input" in event:
+                self.inputs[(ns, tid)] = deepcopy(event["input"])
             return
         named = [
             u for u in self.filed.get(ns, []) if (u.task, u.step.node) == (None, event["name"])
         ]
         held = [u for u in named if _within(u.step.output, event["result"])]
         if held or named:
-            (held or named)[0].task = str(event["id"])
+            unit = (held or named)[0]
+            unit.task = str(event["id"])
+            # Agent visits aren't wrapped, so input comes from the task start (PR 7).
+            if ns in self.agent_ns and unit.step.input is None and (ns, unit.task) in self.inputs:
+                unit.step = replace(unit.step, input=deepcopy(self.inputs[(ns, unit.task)]))
 
     def _start(self, ns: tuple[str, ...], unit: _Unit) -> int:
         return self.started.get((ns, unit.task or ""), len(self.started))
@@ -716,7 +733,19 @@ class _Units:
                 u for u in self.filed.get(ns[:-1], []) if (u.step.node, u.task) == (name, task)
             ]
             if ns and outer:
-                outer[0].inside = sorted(self.filed[ns], key=partial(self._start, ns))
+                children = sorted(self.filed[ns], key=partial(self._start, ns))
+                if ns in self.agent_ns:
+                    kids = [self._built(u) for u in children]
+                    agent = Step(
+                        "agent",
+                        None if not kids else deepcopy(kids[-1].output),
+                        None if not kids else deepcopy(kids[0].input),
+                        kind="agent",
+                        units=kids or None,
+                    )
+                    outer[0].inside = [_Unit(agent)]
+                else:
+                    outer[0].inside = children
         return [self._built(u) for u in self.filed.get((), [])]
 
     def _built(self, unit: _Unit) -> Step:
@@ -874,7 +903,9 @@ def _hook_tool_node(spec: Any, parent: str, bag: _ToolBag) -> Any | None:
 
 
 def _graft(steps: list[Step], bag: _ToolBag | None, prefix: str = "") -> list[Step]:
-    """Put each tool node's calls inside its step, in the order the node ran them."""
+    """Put each tool node's calls inside its step, in the order the node ran them. An agent
+    unit recorded under the tool node (a graph the tool started) stays after those calls, and
+    takes the call id of the only call in that span when it has none yet."""
     if bag is None:
         return steps
     used: dict[str, int] = {}
@@ -882,12 +913,19 @@ def _graft(steps: list[Step], bag: _ToolBag | None, prefix: str = "") -> list[St
     def one(step: Step, path: str) -> Step:
         full = f"{path}{step.node}"
         units = _graft(list(step.units or []), bag, full + ".")
+        agents = [u for u in units if u.kind == "agent"]
+        units = [u for u in units if u.kind != "agent"]
         spans = [sp for sp in bag.spans if sp[0] == full]
         i = used.get(full, 0)
+        made: list[Step] = []
         if i < len(spans):
             _, start, end = spans[i]
             used[full] = i + 1
-            units = units + bag.made.get(full, [])[start:end]
+            made = bag.made.get(full, [])[start:end]
+            units = units + made
+        if len(agents) == 1 and len(made) == 1 and agents[0].call_id is None:
+            agents = [replace(agents[0], call_id=made[0].call_id)]
+        units = units + agents
         return replace(step, units=units) if units else step
 
     return [one(s, prefix) for s in steps]
@@ -928,7 +966,9 @@ def _run(
     T193: `units` also records each plain node inside a subgraph, wrapped as a top-level one, and
     puts what it streamed under its subgraph's step (`_Units`). The run streams subgraphs then.
     A served step's units are served the same way, by their name with their subgraph's
-    (`answer.respond`): a subgraph whose step has units gets its plain nodes wrapped.
+    (`answer.respond`): a subgraph whose step has units gets its plain nodes wrapped. A graph
+    started inside a node or a tool is recorded as an `agent` unit of the caller and is not
+    served by wrapping its visits; serving the caller (or its tool call) covers it.
     """
     lock = threading.Lock()  # Send() fan-out runs nodes in parallel threads
     inside = _inside(served)  # T193: the units of served steps, named with their subgraph's
@@ -1083,13 +1123,12 @@ def _run(
 
     def took(chunk: Any) -> None:
         # T193: with units, each chunk is (namespace, mode, data). A graph started inside a node
-        # or a tool streams under that node's namespace, which isn't a subgraph's: left out.
+        # or a tool streams under that node's namespace (no subgraph there): recorded as an agent
+        # unit of the caller, and not served on its own (section 6, PR 7).
         if tree is None:
             take(chunk)
             return
         ns, mode, data = chunk
-        if tree.graph_at(ns) is None:
-            return
         if mode == "tasks":
             tree.task(ns, data)
         else:

@@ -256,7 +256,7 @@ Task ids differed between runs, so a unit's address leaves them out.
 4. **A graph started inside a node or a tool** is recorded (check 4) and served only whole, through
    the unit that started it (check 5e). Its parts join that unit's, where the fingerprint gives up
    today (`_describe` in [`fingerprint.py`](../../src/lgcov/fingerprint.py) raises on a compiled
-   graph). Its namespace names the caller, so what to call its `agent` unit is open.
+   graph). Its namespace names the caller; the unit is named `agent` (`kind=agent`).
 5. **Address** a unit by kind, name and path, with task ids left out, and order it by start.
 
 **LangGraph internals.** Today the recorder imports only public names, but it reads and replaces
@@ -289,7 +289,7 @@ field after the flip is optional.
 5. **Redaction** at write time, for a secret-named key. Other patterns stay a design.
 6. **Tool units.** Each tool call is recorded under its tool node and served whole. The
    safe-to-re-run probe is still open.
-7. **Units of a graph started inside a node or a tool**, served only whole.
+7. **Units of a graph started inside a node or a tool**, served only whole. Named `agent`.
 8. **Routes** (T221): `routed`, `router_state` and the router probe.
 9. **Samples** (T229): `lgcov record --samples K`.
 10. **Parts** (T239), with a chat model's fields.
