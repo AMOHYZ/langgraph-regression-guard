@@ -293,7 +293,7 @@ field after the flip is optional.
 8. **Routes** (T221): `routed`, `router_state` and the router probe. Labels read the probe
    (name a changed router only when the route differed).
 9. **Samples** (T229): `lgcov record --samples K`. The deciding job does not read them yet.
-10. **Parts** (T239), with a chat model's fields. Serving and labels don't read them yet.
+10. **Parts** (T239), with a chat model's fields. Serving reads them; labels don't yet.
 11. **Stale baseline** (T243): each part's `source` is checked against the base checkout; ci then
     reads `graph` for T238.
 12. **Transient tool status** (T248): `timeout`, `rate_limited` and `server_error` are not checked.

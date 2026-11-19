@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Gate behaviour change.** Replay serves a step only when every chat-model part named on it still matches the recording's `parts` table (T239). A temperature or model-name edit that leaves the node's code fingerprint alone still runs live. Labels don't read parts yet.
 - **Gate behaviour change.** Labels name a changed router only when the route differed (T221): the candidate's router probe on base's `router_state`, or paired `routed` when there was no state. A router edit that still returns base's targets is no longer root of drift a later node caused.
 - **Gate behaviour change.** A tool unit whose `status` is `timeout`, `rate_limited` or `server_error` is never compared, never served and never labelled (T248). That unit and the rest of its run are not checked, so the verdict is INCONCLUSIVE (needs_human), never a pass. `success` and `error` compare as before.
 - **Gate behaviour change.** `lgcov ci` reads base's graph node names from a schema-2 baseline when the recording isn't stale (T243). A node only the PR ran is root when base's graph doesn't have it, and propagated when it does (a route that newly reached it). A recording whose part `source` hashes no longer match the base checkout's files is a harness error that names `lgcov record`; a PR that only edits the cassette folder is exempt so a re-record can land. Chat-model parts now also store `file` and `source` (a hash of that file's syntax tree). A baseline with no `parts` still trusts `graph`.
@@ -10,7 +11,7 @@
 - `lgcov record` writes a graph started inside a node or a tool as an `agent` unit of that caller, with the visits inside it. Replay serves it only whole: through the node or the tool call that started it. The visits are not served on their own. When the only tool call in a tool node started the graph, the agent unit keeps that call's id. **Re-record** to get these units; a baseline without them records the caller as before.
 - `lgcov record` writes `routed` and `router_state` on a node with a conditional edge: the targets its router returned, and the state it saw. The candidate job probes a changed router on base's recorded state and writes the targets in the candidate file (schema 3). Labels still use T175's rule; they don't read these probes yet. **Re-record** to get the fields.
 - `lgcov record --samples K` runs each plain node's code K more times on its recorded input and stores the outputs as `samples` on that step (and on units inside a subgraph). 0, the default, stores none. The deciding job does not read them yet.
-- `lgcov record` writes a chat model's `model_name`, `model`, `temperature`, `max_tokens` and `top_p` as `parts` of the node that holds the model, in the recording's `parts` table and on that step. Serving and labels don't read them yet. A graph with no chat model writes no `parts`.
+- `lgcov record` writes a chat model's `model_name`, `model`, `temperature`, `max_tokens` and `top_p` as `parts` of the node that holds the model, in the recording's `parts` table and on that step. Serving reads them; labels don't yet. A graph with no chat model writes no `parts`.
 
 ## 0.6.0 (2026-11-18)
 

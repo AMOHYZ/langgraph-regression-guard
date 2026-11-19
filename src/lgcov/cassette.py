@@ -318,7 +318,7 @@ def _field_part(value: object, path: str | None, source: str | None) -> Part:
 def chat_parts(graph: Any) -> tuple[dict[str, Part], dict[str, list[str]]]:
     """T239: chat-model fields held by each plain node, as recording `parts` and per-node names.
     T243: each part also carries `file` and `source` when the node lives in a project file.
-    Serving and labels don't read them yet. Empty when no node holds a chat model."""
+    Serving reads them (`parts_match`); labels don't yet. Empty when no node holds a chat model."""
     table: dict[str, Part] = {}
     by_node: dict[str, list[str]] = {}
     for name, spec in getattr(graph, "nodes", {}).items():
@@ -370,6 +370,19 @@ def attach_parts(cassette: Cassette, by_node: Mapping[str, Sequence[str]]) -> Ca
         return replace(step, parts=names, units=units)
 
     return Cassette(cassette.inputs, [one(s) for s in cassette.steps])
+
+
+def parts_match(step: Step, recorded: Mapping[str, Part] | None, live: Mapping[str, Part]) -> bool:
+    """T239: True when every part named on `step` has the same fingerprint in both tables.
+    A step with no `parts`, or a call with no recording table, matches (today's code-only rule)."""
+    if not step.parts or recorded is None:
+        return True
+    for name in step.parts:
+        was = (recorded.get(name) or {}).get("fingerprint")
+        now = (live.get(name) or {}).get("fingerprint")
+        if was != now:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -1168,12 +1181,14 @@ def _run(
     mask_volatile: bool = False,
     like: Sequence[Step] = (),
     units: bool = False,
+    parts: Mapping[str, Part] | None = None,
 ) -> tuple[list[Step], list[Call], Halt | None]:
     """Stream the graph once; return its steps with each node's input and fingerprint, how
     each call ran, and where the run stopped, if it stopped early.
 
     Each plain-function node is wrapped: a call whose fingerprint and masked input match an
-    unused step of `served` returns that step's output instead of running the node.
+    unused step of `served` returns that step's output instead of running the node. T239: when
+    `parts` is the recording's table, every named part on that step must match too.
 
     T164: a graph `.stream` can't drive runs under `.astream` with the same stream mode, on
     this thread's event loop (`_thread_loop`); inside a running one that's a RunningLoopError.
@@ -1208,6 +1223,7 @@ def _run(
     served = [*served, *inside]
     unused = [(s, _key(s.input, ignore_paths, mask_volatile)) for s in served if s.code is not None]
     recorded = {(s.node, s.code) for s in served if s.code is not None}
+    live_parts = chat_parts(graph)[0] if parts is not None else {}
     # node, input, returned, fingerprint, and T193: the namespace it ran in
     calls: list[tuple[str, Any, Any, str | None, tuple[str, ...]]] = []
     tree = _Units(graph) if units and isinstance(graph, Pregel) else None
@@ -1240,7 +1256,12 @@ def _run(
             with lock:
                 want = (name, code, key)
                 i = next(
-                    (i for i, (s, k) in enumerate(unused) if (s.node, s.code, k) == want), None
+                    (
+                        i
+                        for i, (s, k) in enumerate(unused)
+                        if (s.node, s.code, k) == want and parts_match(s, parts, live_parts)
+                    ),
+                    None,
                 )
                 if i is not None and not run["live"]:
                     hit = unused.pop(i)[0]
@@ -1479,11 +1500,13 @@ def replay_run(
     mask_volatile: bool = False,
     baseline: Sequence[Cassette] = (),
     units: bool = False,
+    parts: Mapping[str, Part] | None = None,
 ) -> Replay:
     """`replay_steps` under a divergence policy and a budget, with how each call ran. T212:
     `baseline` is every run recorded with `cassette`: a node this run didn't record, but another
     did, gets its fingerprint in that recording's scheme. T193: `units` records the units inside
-    each subgraph on the fresh steps, as `record` does."""
+    each subgraph on the fresh steps, as `record` does. T239: `parts` is the recording's table;
+    a served step needs every named part to match the live graph."""
     served = cassette.steps if serve else ()
     like = [s for r in (cassette, *baseline) for s in r.steps]
     fresh, calls, halt = _run(
@@ -1496,6 +1519,7 @@ def replay_run(
         mask_volatile,
         like,
         units,
+        parts,
     )
     return compared_run(cassette, fresh, calls, halt, ignore_paths)
 
