@@ -1,7 +1,8 @@
 # Router root only when the route changed (design, T221)
 
-**Status: design only.** Nothing here is built. This file changes no code, no cassette field
-and no label. T175's rule and its documented limit stay as they are until this lands.
+**Status: recording and probe built; labels not yet.** `lgcov record` writes `routed` and
+`router_state`, and the candidate job writes a router's probe. T175's rule and its documented
+limit stay as they are until a follow-up reads the probe for labels.
 
 ## The problem
 

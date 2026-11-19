@@ -89,14 +89,24 @@ def _probe_body(probe: ProbeStep, schema: int) -> dict[str, object]:
     body = {k: v for k, v in asdict(probe).items() if k in _PROBE}
     if schema == 3:  # T193: by the unit's position down the tree
         body["unit"] = [body.pop("step"), *(probe.inner or ())]
+        if probe.routed is not None:  # T221: a router's probe
+            body["routed"] = probe.routed
     return body
 
 
 def candidate_to_json(run: CandidateRun) -> str:
     """TypeError or ValueError if a step can't be saved, as with a tuple for a dict's key. T193: it
     writes schema 2, no parts or repeats and each probe by its step index, unless a step holds
-    units or a probe is a unit's: then schema 3, with each probe by its unit's position."""
-    units = any(s.units for r in run.fresh for s in r.steps) or any(p.inner for p in run.probes)
+    units or a probe is a unit's: then schema 3, with each probe by its unit's position. T221: a
+    router's probe also needs schema 3, so it can carry `routed`."""
+    units = (
+        any(s.units for r in run.fresh for s in r.steps)
+        or any(
+            s.routed is not None or s.router_state is not None for r in run.fresh for s in r.steps
+        )
+        or any(p.inner for p in run.probes)
+        or any(p.routed is not None for p in run.probes)
+    )
     schema = 3 if units else SCHEMA
     body: dict[str, object] = asdict(replace(run, head=None, fresh=(), probes=(), repeats=()))
     del body["fresh"], body["probes"], body["parts"], body["repeats"]

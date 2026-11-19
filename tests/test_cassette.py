@@ -58,6 +58,7 @@ from lgcov.cassette import (
     judge_probes,
     judge_repeats,
     probe_nodes,
+    probe_routers,
     probe_steps,
     probe_units,
     record,
@@ -767,9 +768,31 @@ def test_a_probe_that_matches_no_recorded_step_is_refused(forged: ProbeStep) -> 
 
 
 def test_judge_probes_leaves_a_probe_of_a_router_to_a_later_lgcov() -> None:
-    # T221: candidate schema 3 can hold one. No label reads it yet, so it doesn't decide.
+    # T221: the candidate can hold a router's probe; no label reads it yet, so it doesn't decide.
     base = record(_one_node(lambda s: s), {"x": 1})
     assert judge_probes([base], [ProbeStep(0, 0, "n", routed=["b"])]) == {}
+
+
+def test_a_step_keeps_the_targets_and_state_its_router_saw() -> None:
+    # T221: routed and router_state on a node with a conditional edge.
+    cassette = record(_branching(0), {"x": 1})
+    a, b = cassette.steps
+    assert (a.node, a.routed, a.router_state) == ("a", ["b"], {"x": 1})
+    assert b.routed is None and b.router_state is None
+    assert runs_from_json(runs_to_json([cassette])) == [cassette]
+
+
+def test_a_changed_router_is_probed_on_base_s_router_state() -> None:
+    # T221: the candidate job runs head's router on base's recorded state; labels still ignore it.
+    base = record(_branching(0), {"x": 1})
+    (a,) = [s for s in base.steps if s.node == "a"]
+    assert a.router_state == {"x": 1} and a.routed == ["b"]
+    same = probe_routers(_branching(0), [base])
+    assert same == ()  # fingerprint unchanged: nothing to probe
+    edited = probe_routers(_branching(5), [base])
+    assert len(edited) == 1
+    assert edited[0].node == "a" and edited[0].routed == ["c"]  # threshold 5: x=1 → c
+    assert edited[0].raised == "" and judge_probes([base], edited) == {}
 
 
 # T193, 3b-2: a unit inside a step is compared and probed by its path, `box.inside`.

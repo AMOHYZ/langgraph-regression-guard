@@ -318,7 +318,12 @@ def test_a_forged_probe_is_a_harness_error(pr: Path) -> None:
     _write(pr, {"graph.py": TWO_ROOTS})
     assert _candidate() == 0
     body = json.loads(FILE.read_text("utf-8"))
-    body["probes"][0]["step"] = 99
+    probe = body["probes"][0]
+    # T221: a file with routed/router_state is schema 3 and names probes by `unit`.
+    if "unit" in probe:
+        probe["unit"] = [99]
+    else:
+        probe["step"] = 99
     FILE.write_text(json.dumps(body), encoding="utf-8")
     code, report, _ = _evaluate()
     assert code == 2 and "matches no recorded step" in report
@@ -328,14 +333,16 @@ def test_a_schema_3_file_decides_as_its_schema_2_twin(pr: Path) -> None:
     # T193: a candidate job on a later lgcov writes schema 3, as #116's wrote a key base refused.
     # Probes by position and parts leave this job's verdict as it was. 3b-2: a probe inside a step
     # is judged, so one of a unit base never recorded is refused, as any forged probe is.
+    # T221: recording routes already writes schema 3; keep the twin check when it does.
     _write(pr, {"graph.py": TWO_ROOTS})
     assert _candidate() == 0
     code, report, outputs = _evaluate()
     assert code == 1 and "| `respond` | root | 1/2 |" in report
     body = json.loads(FILE.read_text("utf-8"))
     for probe in body["probes"]:
-        probe["unit"] = [probe.pop("step")]
-    body |= {"schema": 3, "parts": {}, "repeats": []}
+        if "step" in probe and "unit" not in probe:
+            probe["unit"] = [probe.pop("step")]
+    body |= {"schema": 3, "parts": body.get("parts") or {}, "repeats": body.get("repeats") or []}
     FILE.write_text(json.dumps(body), encoding="utf-8")
     again = _evaluate()
     assert (again[0], again[2], _normal(again[1])) == (code, outputs, _normal(report))
