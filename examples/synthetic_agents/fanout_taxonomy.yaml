@@ -10,6 +10,7 @@ failure_modes:
 kpis:
   # tag: requirement
   - name: summary_has_worker_a
+    tag: requirement
     failure_mode: worker_part_missing
     node: reducer
     judge: code
@@ -21,6 +22,7 @@ kpis:
 
   # tag: requirement
   - name: summary_has_worker_b_plain
+    tag: requirement
     failure_mode: worker_b_tone_drift
     node: reducer
     judge: code
@@ -32,6 +34,7 @@ kpis:
 
   # tag: requirement
   - name: summary_has_worker_c
+    tag: requirement
     failure_mode: worker_part_missing
     node: reducer
     judge: code
@@ -43,6 +46,7 @@ kpis:
 
   # tag: format
   - name: summary_joins_all_parts
+    tag: format
     failure_mode: worker_part_missing
     node: reducer
     judge: code
@@ -54,6 +58,7 @@ kpis:
 
   # tag: requirement
   - name: worker_b_emits_plain
+    tag: requirement
     failure_mode: worker_b_tone_drift
     node: worker_b
     judge: code

@@ -241,7 +241,12 @@ from lgcov.synthetic import (
     every_shared_case,
     noise_rule_rates,
 )
-from lgcov.synthetic_harm import TAXONOMY_BY_AGENT, harm_for_roots, harm_rate_counts
+from lgcov.synthetic_harm import (
+    CHECK_TAGS,
+    TAXONOMY_BY_AGENT,
+    harm_for_roots,
+    harm_rate_counts,
+)
 from lgcov.synthetic_score import (
     Found,
     HarmRates,
@@ -3573,7 +3578,11 @@ def _bench_synthetic(out: Path, results: Path, *, held_out: bool = False) -> int
         seen = changed.get(case.edit, frozenset())
         changed[case.edit] = seen | changed_nodes(case.graph, [case.base])
     # T262: harm status from committed code-check taxonomies (never the suite outcome helper).
+    # T264: also score requirement/format slices (only KPIs with that tag count as covering).
     harm_rows: list[tuple[str, dict[str, HarmStatus]]] = []
+    tagged_rows: dict[str, list[tuple[str, dict[str, HarmStatus]]]] = {
+        tag: [] for tag in CHECK_TAGS
+    }
     for scored in cases:
         roots = sorted(found[id(scored)].root)
         rel = TAXONOMY_BY_AGENT.get(scored.agent)
@@ -3584,7 +3593,21 @@ def _bench_synthetic(out: Path, results: Path, *, held_out: bool = False) -> int
         else:
             statuses = harm_for_roots(scored.base, scored.pr, roots, Path(rel))
         harm_rows.append((scored.truth.label, statuses))
+        for tag in CHECK_TAGS:
+            if not roots:
+                tag_statuses: dict[str, HarmStatus] = {}
+            elif rel is None:
+                tag_statuses = dict.fromkeys(roots, "unmeasured")
+            else:
+                tag_statuses = harm_for_roots(
+                    scored.base, scored.pr, roots, Path(rel), only_tag=tag
+                )
+            tagged_rows[tag].append((scored.truth.label, tag_statuses))
     ff, recall, unmeas = harm_rate_counts(harm_rows)
+    by_tag: dict[str, HarmRates] = {}
+    for tag, rows in tagged_rows.items():
+        t_ff, t_recall, t_unmeas = harm_rate_counts(rows)
+        by_tag[tag] = HarmRates(Rate(*t_ff), Rate(*t_recall), Rate(*t_unmeas))
     report = build_report(
         cases,
         lambda case: set(found[id(case)].root),
@@ -3598,7 +3621,7 @@ def _bench_synthetic(out: Path, results: Path, *, held_out: bool = False) -> int
             if held_out
             else shared_report([(c, _shipped(c, graphs[c.agent])) for c in shared], changed)
         ),
-        harm=HarmRates(Rate(*ff), Rate(*recall), Rate(*unmeas)),
+        harm=HarmRates(Rate(*ff), Rate(*recall), Rate(*unmeas), by_tag=by_tag),
     )
     section = render_section(report)
     if held_out:

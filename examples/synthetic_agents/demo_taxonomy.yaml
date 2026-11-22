@@ -10,6 +10,7 @@ failure_modes:
 kpis:
   # tag: requirement
   - name: lookup_order_shipped
+    tag: requirement
     failure_mode: order_tool_lost
     node: lookup_order
     judge: code
@@ -23,6 +24,7 @@ kpis:
 
   # tag: requirement
   - name: respond_includes_shipped
+    tag: requirement
     failure_mode: respond_drops_context
     node: respond
     judge: code
@@ -36,6 +38,7 @@ kpis:
 
   # tag: format
   - name: respond_echoes_order_question
+    tag: format
     failure_mode: respond_drops_context
     node: respond
     judge: code
@@ -49,6 +52,7 @@ kpis:
 
   # tag: format
   - name: respond_echoes_hours_question
+    tag: format
     failure_mode: respond_drops_context
     node: respond
     judge: code
@@ -62,6 +66,7 @@ kpis:
 
   # tag: format
   - name: respond_keeps_support_prompt_tail
+    tag: format
     failure_mode: respond_drops_context
     node: respond
     judge: code
