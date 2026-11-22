@@ -558,6 +558,23 @@ def _ai(text: str, message_id: str = "m1") -> AIMessage:
     return AIMessage(text, id=message_id)
 
 
+def test_send_payload_id_key_change_is_not_add_messages_unsupported() -> None:
+    """Regression: bare Send task `id` keys are not LangChain message ids. Case 6 must not
+    clear an inconclusive worker when plan's payload ids change (T177 gate-isolation)."""
+    base = Cassette.from_json(record(send_fanout.build(("a", "b"), key="id"), {}).to_json())
+    fresh = replay_run(
+        send_fanout.build(("x", "y"), key="id"),
+        Cassette(inputs={}, steps=list(base.steps)),
+        serve=True,
+    )
+    labels, bad = _labels_for(base, fresh, SEND_GRAPH)
+    assert bad is None
+    assert labels.inconclusive.get("worker") == UNEXPLAINED or (
+        "worker" in labels.inconclusive
+        and "no changed node before it" in labels.inconclusive["worker"]
+    )
+
+
 def test_add_messages_id_dup_mislabels_downstream_before_guard() -> None:
     """Failing example: keep-both vs replace changes message count; normalize masks ids so X
     shows no drift and Y is unexplained — attribution of add_messages ids is unsafe."""

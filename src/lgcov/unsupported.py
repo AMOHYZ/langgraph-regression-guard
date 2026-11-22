@@ -4,16 +4,17 @@ root/propagated label and never a crash."""
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from langchain_core.messages import BaseMessage
 from langgraph.errors import InvalidUpdateError
 
 from lgcov.attribution import GRAPH_NOT_GIVEN, UNEXPLAINED, NodeLabels
 from lgcov.fingerprint import fingerprint
 from lgcov.normalize import normalize
-from lgcov.rebind import _ids
+from lgcov.rebind import _message_ids
 
 
 class _Named(Protocol):
@@ -158,8 +159,20 @@ def _graph_missing_reasons(labels: NodeLabels) -> frozenset[str]:
     )
 
 
+def _langchain_message_ids(value: object) -> Iterator[str]:
+    """Ids on LangChain messages only — not bare Send payload `id` keys (T177 / case 6)."""
+    if isinstance(value, BaseMessage):
+        yield from (i for i in _message_ids(value) if i is not None)
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _langchain_message_ids(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _langchain_message_ids(child)
+
+
 def _message_id_multiset(value: object) -> Counter[str]:
-    return Counter(_ids(value))
+    return Counter(_langchain_message_ids(value))
 
 
 def _message_id_only_change(base_out: object, fresh_out: object) -> bool:
@@ -170,7 +183,7 @@ def _message_id_only_change(base_out: object, fresh_out: object) -> bool:
 
 
 def _any_message_id_only(base_steps: Sequence[_Stepped], fresh_steps: Sequence[_Stepped]) -> bool:
-    """Any node whose base vs fresh outputs differ only in masked message ids."""
+    """Any node whose base vs fresh outputs differ only in masked LangChain message ids."""
     by_base: dict[str, list[object]] = {}
     for step in base_steps:
         by_base.setdefault(step.node, []).append(step.output)
