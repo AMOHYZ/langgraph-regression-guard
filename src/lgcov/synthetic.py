@@ -6,10 +6,11 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from random import Random
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from lgcov.attribution import drift_exceeds_noise
-from lgcov.cassette import Cassette, record, replay_run
+from lgcov.cassette import Cassette, changed_nodes, changed_routers, record, replay_run
+from lgcov.snapshot import snapshot_from_compiled
 
 EditKind = Literal["node_body", "conditional_edge"]
 Label = Literal["inert", "benign", "regressed"]
@@ -114,6 +115,89 @@ def every_case(agent: Agent) -> tuple[Case, ...]:
         for mutation in mutations
         for base in bases
     )
+
+
+class HeldOutRow(Protocol):
+    """T264: a labeled held-out edit. Declared truth is user-consequence, not outcome_ok."""
+
+    @property
+    def id(self) -> str: ...
+    @property
+    def agent(self) -> str: ...
+    @property
+    def edit_kind(self) -> str: ...
+    @property
+    def truth(self) -> Literal["harmful", "harmless"]: ...
+    @property
+    def harm_on(self) -> Literal["all", "order", "hours", "none"]: ...
+    @property
+    def graph(self) -> Any: ...
+
+
+def _question_kind(question: str) -> Literal["order", "hours"]:
+    return "hours" if "hours" in question.lower() else "order"
+
+
+def _held_out_regressed(row: HeldOutRow, question: str) -> bool:
+    """harmful→regressed on the questions harm_on names; harmless→not regressed."""
+    if row.truth == "harmless" or row.harm_on == "none":
+        return False
+    if row.harm_on == "all":
+        return True
+    return row.harm_on == _question_kind(question)
+
+
+def _held_out_edited(
+    row: HeldOutRow, base: Cassette, pr: Cassette, base_graph: Any
+) -> tuple[str, EditKind]:
+    """Best-effort edited node for scoring: fingerprint, router, unit path, or an added node."""
+    nodes = changed_nodes(row.graph, [base])
+    if nodes:
+        return sorted(nodes)[0], "node_body"
+    routers = changed_routers(row.graph, [base])
+    if routers:
+        return sorted(routers)[0], "conditional_edge"
+    base_units = {(s.node, u.node): u.code for s in base.steps for u in (s.units or ())}
+    pr_units = {(s.node, u.node): u.code for s in pr.steps for u in (s.units or ())}
+    for key, code in sorted(pr_units.items()):
+        if base_units.get(key) != code:
+            parent, child = key
+            return f"{parent}.{child}", "node_body"
+    added = snapshot_from_compiled(row.graph).nodes - snapshot_from_compiled(base_graph).nodes
+    named = sorted(n for n in added if not str(n).startswith("__"))
+    if named:
+        return named[0], "node_body"
+    return row.id, "node_body"
+
+
+def held_out_case(row: HeldOutRow, agent: Agent, base: Cassette) -> Case:
+    """One held-out edit on one recorded question: declared truth, graphs from the held-out row."""
+    pr = record(row.graph, base.inputs, like=[base], units=True)
+    edited, kind = _held_out_edited(row, base, pr, agent.graph)
+    truth = GroundTruth(
+        edited,
+        kind,
+        activated=not same_run(pr, base),
+        regressed=_held_out_regressed(row, str(base.inputs.get("question", ""))),
+    )
+    return Case(row.edit_kind, 0, row.id, base, pr, truth, row.graph, agent.name)
+
+
+def every_held_out_case(
+    agents: Sequence[Agent], held_out: Sequence[HeldOutRow]
+) -> tuple[Case, ...]:
+    """T264: each held-out edit on each of its agent's questions. Opt-in; not part of every_case."""
+    by_name = {agent.name: agent for agent in agents}
+    bases = {
+        agent.name: [record(agent.graph, {"question": q}, units=True) for q in agent.questions]
+        for agent in agents
+    }
+    cases: list[Case] = []
+    for row in held_out:
+        agent = by_name[row.agent]
+        for base in bases[agent.name]:
+            cases.append(held_out_case(row, agent, base))
+    return tuple(cases)
 
 
 # T121: base-vs-base attribution on one A/A arm. True when that re-run named any root/drifted.

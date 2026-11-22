@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -236,6 +237,7 @@ from lgcov.synthetic import (
     SharedAgent,
     aa_arms,
     every_case,
+    every_held_out_case,
     every_shared_case,
     noise_rule_rates,
 )
@@ -3514,20 +3516,51 @@ def _aa_label_flip(agent: Agent) -> Callable[[str, Cassette, int], bool]:
     return named
 
 
-def _bench_synthetic(out: Path, results: Path) -> int:
-    """T121: offline, so it costs nothing. A report, not a gate: it exits 0 whatever the scores."""
+def _replace_held_out_section(doc: str, section: str) -> str:
+    """Put a "## Held-out" section in `doc` without touching "## Synthetic"."""
+    body = section.rstrip("\n") + "\n"
+    found = re.search(r"^## Held-out\n(?:(?!^## ).*\n?)*", doc, re.MULTILINE)
+    if found:
+        rest = doc[found.end() :]
+        return doc[: found.start()] + body + ("\n" + rest if rest else "")
+    synthetic = re.search(r"^## Synthetic\n(?:(?!^## ).*\n?)*", doc, re.MULTILINE)
+    if synthetic:
+        gap = "" if doc[synthetic.end() :].startswith("\n") else "\n"
+        return doc[: synthetic.end()] + gap + body + doc[synthetic.end() :]
+    real = re.search(r"^## Real PRs$", doc, re.MULTILINE)
+    if real:
+        return doc[: real.start()] + body + "\n" + doc[real.start() :]
+    return doc.rstrip("\n") + "\n\n" + body
+
+
+def _bench_synthetic(out: Path, results: Path, *, held_out: bool = False) -> int:
+    """T121: offline, so it costs nothing. A report, not a gate: it exits 0 whatever the scores.
+    T264: `held_out` scores only the held-out cases and writes a separate ## Held-out section."""
     try:
         agents, shared_agents = _synthetic_agents()
     except ModuleNotFoundError as exc:
         print(f"lgcov bench: --synthetic needs a repo checkout's examples/: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    cases = [case for agent in agents for case in every_case(agent)]
-    aa = [
-        (agent.name, arm)
-        for agent in agents
-        for arm in aa_arms(agent, label_flip=_aa_label_flip(agent))
-    ]
-    noise = [(agent.name, rate) for agent in agents for rate in noise_rule_rates(agent)]
+    if held_out:
+        held = importlib.import_module("examples.synthetic_agents.held_out")
+        cases = list(every_held_out_case(agents, held.HELD_OUT))
+        shared_agents = ()
+    else:
+        cases = [case for agent in agents for case in every_case(agent)]
+    aa = (
+        []
+        if held_out
+        else [
+            (agent.name, arm)
+            for agent in agents
+            for arm in aa_arms(agent, label_flip=_aa_label_flip(agent))
+        ]
+    )
+    noise = (
+        []
+        if held_out
+        else [(agent.name, rate) for agent in agents for rate in noise_rule_rates(agent)]
+    )
     nodes = {agent.name: set(getattr(agent.graph, "nodes", {})) for agent in agents}
     # The cases stay alive in `cases`, so an id names one case.
     found = {id(case): _shipped(case, nodes[case.agent]) for case in cases}
@@ -3560,12 +3593,19 @@ def _bench_synthetic(out: Path, results: Path) -> int:
         noise,
         labels=lambda case: found[id(case)],
         first_drift=_lgcov_root,
-        shared=shared_report([(c, _shipped(c, graphs[c.agent])) for c in shared], changed),
+        shared=(
+            None
+            if held_out
+            else shared_report([(c, _shipped(c, graphs[c.agent])) for c in shared], changed)
+        ),
         harm=HarmRates(Rate(*ff), Rate(*recall), Rate(*unmeas)),
     )
     section = render_section(report)
+    if held_out:
+        section = section.replace("## Synthetic", "## Held-out", 1)
     doc = out.read_text(encoding="utf-8") if out.exists() else ""
-    for path, text in ((out, replace_section(doc, section)), (results, report_json(report))):
+    merged = _replace_held_out_section(doc, section) if held_out else replace_section(doc, section)
+    for path, text in ((out, merged), (results, report_json(report))):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     print(section, end="")
@@ -3585,6 +3625,12 @@ def _bench_cmd(argv: list[str]) -> int:
         "--synthetic",
         action="store_true",
         help="T121: score the synthetic suite instead, and replace only that section of --out",
+    )
+    ap.add_argument(
+        "--held-out",
+        action="store_true",
+        help="T264: with --synthetic, score only the held-out cases (not the main suite); "
+        "writes a ## Held-out section and defaults --json to docs/benchmark-held-out.json",
     )
     ap.add_argument(
         "--keep-runs",
@@ -3614,11 +3660,22 @@ def _bench_cmd(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return EXIT_ERROR
+    if args.held_out and not args.synthetic:
+        print("lgcov bench: --held-out needs --synthetic", file=sys.stderr)
+        return EXIT_ERROR
     if args.synthetic:
         if args.dir or args.only or args.keep_runs or args.live or args.noise_repeats:
-            print("lgcov bench: --synthetic takes only --out and --json", file=sys.stderr)
+            print(
+                "lgcov bench: --synthetic takes only --out, --json and --held-out",
+                file=sys.stderr,
+            )
             return EXIT_ERROR
-        return _bench_synthetic(Path(args.out), Path(args.json or "docs/benchmark-synthetic.json"))
+        default_json = (
+            "docs/benchmark-held-out.json" if args.held_out else "docs/benchmark-synthetic.json"
+        )
+        return _bench_synthetic(
+            Path(args.out), Path(args.json or default_json), held_out=args.held_out
+        )
     args.json = args.json or "docs/benchmark-results.json"
     folder = Path(args.dir or "docs/benchmark")
     files = [f for f in sorted(folder.glob("*.yaml")) if not args.only or f.stem in args.only]
