@@ -265,6 +265,33 @@ def test_head_parts_are_written_as_schema_3() -> None:
     assert parse_candidate(candidate_to_json(run)).parts == run.parts
 
 
+# T133: `channels` is optional on the evaluate path (base may still lack the field). Read a file
+# that includes or omits it without `its fields differ`. Do not emit it yet — evaluate checks out
+# base, so writing `channels` before that reader lands breaks the two-job gate (T193 read-before-
+# write).
+def test_evaluate_loads_a_candidate_without_channels() -> None:
+    assert "channels" not in BODY
+    assert parse_candidate(candidate_to_json(RUN)).channels is None
+
+
+def test_evaluate_loads_a_candidate_that_includes_channels() -> None:
+    held = {"messages": "LastValue:", "vals": "BinaryOperatorAggregate:add"}
+    run = parse_candidate(json.dumps({**BODY, "channels": held}))
+    assert run.channels == held
+
+
+def test_channels_are_not_written_until_base_can_read_them() -> None:
+    run = replace(RUN, channels={"messages": "LastValue:"})
+    body = json.loads(candidate_to_json(run))
+    assert "channels" not in body
+    assert parse_candidate(candidate_to_json(run)).channels is None
+
+
+def test_channels_that_aren_t_a_string_map_are_refused() -> None:
+    with pytest.raises(ValueError, match="channels"):
+        parse_candidate(json.dumps({**BODY, "channels": {"x": 1}}))
+
+
 # T186: `cassette accept --candidate-in` takes its fresh runs from the file, so the review commands
 # can accept without running the PR's code (docs/review.md).
 RECORDED = [

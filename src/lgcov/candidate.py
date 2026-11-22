@@ -31,7 +31,9 @@ _KINDS = (None, "node", "tool", "agent")
 _PROBE = {"run", "step", "node", "output", "goto", "raised"}
 _PROBE_3 = _PROBE - {"step"} | {"unit"}  # T193: a unit's position down the tree, not a step index
 _LATER = {"parts", "repeats"}  # T193: schema 3's own fields, which later PRs fill in
-_OPTIONAL = {"channels"}  # T133: present when the candidate job recorded channel fingerprints
+# T133: optional; evaluate may still be base's reader. Accept when present, do not write yet
+# (T193 read-before-write: base evaluate rejects unknown top-level keys).
+_OPTIONAL = {"channels"}
 
 
 @dataclass(frozen=True)
@@ -127,8 +129,8 @@ def candidate_to_json(run: CandidateRun) -> str:
         body["parts"] = run.parts
     if run.repeats:
         body["repeats"] = [_probe_body(p, schema) for p in run.repeats]
-    if run.channels is not None:
-        body["channels"] = run.channels
+    # T133: do not emit `channels` until base's evaluate can read `_OPTIONAL` (this PR lands the
+    # reader). In-memory one-job `ci` still carries `CandidateRun.channels` for case 3.
     return json.dumps(body, indent=2, default=_saved) + "\n"
 
 
