@@ -33,3 +33,9 @@ SUPPORT_CLIENT = SharedAgent(
     "support-client", support.client_graph, QUESTIONS, support.CLIENT_EDITS, support.outcome_ok
 )
 SHARED_AGENTS = (SUPPORT, SUPPORT_NESTED, SUPPORT_CLIENT)
+
+# T264: held-out edits stay apart from AGENTS / every_case; import for the opt-in API.
+from examples.synthetic_agents.held_out import HELD_OUT as HELD_OUT  # noqa: E402
+from examples.synthetic_agents.held_out import (  # noqa: E402
+    every_held_out_case as every_held_out_case,
+)

@@ -226,7 +226,7 @@ Reproduce:
 uv run lgcov bench --synthetic
 ```
 
-This replaces only this section. Plain `lgcov bench` rewrites the whole file, so run this again after it.
+This replaces only this section. Plain `lgcov bench` rewrites the whole file, so run this again after it. Held-out cases (T264) are opt-in and separate: `lgcov bench --synthetic --held-out` (does not mix into the suite above).
 
 ## Real PRs
 

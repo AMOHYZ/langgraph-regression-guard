@@ -1,8 +1,8 @@
-"""Held-out synthetic cases (T264). Not wired into the existing ~55 / every_case.
+"""Held-out synthetic cases (T264). Opt-in via every_held_out_case / bench --held-out.
 
 Each case is a real edited graph built from the happy-path agents (demo / fanout /
 subgraph), labeled with user-consequence truth and which suite question kinds the
-edit is harmful on.
+edit is harmful on. Not part of AGENTS / every_case (the main synthetic suite).
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from langgraph.types import Send
 
 from examples.demo_agent import graph as demo
 from examples.synthetic_agents import fanout, subgraph
+from lgcov.synthetic import Case
+from lgcov.synthetic import every_held_out_case as _every_held_out_case
 
 # Suite questions (hardcoded; do not import QUESTIONS — that pulls mutations wiring).
 # "Where is my order?" / "Order status?" → order; "What are your hours?" → hours.
@@ -42,10 +44,10 @@ class HeldOutCase:
 
 def _demo_build(
     *,
-    classify_fn: Callable[[demo.State], demo.State] = demo.classify,
-    lookup_fn: Callable[[demo.State], demo.State] = demo.lookup_order,
-    respond_fn: Callable[[demo.State], demo.State] = demo.respond,
-    route_fn: Callable[[demo.State], Literal["lookup_order", "respond"]] = demo.route,
+    classify_fn: Callable[..., Any] = demo.classify,
+    lookup_fn: Callable[..., Any] = demo.lookup_order,
+    respond_fn: Callable[..., Any] = demo.respond,
+    route_fn: Callable[..., Any] = demo.route,
     schema: type[Any] = demo.State,
 ) -> Any:
     b = StateGraph(schema)
@@ -559,3 +561,10 @@ HELD_OUT: tuple[HeldOutCase, ...] = (
         graph=_sub_build(after_node=_sub_casefold_upper),
     ),
 )
+
+
+def every_held_out_case() -> tuple[Case, ...]:
+    """T264: Cases for HELD_OUT on each suite question. Opt-in; not in every_case."""
+    from examples.synthetic_agents import AGENTS
+
+    return _every_held_out_case(AGENTS, HELD_OUT)
