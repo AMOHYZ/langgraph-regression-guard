@@ -81,6 +81,11 @@ _ROWS: dict[str, tuple[str, str]] = {
         "Read the pool / lineage diff and decide: this PR changed case pools or lineage.json, "
         "which the gate reads from the base, so lgcov can't vouch for it.",
     ),
+    "unsupported": (
+        _NO_DECISION,
+        "lgcov can't attribute this change safely: {unsupported}. Decide yourself; this is not a "
+        "pass or a fail of the agent.",
+    ),
     "unmeasured_root": (
         _NO_DECISION,
         "Read the unmeasured root(s) and decide, or add a KPI/code check that observes their "
@@ -134,6 +139,7 @@ _UNDECIDED = {  # each state a human decides, and what its exit 0 means
     "pools_edited": (
         "This check exits 0 because pool and lineage edits need a human. That is not a pass."
     ),
+    "unsupported": ("This check exits 0 because attribution was unsupported. That is not a pass."),
     "unmeasured_root": (
         "This check exits 0 because unmeasured roots under `fail-on: harmed-root` need a human. "
         "That is not a pass."
@@ -220,6 +226,7 @@ class Evidence:
     first_adoption: bool = False  # T154: the base has no policy yet, so this PR's own is used
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
     pools_edited: bool = False  # T124: this PR changed lineage.json or a case pool folder
+    unsupported: tuple[str, ...] = ()  # T133: attribution patterns that aren't safe
     code_failures: tuple[CodeFailure, ...] = ()  # a policy violation, whatever the test says
     hidden_failures: tuple[CodeFailure, ...] = ()  # the same, with a re-baseline hiding it
     unmeasured_drift: bool = False  # T262: roots no KPI/check covers, under fail-on: harmed-root
@@ -275,6 +282,8 @@ def _state(e: Evidence) -> str:
         return "cassettes_edited"
     if e.pools_edited:
         return "pools_edited"
+    if e.unsupported:
+        return "unsupported"
     if e.unmeasured_drift:  # T262: even under a SHIP — unmeasured is never a pass
         return "unmeasured_root"
     if e.statistical is None and e.unenforced_drift:
@@ -323,6 +332,7 @@ def decide_action(e: Evidence) -> Action:
         "not_checked": _code(e.not_checked),
         "abstained": _code(e.abstained),
         "dropped": _code(e.advisory_drops),
+        "unsupported": "; ".join(e.unsupported),
         "blocking": f"{e.k_gate} blocking KPI{'' if e.k_gate == 1 else 's'}",
     }
     headline, step = (text.format(**fill) for text in _ROWS[state])

@@ -31,6 +31,7 @@ _KINDS = (None, "node", "tool", "agent")
 _PROBE = {"run", "step", "node", "output", "goto", "raised"}
 _PROBE_3 = _PROBE - {"step"} | {"unit"}  # T193: a unit's position down the tree, not a step index
 _LATER = {"parts", "repeats"}  # T193: schema 3's own fields, which later PRs fill in
+_OPTIONAL = {"channels"}  # T133: present when the candidate job recorded channel fingerprints
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,8 @@ class CandidateRun:
     harness_node: str = ""
     crash: str = ""
     crash_node: str = ""
+    # T133: head's state-channel fingerprints (type + reducer), for schema/reducer unsupported.
+    channels: dict[str, str] | None = None
 
 
 def _saved(value: object) -> object:
@@ -110,8 +113,10 @@ def candidate_to_json(run: CandidateRun) -> str:
         or run.parts is not None
     )
     schema = 3 if units else SCHEMA
-    body: dict[str, object] = asdict(replace(run, head=None, fresh=(), probes=(), repeats=()))
-    del body["fresh"], body["probes"], body["parts"], body["repeats"]
+    body: dict[str, object] = asdict(
+        replace(run, head=None, fresh=(), probes=(), repeats=(), channels=None)
+    )
+    del body["fresh"], body["probes"], body["parts"], body["repeats"], body["channels"]
     body |= {
         "schema": schema,
         "head": run.head.to_dict() if run.head else None,
@@ -122,7 +127,20 @@ def candidate_to_json(run: CandidateRun) -> str:
         body["parts"] = run.parts
     if run.repeats:
         body["repeats"] = [_probe_body(p, schema) for p in run.repeats]
+    if run.channels is not None:
+        body["channels"] = run.channels
     return json.dumps(body, indent=2, default=_saved) + "\n"
+
+
+def _channels(raw: object) -> dict[str, str] | None:
+    """T133: optional map of channel name → fingerprint from the candidate job."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in raw.items()
+    ):
+        raise ValueError("channels isn't a string map")
+    return {str(k): str(v) for k, v in raw.items()}
 
 
 def _text(raw: Mapping[str, object], key: str) -> str:
@@ -249,7 +267,7 @@ def _budget_hit(raw: object) -> tuple[str, float] | None:
 
 
 _FIELDS = {
-    *(f.name for f in fields(CandidateRun) if f.name not in {"fresh", *_LATER}),
+    *(f.name for f in fields(CandidateRun) if f.name not in {"fresh", *_LATER, *_OPTIONAL}),
     "runs",
     "schema",
 }
@@ -270,7 +288,7 @@ def parse_candidate(text: str) -> CandidateRun:
         if type(schema) is not int or schema not in READS:
             reads = " and ".join(map(str, READS))
             raise ValueError(f"candidate file schema {schema!r}; this lgcov reads {reads}")
-        may = _FIELDS | _LATER if schema == 3 else _FIELDS
+        may = _FIELDS | _LATER | _OPTIONAL if schema == 3 else _FIELDS | _OPTIONAL
         differ = (_FIELDS - raw.keys()) | (raw.keys() - may)
         if differ:
             raise ValueError(f"its fields differ: {sorted(differ)}")
@@ -295,6 +313,7 @@ def parse_candidate(text: str) -> CandidateRun:
             harness_node=_text(raw, "harness_node"),
             crash=_text(raw, "crash"),
             crash_node=_text(raw, "crash_node"),
+            channels=_channels(raw.get("channels")),
         )
     except (AttributeError, KeyError, TypeError) as exc:
         raise ValueError(f"a field is missing or isn't valid: {exc}") from None

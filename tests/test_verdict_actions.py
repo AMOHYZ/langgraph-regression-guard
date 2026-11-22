@@ -47,6 +47,11 @@ ROWS: dict[str, Evidence] = {
     "inconclusive": Evidence(statistical="INCONCLUSIVE", k_gate=1),
     "cassettes_edited": Evidence(cassettes_edited=True, statistical="SHIP", k_gate=2),
     "pools_edited": Evidence(pools_edited=True, statistical="SHIP", k_gate=2),
+    "unsupported": Evidence(
+        unsupported=("occurrence pairing is unsafe: node 'worker' ran 2x, baseline has 3x",),
+        statistical="SHIP",
+        k_gate=2,
+    ),
     "unmeasured_root": Evidence(unmeasured_drift=True, statistical="SHIP", k_gate=1),
     "drift_not_enforced": Evidence(unenforced_drift=True),
     "advisory_drop_only": Evidence(advisory_drops=("tone",)),
@@ -74,6 +79,10 @@ def _filled(cell: str) -> str:
         ("N blocking", "2 blocking"),
         ("F of N cases", "1 of 8 cases"),
         ("<cases>", "run-0/n"),
+        (
+            "<reason>",
+            "occurrence pairing is unsafe: node 'worker' ran 2x, baseline has 3x",
+        ),
     ):
         cell = cell.replace(placeholder, value)
     return cell
@@ -292,6 +301,7 @@ def test_an_undecided_run_says_what_its_exit_code_means() -> None:
     for state in (
         "cassettes_edited",
         "pools_edited",
+        "unsupported",
         "unmeasured_root",
         "drift_not_enforced",
         "advisory_drop_only",
@@ -451,6 +461,16 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
         replace(
             SHIPPED,
             pools_edited=True,
+            replay_lines=NO_DRIFT,
+            tally=UNTOUCHED_0,
+        ),
+        0,
+        "needs_human",
+    ),
+    "unsupported": (
+        replace(
+            SHIPPED,
+            unsupported=("occurrence pairing is unsafe: node 'worker' ran 2x, baseline has 3x",),
             replay_lines=NO_DRIFT,
             tally=UNTOUCHED_0,
         ),
