@@ -32,12 +32,15 @@ or slice group never goes further than its KPIs' own verdicts.
 
   | Check kind | Measures a taxonomy root? |
   |---|---|
-  | LLM / fake / jev judge on that node | Yes (rubric over cassette output) |
+  | LLM / **jev** judge on that node | Yes (rubric over cassette output) |
+  | `judge: fake` (constant label) | **No** (T264; never observes) |
+  | `output_contains` / `output_matches` on that node | Yes (reads node output) |
   | `tool_called` / `tool_not_called` / `tool_sequence` / `max_steps` | Yes (run-level effects) |
   | `node_visited` / `node_not_visited` on a **downstream** node | Yes |
-  | `node_sequence` that includes a node **after** the root | Yes |
+  | `node_sequence` that includes a node **after** the root (incl. `sub.inner`) | Yes |
   | `node_visited` / `node_not_visited` on the root itself | **No** (presence only) |
   | Check scoped only to nodes **before** the root on the run path | **No** |
+  | Check skipped by `when:` for every sample | **Unmeasured** for that root (not "no harm seen") |
 - **A code check's new failure blocks outside these numbers.** A check that passed on the base
   and fails on the PR exits 1 on one case, whatever the paired test says. So it has no false-alarm
   bound: a check whose path varies between runs of an unchanged agent will block by chance, on

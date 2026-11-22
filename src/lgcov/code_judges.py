@@ -7,8 +7,11 @@ a missing or malformed trace raises JudgeInfraError, never a fail.
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from lgcov.judges import KPI, Judge, JudgeInfraError, NodeState, Verdict
 from lgcov.trace import RunTrace, parse_run
@@ -117,6 +120,51 @@ class ToolSequence:
         return _in_order(self.kpi, "tool", self.tools, _run(node_output).tools)
 
 
+def _output_text(node_output: NodeState) -> str:
+    """Flatten a node's cassette output for substring / regex checks."""
+    if "output" in node_output and len(node_output) == 1:
+        value = node_output["output"]
+        return value if isinstance(value, str) else json.dumps(value, default=str)
+    return json.dumps(node_output, default=str)
+
+
+@dataclass(frozen=True)
+class OutputContains:
+    """T264: pass when `text` appears in the named node's output."""
+
+    kpi: KPI
+    text: str
+
+    def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
+        blob = _output_text(node_output)
+        ok = self.text in blob
+        return _verdict(
+            self.kpi,
+            ok,
+            f"output contains {self.text!r}" if ok else f"output missing {self.text!r}",
+        )
+
+
+@dataclass(frozen=True)
+class OutputMatches:
+    """T264: pass when `pattern` (from the base-ref taxonomy) matches the node's output."""
+
+    kpi: KPI
+    pattern: str
+
+    def judge(self, node_input: NodeState, node_output: NodeState) -> Verdict:
+        blob = _output_text(node_output)
+        try:
+            ok = re.search(self.pattern, blob) is not None
+        except re.error as exc:
+            raise JudgeInfraError(f"code judge: bad output_matches pattern: {exc}") from None
+        return _verdict(
+            self.kpi,
+            ok,
+            f"output matches {self.pattern!r}" if ok else f"output does not match {self.pattern!r}",
+        )
+
+
 def _names(value: str) -> tuple[str, ...]:
     names = tuple(name.strip() for name in value.split(","))
     if not all(names):
@@ -130,40 +178,59 @@ def _positive_int(value: str) -> int:
     return int(value)
 
 
+def check_in_scope(check: Mapping[str, Any], run_inputs: Mapping[str, object]) -> bool:
+    """T264: `when.input_contains` gates whether this check applies to the run inputs."""
+    when = check.get("when")
+    if when is None:
+        return True
+    if not isinstance(when, Mapping):
+        raise ValueError(f"check 'when' must be a mapping, got {type(when).__name__}")
+    needle = when.get("input_contains")
+    if needle is None:
+        return True
+    blob = json.dumps(run_inputs, default=str)
+    return str(needle) in blob
+
+
 # check type -> (required param, builder taking the KPI and that param's raw value)
 CODE_CHECKS: dict[str, tuple[str, Callable[[KPI, str], Judge]]] = {
     "max_steps": ("n", lambda k, v: MaxSteps(k, _positive_int(v))),
     "node_not_visited": ("node", NodeNotVisited),
     "node_sequence": ("nodes", lambda k, v: NodeSequence(k, _names(v))),
     "node_visited": ("node", NodeVisited),
+    "output_contains": ("text", OutputContains),
+    "output_matches": ("pattern", OutputMatches),
     "tool_called": ("tool", ToolCalled),
     "tool_not_called": ("tool", ToolNotCalled),
     "tool_sequence": ("tools", lambda k, v: ToolSequence(k, _names(v))),
 }
 _SEQUENCES = {"node_sequence": "nodes", "tool_sequence": "tools"}
+CONTENT_CHECK_TYPES = frozenset({"output_contains", "output_matches"})
 
 
 def unknown_names(
-    check: Mapping[str, str], base: Collection[str], head: Collection[str]
+    check: Mapping[str, Any], base: Collection[str], head: Collection[str]
 ) -> tuple[str, ...]:
     """T197: a sequence check's names that neither the base nor the PR has: a typo, or a node
     inside a subgraph. There is nothing to judge them on. A name the base has and the PR lost
     is not one of these: the check runs, and fails on the PR."""
-    param = _SEQUENCES.get(check.get("type", ""))
+    param = _SEQUENCES.get(str(check.get("type", "")))
     if param is None:
         return ()
-    names = dict.fromkeys(_names(check.get(param, "")))
+    raw = check.get(param, "")
+    names = dict.fromkeys(_names(raw if isinstance(raw, str) else str(raw)))
     return tuple(n for n in names if n not in base and n not in head)
 
 
-def code_judge(kpi: KPI, check: Mapping[str, str]) -> Judge:
+def code_judge(kpi: KPI, check: Mapping[str, Any]) -> Judge:
     """Build the code judge a taxonomy `check:` mapping asks for."""
     if set(kpi.labels) != {"pass", "fail"}:
         raise ValueError(f"code judges need pass/fail labels, got {kpi.labels}")
-    kind = check.get("type", "")
+    kind = str(check.get("type", ""))
     if kind not in CODE_CHECKS:
         raise ValueError(f"unknown code check {kind!r}, expected one of {sorted(CODE_CHECKS)}")
     param, build = CODE_CHECKS[kind]
-    if not check.get(param):
+    value = check.get(param)
+    if value is None or value == "":
         raise ValueError(f"code check '{kind}' needs '{param}'")
-    return build(kpi, check[param])
+    return build(kpi, value if isinstance(value, str) else str(value))

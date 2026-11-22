@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Content code checks (T264).** `output_contains` / `output_matches` read a named node's
+  output so a root can be measured without a model. Optional `when: {input_contains: ...}`
+  skips out-of-scope inputs (unmeasured for that case — never a silent "no harm seen").
+  Trajectory checks accept unit paths (`sub.inner`). `judge: fake` never measures a root.
+  `output_matches` patterns come from the base-ref taxonomy. Measuring table updated in
+  [docs/gate.md](docs/gate.md) and [docs/taxonomy.md](docs/taxonomy.md).
 - **Case pools (T124).** `lgcov pools check` keeps optimiser and gate cases apart:
   refuses the same case id in two pools, a gate case the locked round's judge was fitted on,
   and near-exact duplicate input text (`v1:` hash after NFKC / casefold / whitespace collapse —
