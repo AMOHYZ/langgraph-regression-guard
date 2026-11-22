@@ -252,7 +252,13 @@ from lgcov.synthetic_score import (
     shared_report,
 )
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
-from lgcov.unsupported import Unsupported, channel_fingerprints, guard_labels, visit_counts
+from lgcov.unsupported import (
+    Unsupported,
+    UnsupportedError,
+    channel_fingerprints,
+    guard_labels,
+    visit_counts,
+)
 from lgcov.verdict_actions import CI_STATUSES, MODES, CodeFailure, gate_findings
 
 # 0 = no change / accepted, 1 = graph/replay changed or named node not drifted,
@@ -752,8 +758,16 @@ def _replay(argv: list[str]) -> int:
         replays = [_replay_under(cfg, graph, run, not args.live, baseline=runs) for run in runs]
     except NodeError as exc:
         return _node_failure("lgcov replay", exc)
+    except UnsupportedError as exc:
+        print(f"lgcov replay: unsupported: {exc.unsupported.reason}", file=sys.stderr)
+        return 0
     except Exception as exc:  # replay itself: no node or router raised it
         return _harness_error("lgcov replay", "replay failed outside node code", exc)
+    held = [r.unsupported for r in replays if r.unsupported is not None]
+    if held:
+        for bad in held:
+            print(f"lgcov replay: unsupported: {bad.reason}", file=sys.stderr)
+        return 0
     drifts = [list(r.drifts) for r in replays]
     skipped = _rebind_lines(replays)
     notes = [*skipped, *_raised_lines(replays)]
@@ -884,7 +898,11 @@ def _record(argv: list[str]) -> int:
     except (OSError, ImportError, SyntaxError, ValueError) as exc:
         print(f"lgcov record: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    runs = [record(graph, i, units=args.schema == 2) for i in inputs]
+    try:
+        runs = [record(graph, i, units=args.schema == 2) for i in inputs]
+    except UnsupportedError as exc:
+        print(f"lgcov record: unsupported: {exc.unsupported.reason}", file=sys.stderr)
+        return 0
     if args.samples:
         runs = [fill_samples(graph, r, args.samples) for r in runs]
     parts_table, by_node = chat_parts(graph)  # T239: chat-model fields as parts
@@ -1379,8 +1397,19 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
         if exc.transport:
             return replace(run, harness_error=original, harness_node=exc.node)
         return replace(run, crash=f"Node `{exc.node}` raised {original}", crash_node=exc.node)
+    except UnsupportedError as exc:
+        return replace(run, unsupported=(exc.unsupported.reason,))
     except Exception as exc:  # replay itself: no node or router raised it
         return replace(run, harness_error=_harness_message("replay failed outside node code", exc))
+    held = tuple(r.unsupported.reason for r in replays if r.unsupported is not None)
+    if held:
+        return replace(
+            run,
+            unsupported=held,
+            agent_seconds=perf_counter() - agent_start,
+            budget_hit=budget.hit,
+            channels=channel_fingerprints(graph) or None,
+        )
     probes = probe_steps(graph, runs, changed_nodes(graph, runs))  # T162: offline, no verdict
     probes += probe_units(graph, runs) if units else ()  # T193: units read the same way
     probes += probe_routers(graph, runs)  # T221: changed routers on base's router_state
@@ -1422,6 +1451,8 @@ def _evaluate(
         return replace(partial, harness_error=run.harness_error, harness_node=run.harness_node)
     if run.crash:
         return replace(partial, crash=run.crash, root_drift=(run.crash_node,))
+    if run.unsupported:
+        return replace(partial, unsupported=run.unsupported)
     try:
         path = Path(cfg.cassette_dir) / "baseline.json"
         recording = recording_from_json(path.read_text(encoding="utf-8"))
@@ -2309,6 +2340,14 @@ def _judge_cmd(argv: list[str]) -> int:
             return _harness_error("lgcov judge", "cannot read baseline", exc)
         try:
             done = [_replay_under(cfg, graph, r, not args.live, baseline=runs) for r in runs]
+            if any(r.unsupported for r in done):
+                for r in done:
+                    if r.unsupported is not None:
+                        print(
+                            f"lgcov judge: unsupported: {r.unsupported.reason}",
+                            file=sys.stderr,
+                        )
+                return 0
             replays = [(list(r.drifts), list(r.steps)) for r in done]
             _say_replay_notes(done)
         except NodeError as exc:
@@ -2969,6 +3008,11 @@ def _review_cmd(argv: list[str]) -> int:
             done = [_replay_under(cfg, graph, run, serve=True, baseline=runs) for run in runs]
         except Exception as exc:
             return _harness_error("lgcov review", "cannot replay the graph", exc)
+        if any(r.unsupported for r in done):
+            for r in done:
+                if r.unsupported is not None:
+                    print(f"lgcov review: unsupported: {r.unsupported.reason}", file=sys.stderr)
+            return 0
         _say_replay_notes(done)
         fresh = [list(r.steps) for r in done]
     cases = _l2_cases(spec, fresh)

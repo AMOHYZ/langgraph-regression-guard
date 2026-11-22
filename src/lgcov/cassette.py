@@ -40,7 +40,13 @@ from lgcov.messages import decode, encode
 from lgcov.normalize import key_view, normalize, redact_secrets
 from lgcov.rebind import Ambiguous, rebind
 from lgcov.snapshot import node_tools
-from lgcov.unsupported import Unsupported
+from lgcov.unsupported import (
+    Unsupported,
+    UnsupportedError,
+    exception_unsupported,
+    graph_unsupported,
+    steps_unsupported,
+)
 
 # T248: a tool call that ended this way is never compared, served or labelled; the rest of its
 # run is not checked, and the verdict is INCONCLUSIVE (ruling 1).
@@ -449,8 +455,21 @@ def record(
     T193: `units` also saves the nodes that ran inside each subgraph, as units of its step, for a
     schema-2 recording, and a graph started inside a node or a tool as an `agent` unit of that
     caller (served only whole through it).
+
+    T133: a checkpointer or parallel `InvalidUpdateError` raises `UnsupportedError` instead of
+    LangGraph's crash. An interrupt is still recorded (as an `__interrupt__` step); replay then
+    returns `unsupported`.
     """
-    steps = _run(graph, inputs, (), (), like=[s for r in like for s in r.steps], units=units)[0]
+    bad = graph_unsupported(graph, serve=False)
+    if bad is not None:
+        raise UnsupportedError(bad)
+    try:
+        steps = _run(graph, inputs, (), (), like=[s for r in like for s in r.steps], units=units)[0]
+    except Exception as exc:
+        mapped = exception_unsupported(exc)
+        if mapped is not None:
+            raise UnsupportedError(mapped) from exc
+        raise
     return Cassette(inputs=inputs, steps=steps)
 
 
@@ -1549,22 +1568,44 @@ def replay_run(
     `baseline` is every run recorded with `cassette`: a node this run didn't record, but another
     did, gets its fingerprint in that recording's scheme. T193: `units` records the units inside
     each subgraph on the fresh steps, as `record` does. T239: `parts` is the recording's table;
-    a served step needs every named part to match the live graph."""
+    a served step needs every named part to match the live graph.
+
+    T133 PR B: checkpointer / Store-on-serve / `InvalidUpdateError` / interrupt become
+    `Replay.unsupported` instead of a crash or silent stale serve."""
+    bad = graph_unsupported(graph, serve=serve)
+    if bad is not None:
+        return Replay((), (), (), unsupported=bad)
     served = cassette.steps if serve else ()
     like = [s for r in (cassette, *baseline) for s in r.steps]
-    fresh, calls, halt = _run(
-        graph,
-        cassette.inputs,
-        served,
-        ignore_paths,
-        on_divergence,
-        budget,
-        mask_volatile,
-        like,
-        units,
-        parts,
-    )
-    return compared_run(cassette, fresh, calls, halt, ignore_paths)
+    try:
+        fresh, calls, halt = _run(
+            graph,
+            cassette.inputs,
+            served,
+            ignore_paths,
+            on_divergence,
+            budget,
+            mask_volatile,
+            like,
+            units,
+            parts,
+        )
+    except Exception as exc:
+        mapped = exception_unsupported(exc)
+        if mapped is not None:
+            return Replay((), (), (), unsupported=mapped)
+        raise
+    # Interrupt: still re-runs the gate (never served), then refuse compare / resume.
+    bad = steps_unsupported(fresh) or steps_unsupported(cassette.steps)
+    if bad is not None:
+        return Replay((), tuple(fresh), tuple(calls), halt, unsupported=bad)
+    try:
+        return compared_run(cassette, fresh, calls, halt, ignore_paths)
+    except TypeError as exc:
+        mapped = exception_unsupported(exc)
+        if mapped is not None:
+            return Replay((), tuple(fresh), tuple(calls), halt, unsupported=mapped)
+        raise
 
 
 def _transient_not_checked(steps: Sequence[Step]) -> tuple[str, ...]:

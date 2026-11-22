@@ -4,11 +4,10 @@ The oracle is `_audit`: a served replay must give the same outputs, unmasked, as
 run of the same PR graph. It doesn't use the key logic it checks, so any stale hit shows up as
 a difference. Results: docs/validation/replay-audit.md.
 
-Each open finding is a strict xfail (`_finding`). Run with --runxfail to see them fail.
+T133 PR B flipped the checkpointer / interrupt / Store findings to assert `unsupported`.
 """
 
 import asyncio
-import contextlib
 import json
 import time
 from collections import Counter
@@ -47,12 +46,7 @@ from lgcov.cassette import (
 )
 from lgcov.cli import _divergence_lines, main
 from lgcov.messages import plain
-
-
-def _finding(why: str, raises: type[BaseException] = AssertionError) -> pytest.MarkDecorator:
-    """An open finding. Strict, so a fix fails the test until this comes off. `raises`, so any
-    other failure, like a broken fixture, still fails."""
-    return pytest.mark.xfail(strict=True, raises=raises, reason=f"T152: {why}")
+from lgcov.unsupported import UnsupportedError
 
 
 def _recorded(graph: object, inputs: dict[str, object]) -> Cassette:
@@ -77,7 +71,7 @@ def _audit(
     spy.reset_mock()
     fresh = replay_run(build(), cassette, serve=True)
     if changed is not None and (changed, "live") not in _how(fresh):
-        pytest.fail(f"broken fixture: `{changed}` didn't run live")  # not caught by `_finding`
+        pytest.fail(f"broken fixture: `{changed}` didn't run live")
     assert _outputs(fresh.steps) == _outputs(live.steps)
     return fresh
 
@@ -242,23 +236,22 @@ def test_an_unchanged_subgraph_still_runs_live(sub_checkpointer: Checkpointer) -
     assert fresh.drifts == ()
 
 
-# T133 adds the `unsupported` result these should assert. Today they fail on LangGraph's own error.
-NO_THREAD_ID = "no `unsupported` result (T133): `_run` passes no thread_id, so LangGraph raises"
-
-
-@_finding(NO_THREAD_ID, raises=ValueError)
+# T133 PR B: parent checkpointer → unsupported (not LangGraph's ValueError).
 @SUB_SETTINGS
 def test_a_graph_with_a_checkpointer_replays_or_says_unsupported(
     sub_checkpointer: Checkpointer,
 ) -> None:
     cassette = _recorded(subgraph.build(2, sub_checkpointer=sub_checkpointer), VALUE)
     pr = subgraph.build(2, sub_checkpointer=sub_checkpointer, parent_checkpointer=InMemorySaver())
-    replay_run(pr, cassette, serve=True)
+    fresh = replay_run(pr, cassette, serve=True)
+    assert fresh.unsupported is not None
+    assert "checkpointer" in fresh.unsupported.reason.lower()
 
 
-@_finding(NO_THREAD_ID, raises=ValueError)
 def test_a_graph_with_a_checkpointer_records_or_says_unsupported() -> None:
-    record(subgraph.build(2, parent_checkpointer=InMemorySaver()), VALUE)
+    with pytest.raises(UnsupportedError) as caught:
+        record(subgraph.build(2, parent_checkpointer=InMemorySaver()), VALUE)
+    assert "checkpointer" in caught.value.unsupported.reason.lower()
 
 
 # Fixture 5: reducer state, `add_messages`.
@@ -383,9 +376,6 @@ def test_ignore_paths_take_a_message_field_out_of_the_key() -> None:
 
 
 # Fixture 6: an interrupt, which replay has no way to resume.
-INTERRUPTED = "no `unsupported` result (T133): an interrupted run ends in a raw"
-
-
 def test_an_interrupted_call_is_never_served_and_fires_again_on_replay() -> None:
     spy = Mock()
     cassette = _recorded(interrupt.build(spy), QUESTION)
@@ -394,24 +384,28 @@ def test_an_interrupted_call_is_never_served_and_fires_again_on_replay() -> None
         ("__interrupt__", True),
     ]
     spy.reset_mock()
-    with contextlib.suppress(TypeError):  # the next test's finding
-        replay_run(interrupt.build(spy), cassette, serve=True)
+    fresh = replay_run(interrupt.build(spy), cassette, serve=True)
+    # Gate still re-runs (never served); the run is unsupported rather than TypeError.
+    assert fresh.unsupported is not None
+    assert "interrupt" in fresh.unsupported.reason.lower()
     spy.assert_called_once_with()
 
 
-@_finding(f"{INTERRUPTED} TypeError from comparing the Interrupt", raises=TypeError)
 def test_an_interrupted_run_replays_or_says_unsupported() -> None:
-    replay_run(interrupt.build(), _recorded(interrupt.build(), QUESTION), serve=True)
+    fresh = replay_run(interrupt.build(), _recorded(interrupt.build(), QUESTION), serve=True)
+    assert fresh.unsupported is not None
+    assert "interrupt" in fresh.unsupported.reason.lower()
 
 
-@_finding(f"{INTERRUPTED} ValueError with a checkpointer, as in fixture 4", raises=ValueError)
 def test_an_interrupted_run_with_a_checkpointer_replays_or_says_unsupported() -> None:
     pr = interrupt.build(checkpointer=InMemorySaver())
-    replay_run(pr, _recorded(interrupt.build(), QUESTION), serve=True)
+    fresh = replay_run(pr, _recorded(interrupt.build(), QUESTION), serve=True)
+    assert fresh.unsupported is not None
+    assert fresh.unsupported.pattern in {"interrupt", "checkpointer"}
 
 
 @pytest.mark.parametrize(
-    ("source", "base", "inputs", "why"),
+    ("source", "base", "inputs", "needle"),
     [
         pytest.param(
             "from langgraph.checkpoint.memory import InMemorySaver\n"
@@ -419,14 +413,14 @@ def test_an_interrupted_run_with_a_checkpointer_replays_or_says_unsupported() ->
             "graph = build(2, parent_checkpointer=InMemorySaver())\n",
             subgraph.build(2),
             VALUE,
-            "ValueError: Checkpointer requires",
+            "checkpointer",
             id="checkpointer",
         ),
         pytest.param(
             "from fixtures.replay_audit.interrupt import build\ngraph = build()\n",
             interrupt.build(),
             QUESTION,
-            "TypeError: Object of type Interrupt is not JSON serializable",
+            "interrupt",
             id="interrupt",
         ),
     ],
@@ -435,15 +429,19 @@ def test_lgcov_replay_fails_loudly_on_a_graph_it_can_t_replay(
     source: str,
     base: object,
     inputs: dict[str, object],
-    why: str,
+    needle: str,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Loud, so never a silent pass, but T133 should say `unsupported` instead.
+    # T133: unsupported (exit 0) with a reason — never a silent pass, never harness exit 2.
     (tmp_path / "baseline.json").write_text(runs_to_json([record(base, inputs)]), encoding="utf-8")
     (tmp_path / "graph.py").write_text(source, encoding="utf-8")
-    assert main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")]) == 2
-    assert f"replay failed outside node code: {why}" in capsys.readouterr().err
+    code = main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")])
+    captured = capsys.readouterr()
+    text = f"{captured.out}\n{captured.err}".lower()
+    assert code == 0
+    assert "unsupported" in text or needle in text
+    assert "replay failed outside node code" not in text
 
 
 # Fixture 7: a tool that writes.
@@ -603,11 +601,15 @@ def test_a_halt_doesn_t_wait_out_the_default_retry_rule(monkeypatch: pytest.Monk
     sleep.assert_not_called()
 
 
-@_finding("Y is served: what it reads from the Store changed, and its state didn't")
 def test_y_is_not_served_when_what_it_reads_from_a_store_changed() -> None:
+    # T133: Store is detectable on the compiled graph; refuse serve rather than silent stale.
     spy, backend = Mock(), InMemoryStore()
     cassette = _recorded(side_effect.build_with_store("old", backend, spy), {})
-    _audit(lambda: side_effect.build_with_store("new", backend, spy), cassette, spy, "x")
+    spy.reset_mock()
+    fresh = replay_run(side_effect.build_with_store("new", backend, spy), cassette, serve=True)
+    assert fresh.unsupported is not None
+    assert "store" in fresh.unsupported.reason.lower()
+    assert spy.call_count == 0
 
 
 # Fixture 8: async nodes, the regression check for T164 (PR #54).
