@@ -1,4 +1,5 @@
-"""T133: `Unsupported(reason)` for attribution that isn't safe (PR A: 1–3; PR B: 5, 7–9)."""
+"""T133: `Unsupported(reason)` for attribution that isn't safe (PR A: 1–3; PR B: 5, 7–9;
+PR C: 4, 6)."""
 
 from __future__ import annotations
 
@@ -9,7 +10,18 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
-from fixtures.replay_audit import interrupt, loop, parallel_update, side_effect, subgraph
+from fixtures.replay_audit import (
+    interrupt,
+    loop,
+    messages,
+    messages_len,
+    parallel_update,
+    send_fanout,
+    send_remap,
+    side_effect,
+    subgraph,
+)
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Checkpointer
@@ -24,7 +36,7 @@ from lgcov.attribution import (
 )
 from lgcov.cassette import Cassette, Replay, accept_nodes, record, replay_run, runs_to_json
 from lgcov.ci_report import CiResult, Tally, render_ci_report
-from lgcov.cli import _run_root, main
+from lgcov.cli import _node_labels, _run_root, main
 from lgcov.unsupported import (
     UnsupportedError,
     channel_fingerprints,
@@ -486,3 +498,133 @@ def test_lgcov_replay_says_unsupported_instead_of_harness_exit_2(
     assert code == 0
     assert "unsupported" in text or needle in text
     assert "replay failed outside node code" not in text
+
+
+# --- Case 4: Send per-task state (keep correct labels; matrix Yes) ---
+
+SEND_GRAPH = ({"plan", "worker", "collect"}, {"plan", "worker", "collect"})
+
+
+def _labels_for(
+    base: Cassette,
+    fresh: Replay,
+    graphs: tuple[set[str], set[str]],
+) -> tuple[NodeLabels, object]:
+    drifts = list(fresh.drifts)
+    codes = (
+        {s.node: s.code for s in base.steps},
+        {s.node: s.code for s in fresh.steps},
+    )
+    probes = {n: Probe(codes[0].get(n) != codes[1].get(n)) for n in {d.node for d in drifts}}
+    return _node_labels([base], [list(fresh.steps)], [list(drifts)], probes, graphs=graphs)
+
+
+def test_send_one_task_change_keeps_plan_root() -> None:
+    """Matrix: same visit counts, one Send payload changes via plan — keep plan as root."""
+    spy = Mock()
+    base = Cassette.from_json(record(send_fanout.build(("a", "b", "c"), spy), {}).to_json())
+    spy.reset_mock()
+    fresh = replay_run(
+        send_fanout.build(("a", "B", "c"), spy), Cassette(inputs={}, steps=list(base.steps)), serve=True
+    )
+    labels, bad = _labels_for(base, fresh, SEND_GRAPH)
+    assert bad is None
+    assert "plan" in labels.root
+    assert visit_counts(base.steps)["worker"] == visit_counts(fresh.steps)["worker"]
+
+
+def test_send_router_remap_keeps_plan_as_routing_root() -> None:
+    """Matrix: fan_out remaps Send payloads; router fingerprint makes plan root — keep it."""
+    spy = Mock()
+    send_remap.REMAP = {}
+    base = Cassette.from_json(record(send_remap.build(spy), {}).to_json())
+    send_remap.REMAP = {"a": "x", "b": "y", "c": "z"}
+    spy.reset_mock()
+    fresh = replay_run(send_remap.build(spy), Cassette(inputs={}, steps=list(base.steps)), serve=True)
+    labels, bad = _labels_for(base, fresh, SEND_GRAPH)
+    assert bad is None
+    assert "plan" in labels.root
+    assert labels.routing.get("plan", 0) >= 1
+
+
+# --- Case 6: add_messages id duplication ---
+
+MSG_GRAPH = ({"x", "y"}, {"x", "y"})
+ASKED: dict[str, object] = {"messages": [HumanMessage("q", id="h1")]}
+
+
+def _ai(text: str, message_id: str = "m1") -> AIMessage:
+    return AIMessage(text, id=message_id)
+
+
+def test_add_messages_id_dup_mislabels_downstream_before_guard() -> None:
+    """Failing example: keep-both vs replace changes message count; normalize masks ids so X
+    shows no drift and Y is unexplained — attribution of add_messages ids is unsafe."""
+    messages_len.REPLIES = (_ai("one", "dup"), _ai("two", "dup"))
+    spy = Mock()
+    base = Cassette.from_json(record(messages_len.build(spy), ASKED).to_json())
+    messages_len.REPLIES = (_ai("one", "dup"), _ai("two", "new"))
+    spy.reset_mock()
+    fresh = replay_run(
+        messages_len.build(spy), Cassette(inputs=ASKED, steps=list(base.steps)), serve=True
+    )
+    assert [d.node for d in fresh.drifts] == ["y"]
+    drifts = list(fresh.drifts)
+    codes = (
+        {s.node: s.code for s in base.steps},
+        {s.node: s.code for s in fresh.steps},
+    )
+    probes = {n: Probe(codes[0].get(n) != codes[1].get(n)) for n in {d.node for d in drifts}}
+    labels = classify(["y"], codes, probes, graphs=MSG_GRAPH)
+    labels = explain_runs(
+        labels, [_run_root(base, drifts)], [["y"]], ran=[[s.node for s in fresh.steps]]
+    )
+    assert labels.inconclusive.get("y") == UNEXPLAINED
+    assert not labels.root
+
+
+def test_add_messages_id_dup_becomes_unsupported() -> None:
+    messages_len.REPLIES = (_ai("one", "dup"), _ai("two", "dup"))
+    spy = Mock()
+    base = Cassette.from_json(record(messages_len.build(spy), ASKED).to_json())
+    messages_len.REPLIES = (_ai("one", "dup"), _ai("two", "new"))
+    spy.reset_mock()
+    fresh = replay_run(
+        messages_len.build(spy), Cassette(inputs=ASKED, steps=list(base.steps)), serve=True
+    )
+    labels, bad = _labels_for(base, fresh, MSG_GRAPH)
+    assert bad is not None
+    assert bad.pattern == "add_messages"
+    assert "id" in bad.reason.lower() or "add_messages" in bad.reason.lower()
+    assert labels == NodeLabels((), (), {})
+
+
+def test_add_messages_content_change_keeps_x_root() -> None:
+    """Matrix: message content change — X drifts and stays root."""
+    spy = Mock()
+    base = Cassette.from_json(record(messages.build((_ai("a"),), spy), ASKED).to_json())
+    spy.reset_mock()
+    fresh = replay_run(
+        messages.build((_ai("b"),), spy), Cassette(inputs=ASKED, steps=list(base.steps)), serve=True
+    )
+    labels, bad = _labels_for(base, fresh, MSG_GRAPH)
+    assert bad is None
+    assert labels.root == ("x",)
+
+
+def test_add_messages_dup_replace_keeps_x_root_when_y_served() -> None:
+    """Matrix: dup id still replaces; Y served; X content change stays root."""
+    spy = Mock()
+    base = Cassette.from_json(
+        record(messages.build((_ai("one", "dup"), _ai("two", "dup")), spy), ASKED).to_json()
+    )
+    spy.reset_mock()
+    fresh = replay_run(
+        messages.build((_ai("uno", "dup"), _ai("two", "dup")), spy),
+        Cassette(inputs=ASKED, steps=list(base.steps)),
+        serve=True,
+    )
+    labels, bad = _labels_for(base, fresh, MSG_GRAPH)
+    assert bad is None
+    assert labels.root == ("x",)
+    assert "y" not in labels.root and "y" not in labels.propagated
