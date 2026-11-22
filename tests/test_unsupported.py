@@ -38,6 +38,7 @@ from lgcov.cassette import Cassette, Replay, accept_nodes, record, replay_run, r
 from lgcov.ci_report import CiResult, Tally, render_ci_report
 from lgcov.cli import _node_labels, _run_root, main
 from lgcov.unsupported import (
+    Unsupported,
     UnsupportedError,
     channel_fingerprints,
     guard_labels,
@@ -509,7 +510,7 @@ def _labels_for(
     base: Cassette,
     fresh: Replay,
     graphs: tuple[set[str], set[str]],
-) -> tuple[NodeLabels, object]:
+) -> tuple[NodeLabels, Unsupported | None]:
     drifts = list(fresh.drifts)
     codes = (
         {s.node: s.code for s in base.steps},
@@ -524,9 +525,8 @@ def test_send_one_task_change_keeps_plan_root() -> None:
     spy = Mock()
     base = Cassette.from_json(record(send_fanout.build(("a", "b", "c"), spy), {}).to_json())
     spy.reset_mock()
-    fresh = replay_run(
-        send_fanout.build(("a", "B", "c"), spy), Cassette(inputs={}, steps=list(base.steps)), serve=True
-    )
+    cassette = Cassette(inputs={}, steps=list(base.steps))
+    fresh = replay_run(send_fanout.build(("a", "B", "c"), spy), cassette, serve=True)
     labels, bad = _labels_for(base, fresh, SEND_GRAPH)
     assert bad is None
     assert "plan" in labels.root
@@ -540,7 +540,8 @@ def test_send_router_remap_keeps_plan_as_routing_root() -> None:
     base = Cassette.from_json(record(send_remap.build(spy), {}).to_json())
     send_remap.REMAP = {"a": "x", "b": "y", "c": "z"}
     spy.reset_mock()
-    fresh = replay_run(send_remap.build(spy), Cassette(inputs={}, steps=list(base.steps)), serve=True)
+    cassette = Cassette(inputs={}, steps=list(base.steps))
+    fresh = replay_run(send_remap.build(spy), cassette, serve=True)
     labels, bad = _labels_for(base, fresh, SEND_GRAPH)
     assert bad is None
     assert "plan" in labels.root

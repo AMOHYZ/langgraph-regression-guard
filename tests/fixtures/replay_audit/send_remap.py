@@ -20,6 +20,10 @@ class State(TypedDict, total=False):
     summary: str
 
 
+class Task(TypedDict, total=False):
+    task: str
+
+
 def no_spy(name: str) -> None:
     pass
 
@@ -37,7 +41,7 @@ def collect(state: State) -> State:
 
 
 def build(spy: Callable[[str], object] = no_spy) -> CompiledStateGraph[State]:
-    def worker(state: dict[str, str]) -> State:
+    def worker(state: Task) -> State:
         name = state.get("task", "")
         spy(name)
         return {"results": [f"r {name}"]}

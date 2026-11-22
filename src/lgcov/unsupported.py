@@ -3,6 +3,7 @@ root/propagated label and never a crash."""
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -11,11 +12,21 @@ from langgraph.errors import InvalidUpdateError
 
 from lgcov.attribution import GRAPH_NOT_GIVEN, UNEXPLAINED, NodeLabels
 from lgcov.fingerprint import fingerprint
+from lgcov.normalize import normalize
+from lgcov.rebind import _ids
 
 
 class _Named(Protocol):
     @property
     def node(self) -> str: ...
+
+
+class _Stepped(Protocol):
+    @property
+    def node(self) -> str: ...
+
+    @property
+    def output(self) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -147,18 +158,47 @@ def _graph_missing_reasons(labels: NodeLabels) -> frozenset[str]:
     )
 
 
+def _message_id_multiset(value: object) -> Counter[str]:
+    return Counter(_ids(value))
+
+
+def _message_id_only_change(base_out: object, fresh_out: object) -> bool:
+    """True when outputs match once ids are masked but message/tool-call ids differ."""
+    return normalize(base_out) == normalize(fresh_out) and _message_id_multiset(
+        base_out
+    ) != _message_id_multiset(fresh_out)
+
+
+def _any_message_id_only(base_steps: Sequence[_Stepped], fresh_steps: Sequence[_Stepped]) -> bool:
+    """Any node whose base vs fresh outputs differ only in masked message ids."""
+    by_base: dict[str, list[object]] = {}
+    for step in base_steps:
+        by_base.setdefault(step.node, []).append(step.output)
+    by_fresh: dict[str, list[object]] = {}
+    for step in fresh_steps:
+        by_fresh.setdefault(step.node, []).append(step.output)
+    for node, lefts in by_base.items():
+        rights = by_fresh.get(node, [])
+        for left, right in zip(lefts, rights, strict=False):
+            if _message_id_only_change(left, right):
+                return True
+    return False
+
+
 def guard_labels(
     labels: NodeLabels,
     graphs: tuple[Collection[str] | None, Collection[str] | None] = (None, None),
     counts: tuple[Mapping[str, int], Mapping[str, int]] | None = None,
     channels: tuple[Mapping[str, str] | None, Mapping[str, str] | None] = (None, None),
+    steps: tuple[Sequence[_Stepped], Sequence[_Stepped]] | None = None,
 ) -> tuple[NodeLabels, Unsupported | None]:
     """T133: drop unsafe root/propagated/inconclusive labels and return `Unsupported` instead.
 
     Case 1 — occurrence: visit counts differ while labels exist. Case 2 — missing/untrusted
     graph shape, or add+delete that looks like a rename; clear add/delete with both graphs
     trusted stays T238 root. Case 3 — state channel / reducer fingerprints differ and the
-    label is UNEXPLAINED (or only propagated with no root).
+    label is UNEXPLAINED (or only propagated with no root). Case 6 — message outputs that
+    differ only in ids (add_messages keep-both vs replace) with an UNEXPLAINED downstream.
     """
     empty = _empty(labels)
     labelled = bool(labels.root or labels.propagated or labels.inconclusive)
@@ -234,6 +274,20 @@ def guard_labels(
                 f"state schema or reducer changed (channel {channel}): cause is outside node "
                 "fingerprints",
                 "reducer",
+            )
+
+    # Case 6: comparing masks message ids, so keep-both vs replace can leave X undrifted and
+    # name a downstream node unexplained. Only when that mislabel is present.
+    if steps is not None and labelled:
+        unexplained = {n for n, why in labels.inconclusive.items() if why == UNEXPLAINED}
+        id_mislabel = bool(unexplained) or (
+            bool(labels.propagated) and not labels.root and not labels.routing
+        )
+        if id_mislabel and _any_message_id_only(steps[0], steps[1]):
+            return empty, Unsupported(
+                "add_messages id duplication: comparing masks message ids so a keep-both vs "
+                "replace change is attributed downstream",
+                "add_messages",
             )
 
     return labels, None
