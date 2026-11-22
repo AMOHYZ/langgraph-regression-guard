@@ -12,6 +12,7 @@ import pytest
 from fixtures.replay_audit import interrupt, loop, parallel_update, side_effect, subgraph
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
+from langgraph.types import Checkpointer
 
 from lgcov.attribution import (
     GRAPH_NOT_GIVEN,
@@ -21,15 +22,8 @@ from lgcov.attribution import (
     classify,
     explain_runs,
 )
-from lgcov.cassette import (
-    Cassette,
-    Replay,
-    UnsupportedError,
-    accept_nodes,
-    record,
-    replay_run,
-    runs_to_json,
-)
+from lgcov.cassette import Cassette, Replay, accept_nodes, record, replay_run, runs_to_json
+from lgcov.unsupported import UnsupportedError
 from lgcov.ci_report import CiResult, Tally, render_ci_report
 from lgcov.cli import _run_root, main
 from lgcov.unsupported import (
@@ -385,7 +379,9 @@ def test_parent_checkpointer_record_is_unsupported_not_a_crash() -> None:
 
 
 @pytest.mark.parametrize("sub_checkpointer", [None, True], ids=["default", "checkpointer_true"])
-def test_subgraph_checkpointer_without_parent_stays_supported(sub_checkpointer: object) -> None:
+def test_subgraph_checkpointer_without_parent_stays_supported(
+    sub_checkpointer: Checkpointer,
+) -> None:
     """T152 row 4: no parent checkpointer — default or True — still serves; keep labels."""
     spy = Mock()
     cassette = Cassette.from_json(record(subgraph.build(2, spy, sub_checkpointer), VALUE).to_json())
@@ -485,8 +481,8 @@ def test_lgcov_replay_says_unsupported_instead_of_harness_exit_2(
     (tmp_path / "baseline.json").write_text(runs_to_json([record(base, inputs)]), encoding="utf-8")
     (tmp_path / "graph.py").write_text(source, encoding="utf-8")
     code = main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")])
-    out = capsys.readouterr()
-    text = f"{out.out}\n{out.err}".lower()
+    captured = capsys.readouterr()
+    text = f"{captured.out}\n{captured.err}".lower()
     assert code == 0
     assert "unsupported" in text or needle in text
     assert "replay failed outside node code" not in text

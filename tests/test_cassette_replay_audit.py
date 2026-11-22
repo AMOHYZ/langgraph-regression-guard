@@ -39,7 +39,6 @@ from lgcov.cassette import (
     NodeError,
     Replay,
     Step,
-    UnsupportedError,
     record,
     replay_run,
     runs_from_json,
@@ -47,6 +46,7 @@ from lgcov.cassette import (
 )
 from lgcov.cli import _divergence_lines, main
 from lgcov.messages import plain
+from lgcov.unsupported import UnsupportedError
 
 
 def _recorded(graph: object, inputs: dict[str, object]) -> Cassette:
@@ -437,7 +437,8 @@ def test_lgcov_replay_fails_loudly_on_a_graph_it_can_t_replay(
     (tmp_path / "baseline.json").write_text(runs_to_json([record(base, inputs)]), encoding="utf-8")
     (tmp_path / "graph.py").write_text(source, encoding="utf-8")
     code = main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")])
-    text = f"{capsys.readouterr().out}\n{capsys.readouterr().err}".lower()
+    captured = capsys.readouterr()
+    text = f"{captured.out}\n{captured.err}".lower()
     assert code == 0
     assert "unsupported" in text or needle in text
     assert "replay failed outside node code" not in text
@@ -605,9 +606,7 @@ def test_y_is_not_served_when_what_it_reads_from_a_store_changed() -> None:
     spy, backend = Mock(), InMemoryStore()
     cassette = _recorded(side_effect.build_with_store("old", backend, spy), {})
     spy.reset_mock()
-    fresh = replay_run(
-        side_effect.build_with_store("new", backend, spy), cassette, serve=True
-    )
+    fresh = replay_run(side_effect.build_with_store("new", backend, spy), cassette, serve=True)
     assert fresh.unsupported is not None
     assert "store" in fresh.unsupported.reason.lower()
     assert spy.call_count == 0

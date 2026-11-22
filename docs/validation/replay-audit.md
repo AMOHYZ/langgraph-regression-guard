@@ -9,8 +9,9 @@ input the key can see, which covers plain chains, loops, Send fan-out, plain sub
 and async nodes. It serves stale outputs, with no drift, when a change reaches only a Store, or a
 value that stays masked by ruling: a message's id, usage and other metadata, or a key like
 `run_id`. T133 adds an `unsupported` result with a reason for patterns attribution can't
-label safely (cases 1–3 in PR A): see [supported-pattern-matrix.md](supported-pattern-matrix.md).
-Crashes for checkpointer / interrupt (rows 4a, 6a, 6b) still exit 2 until PR B.
+label safely (cases 1–3 in PR A; 5/7/8/9 in PR B): see
+[supported-pattern-matrix.md](supported-pattern-matrix.md). Checkpointer / interrupt /
+parallel `InvalidUpdateError` / Store-on-serve return `unsupported` (exit 0), not harness exit 2.
 
 The retried writes and the stale hits in rows 1a, 3a and 5a are fixed: see Side-effect safety and
 How a step is matched. Each finding still open is a strict xfail in
@@ -135,7 +136,7 @@ Status is what the tests show. The last column applies only to rows with a findi
 | 3 | Send, one task added | supported | 2 served, 1 diverged, ran only for `c`: `test_an_added_task_runs_live_and_the_recorded_ones_are_served` | |
 | 3a | Send, payload `id`, ids `a,b,c` become `x,y,z` | fixed | Each worker re-runs: `test_tasks_that_differ_only_in_id_are_not_served_recorded_outputs`. `lgcov replay` exits 1: `test_lgcov_replay_flags_a_pr_that_changes_every_task_s_id`. A `ToolCall` in a payload is still served, and answers this run's id: `test_a_worker_given_a_plain_tool_call_answers_this_run_s_id` in `test_cassette_messages.py` | ruled: bug |
 | 4 | Subgraph, no parent checkpointer, default or `checkpointer=True` | supported | Always live, next node diverged: `test_a_subgraph_runs_live_and_the_node_after_it_reruns`, `test_an_unchanged_subgraph_still_runs_live` | |
-| 4a | Parent has a checkpointer, either subgraph setting | bug found: no `unsupported` | `ValueError` from LangGraph (`_run` passes no `thread_id`): `test_a_graph_with_a_checkpointer_replays_or_says_unsupported`, `test_a_graph_with_a_checkpointer_records_or_says_unsupported`. `lgcov replay` exits 2: `test_lgcov_replay_fails_loudly_on_a_graph_it_can_t_replay` | T133 |
+| 4a | Parent has a checkpointer, either subgraph setting | fixed: `unsupported` | `Replay.unsupported` / `UnsupportedError` on record: `test_a_graph_with_a_checkpointer_replays_or_says_unsupported`, `test_a_graph_with_a_checkpointer_records_or_says_unsupported`. `lgcov replay` exit 0: `test_lgcov_replay_fails_loudly_on_a_graph_it_can_t_replay` | T133 PR B |
 | 5 | `add_messages`, content changes | supported | `y` diverged, ran once: `test_y_reruns_when_a_message_s_content_changes` | |
 | 5 | Duplicate id stops replacing a message | supported | Both kept, `y` diverged: `test_y_reruns_when_a_duplicate_id_no_longer_replaces_a_message` | |
 | 5 | Duplicate id leaves Y the same messages | supported | `y` correctly served: `test_y_is_served_when_a_duplicate_id_leaves_it_the_same_messages` | |
@@ -143,13 +144,13 @@ Status is what the tests show. The last column applies only to rows with a findi
 | 5a | Message changes only in `artifact`, `additional_kwargs`, `finish_reason` or `stop_reason`, and Y reads it | fixed | Re-runs, and gives what a live run gives: `test_y_is_not_served_when_a_message_changes_only_in_what_a_node_can_act_on` | ruled: bug |
 | 5a | Message changes only in `id`, `usage_metadata` or the rest of `response_metadata`, and Y reads it | accepted | Served, no drift: `test_y_is_served_when_a_message_changes_only_in_what_stays_ignored` | ruled: accepted noise |
 | 6 | Interrupt on replay | supported | The node runs again and is never served: `test_an_interrupted_call_is_never_served_and_fires_again_on_replay` | |
-| 6a | Interrupted run, no checkpointer | bug found: no `unsupported` | `TypeError: Object of type Interrupt is not JSON serializable`: `test_an_interrupted_run_replays_or_says_unsupported`. `lgcov replay` exits 2: `test_lgcov_replay_fails_loudly_on_a_graph_it_can_t_replay` | T133 |
-| 6b | Interrupted run, with a checkpointer | bug found: no `unsupported` | The `ValueError` in 4a: `test_an_interrupted_run_with_a_checkpointer_replays_or_says_unsupported` | T133 |
+| 6a | Interrupted run, no checkpointer | fixed: `unsupported` | `Replay.unsupported` (interrupt reason): `test_an_interrupted_run_replays_or_says_unsupported`. `lgcov replay` exit 0: `test_lgcov_replay_fails_loudly_on_a_graph_it_can_t_replay` | T133 PR B |
+| 6b | Interrupted run, with a checkpointer | fixed: `unsupported` | Checkpointer or interrupt reason: `test_an_interrupted_run_with_a_checkpointer_replays_or_says_unsupported` | T133 PR B |
 | 7 | Tool that writes, input unchanged | supported | Served, no write: `test_a_write_whose_input_is_unchanged_is_served_and_doesn_t_run_again` | |
 | 7a | Tool that writes, input changed | supported | One write, reported as diverged: `test_a_write_whose_input_changed_runs_once_and_is_reported_as_diverged` | |
 | 7b | Write with a retry policy, node raises `ValueError` | supported | 1 write, as outside lgcov: `test_replay_makes_the_attempts_the_agent_makes_outside_lgcov` | |
 | 7c | Write with a retry policy, transient error | supported | 2 writes, both logged, and the report names the node: `test_every_attempt_at_a_retried_write_is_in_the_calls` | |
-| 7d | Y reads from a Store what a changed X wrote | bug found | Served `old`, live `new`, no drift: `test_y_is_not_served_when_what_it_reads_from_a_store_changed` | ruled: documented limit |
+| 7d | Y reads from a Store what a changed X wrote | fixed: `unsupported` on serve | Graph has a `store` → refuse serve (not silent stale): `test_y_is_not_served_when_what_it_reads_from_a_store_changed`. Does **not** claim per-value Store change detection | T133 PR B |
 | 8 | Async X → Y → outcome, regression check for T164 (PR #54) | supported | Same as row 1, and an unchanged graph is fully served: `test_async_y_reruns_when_x_s_prompt_changes_its_input`, `test_an_unchanged_async_graph_is_served_without_running` | |
 
 No row was left not audited.

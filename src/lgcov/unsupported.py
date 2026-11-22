@@ -7,6 +7,8 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from langgraph.errors import InvalidUpdateError
+
 from lgcov.attribution import GRAPH_NOT_GIVEN, UNEXPLAINED, NodeLabels
 from lgcov.fingerprint import fingerprint
 
@@ -21,7 +23,67 @@ class Unsupported:
     """A run (or case) whose drift cannot be attributed safely."""
 
     reason: str
-    pattern: str = ""  # occurrence | graph_shape | rename | reducer
+    pattern: str = ""  # occurrence | graph_shape | rename | reducer | checkpointer | …
+
+
+class UnsupportedError(Exception):
+    """Raised by `record` when the graph can't be attributed safely (T133 PR B)."""
+
+    def __init__(self, unsupported: Unsupported) -> None:
+        self.unsupported = unsupported
+        super().__init__(unsupported.reason)
+
+
+def graph_unsupported(graph: Any, *, serve: bool = False) -> Unsupported | None:
+    """Preflight: patterns visible on the compiled graph before a run.
+
+    Case 5 — a real checkpointer on the graph (parent / compiled saver). Subgraph-only
+    `checkpointer=True` without a parent leaves `graph.checkpointer` unset and stays supported.
+    Case 9 — a Store on the graph makes serve unsafe (reads aren't in the key); refuse serve
+    rather than silently stale. Live (non-serve) runs still execute.
+    """
+    checkpointer = getattr(graph, "checkpointer", None)
+    if checkpointer is not None and checkpointer is not False:
+        return Unsupported(
+            "graph uses a checkpointer; lgcov passes no thread_id / resume",
+            "checkpointer",
+        )
+    if serve and getattr(graph, "store", None) is not None:
+        return Unsupported(
+            "Store reads are not in the serving key; refusing serve (would be silent stale)",
+            "store",
+        )
+    return None
+
+
+def exception_unsupported(exc: BaseException) -> Unsupported | None:
+    """Map known LangGraph / compare failures to Unsupported (cases 5, 7, 8)."""
+    if isinstance(exc, InvalidUpdateError):
+        return Unsupported(
+            "parallel InvalidUpdateError: concurrent update without a reducer",
+            "invalid_update",
+        )
+    if isinstance(exc, ValueError) and "Checkpointer requires" in str(exc):
+        return Unsupported(
+            "graph uses a checkpointer; lgcov passes no thread_id / resume",
+            "checkpointer",
+        )
+    if isinstance(exc, TypeError) and "Interrupt" in str(exc):
+        return Unsupported(
+            "run hit an interrupt; resume is not supported",
+            "interrupt",
+        )
+    return None
+
+
+def steps_unsupported(steps: Sequence[_Named]) -> Unsupported | None:
+    """Case 8: a recorded or fresh `__interrupt__` step means the run can't be attributed."""
+    if any(s.node == "__interrupt__" for s in steps):
+        return Unsupported(
+            "run hit an interrupt; resume is not supported",
+            "interrupt",
+        )
+    return None
 
 
 def visit_counts(steps: Sequence[_Named]) -> dict[str, int]:

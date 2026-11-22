@@ -182,16 +182,17 @@ served, which rules out the first two.
   metadata, or a key like `run_id`, the nodes below it are served and show no drift. That's
   accepted, since these change on every model call. `mask_volatile_in_key` adds `id` values,
   UUIDs and date-times to the list. [Row 5a](docs/validation/replay-audit.md#matrix).
-- **Reads from a LangGraph `Store`, `config` or `runtime` aren't in the key**, so a changed
-  `Store` value can be served stale. A documented limit. Replay passes no `config` or runtime
-  context of its own. [Row 7d](docs/validation/replay-audit.md#matrix) and
-  [how a step is matched](docs/validation/replay-audit.md#how-a-step-is-matched).
+- **Reads from a LangGraph `Store`, `config` or `runtime` aren't in the key.** When the compiled
+  graph has a `store`, serve returns `unsupported` instead of silent stale (T133). Replay still
+  passes no `config` or runtime context of its own. [Row 7d](docs/validation/replay-audit.md#matrix)
+  and [how a step is matched](docs/validation/replay-audit.md#how-a-step-is-matched).
 - **A change only to an `id`, UUID or date-time is named one node late.** The comparison still
   masks these, so the node that changed shows no drift, and the first node whose output changes
   because of it is called the root. [Rows 1a and 3a](docs/validation/replay-audit.md#matrix).
-- **A parent graph with a checkpointer, or a run that hits an `interrupt`, ends in an error**
-  (`ValueError` or `TypeError`, exit 2). Planned: an `unsupported` result. Rows
-  [4a, 6a and 6b](docs/validation/replay-audit.md#matrix).
+- **A parent graph with a checkpointer, a run that hits an `interrupt`, or a parallel
+  `InvalidUpdateError` returns `unsupported`** (`needs_human`, exit 0) with a reason — not a
+  harness crash. Rows [4a, 6a and 6b](docs/validation/replay-audit.md#matrix) and
+  [supported-pattern matrix](docs/validation/supported-pattern-matrix.md).
 
 Served vs `--live` on the demo, measured: [docs/benchmark-speed.md](docs/benchmark-speed.md) (`make bench-speed`).
 

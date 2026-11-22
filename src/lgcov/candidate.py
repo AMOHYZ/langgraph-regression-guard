@@ -33,7 +33,7 @@ _PROBE_3 = _PROBE - {"step"} | {"unit"}  # T193: a unit's position down the tree
 _LATER = {"parts", "repeats"}  # T193: schema 3's own fields, which later PRs fill in
 # T133: optional; evaluate may still be base's reader. Accept when present, do not write yet
 # (T193 read-before-write: base evaluate rejects unknown top-level keys).
-_OPTIONAL = {"channels"}
+_OPTIONAL = {"channels", "unsupported"}
 
 
 @dataclass(frozen=True)
@@ -72,6 +72,8 @@ class CandidateRun:
     crash_node: str = ""
     # T133: head's state-channel fingerprints (type + reducer), for schema/reducer unsupported.
     channels: dict[str, str] | None = None
+    # T133 PR B: crash→unsupported reasons from replay (checkpointer / interrupt / …).
+    unsupported: tuple[str, ...] = ()
 
 
 def _saved(value: object) -> object:
@@ -116,9 +118,10 @@ def candidate_to_json(run: CandidateRun) -> str:
     )
     schema = 3 if units else SCHEMA
     body: dict[str, object] = asdict(
-        replace(run, head=None, fresh=(), probes=(), repeats=(), channels=None)
+        replace(run, head=None, fresh=(), probes=(), repeats=(), channels=None, unsupported=())
     )
     del body["fresh"], body["probes"], body["parts"], body["repeats"], body["channels"]
+    del body["unsupported"]
     body |= {
         "schema": schema,
         "head": run.head.to_dict() if run.head else None,
@@ -129,9 +132,17 @@ def candidate_to_json(run: CandidateRun) -> str:
         body["parts"] = run.parts
     if run.repeats:
         body["repeats"] = [_probe_body(p, schema) for p in run.repeats]
-    # T133: do not emit `channels` until base's evaluate can read `_OPTIONAL` (this PR lands the
-    # reader). In-memory one-job `ci` still carries `CandidateRun.channels` for case 3.
+    # T133: do not emit `channels` / `unsupported` until base's evaluate can read `_OPTIONAL`.
+    # In-memory one-job `ci` still carries them on CandidateRun.
     return json.dumps(body, indent=2, default=_saved) + "\n"
+
+
+def _unsupported(raw: object) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(line, str) for line in raw):
+        raise ValueError("unsupported isn't lines of text")
+    return tuple(raw)
 
 
 def _channels(raw: object) -> dict[str, str] | None:
@@ -316,6 +327,7 @@ def parse_candidate(text: str) -> CandidateRun:
             crash=_text(raw, "crash"),
             crash_node=_text(raw, "crash_node"),
             channels=_channels(raw.get("channels")),
+            unsupported=_unsupported(raw.get("unsupported")),
         )
     except (AttributeError, KeyError, TypeError) as exc:
         raise ValueError(f"a field is missing or isn't valid: {exc}") from None
