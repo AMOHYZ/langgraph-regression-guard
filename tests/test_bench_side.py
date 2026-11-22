@@ -530,13 +530,15 @@ def _rescored(bench: _Run, row: str, tmp_path: Path) -> dict[str, Any]:
 def test_each_side_reports_its_own_graph_so_a_swapped_node_is_root(
     bench: _Run, tmp_path: Path
 ) -> None:
+    # T242: each side still saves its own node names. T133: c→d is add+delete (rename-like), so
+    # attribution is unsupported and roots are cleared — not T238 root on both.
     row = bench.rows["swapped"]
     assert not row["error"]
-    assert (row["found_root"], row["found_propagated"], row["inconclusive"]) == (["c", "d"], [], {})
+    assert (row["found_root"], row["found_propagated"], row["inconclusive"]) == ([], [], {})
     assert _kept_names(bench, "swapped", "base") == ["__end__", "__start__", "a", "b", "c"]
     assert _kept_names(bench, "swapped", "head") == ["__end__", "__start__", "a", "b", "d"]
     again = _rescored(bench, "swapped", tmp_path)
-    assert (again["found_root"], again["inconclusive"]) == (["c", "d"], {})
+    assert (again["found_root"], again["inconclusive"]) == ([], {})
 
 
 @pytest.mark.slow
@@ -545,13 +547,15 @@ def test_head_s_code_writing_base_s_node_names_changes_no_label(
 ) -> None:
     # T238: base's names come from base's own process. Head's `d` wrote `d` into base's file as
     # it replayed, which would make `d` propagated, so non-blocking, if lgcov read it.
+    # T133: the c→d swap itself is rename-like unsupported (empty labels), and the forge still
+    # must not change what base saved.
     assert "forged:d" in bench.calls  # the write happened
     row = bench.rows["forged"]
     assert not row["error"]
-    assert (row["found_root"], row["found_propagated"], row["inconclusive"]) == (["c", "d"], [], {})
+    assert (row["found_root"], row["found_propagated"], row["inconclusive"]) == ([], [], {})
     assert _kept_names(bench, "forged", "base") == ["__end__", "__start__", "a", "b", "c"]
     again = _rescored(bench, "forged", tmp_path)
-    assert (again["found_root"], again["inconclusive"]) == (["c", "d"], {})
+    assert (again["found_root"], again["inconclusive"]) == ([], {})
 
 
 @pytest.mark.slow

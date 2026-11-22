@@ -3874,9 +3874,11 @@ def test_bench_and_ci_name_the_same_roots_on_a_multi_root_pr(
 
     real, seen = cli._node_labels, []
 
-    def spy(*args: object, **kwargs: object) -> NodeLabels:
-        seen.append(real(*args, **kwargs))  # type: ignore[arg-type]  # passed through as given
-        return seen[-1]
+    def spy(*args: object, **kwargs: object) -> tuple[NodeLabels, object]:
+        # T133: `_node_labels` returns (labels, Unsupported | None); spy keeps labels only.
+        labels, bad = real(*args, **kwargs)  # type: ignore[arg-type]
+        seen.append(labels)
+        return labels, bad
 
     monkeypatch.setattr(cli, "_node_labels", spy)
     assert _bench(tmp_path, str(BENCH), "--only", "multi_root")[0] == 0

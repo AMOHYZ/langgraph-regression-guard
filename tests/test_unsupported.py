@@ -323,3 +323,26 @@ def test_node_body_change_keeps_root_when_schema_unchanged() -> None:
     )
     assert bad is None
     assert guarded.root == ("a",)
+
+
+def test_reducer_guard_needs_known_equal_graph_shapes() -> None:
+    """Case 3 only when both graphs are known and the same nodes. Unknown base shape (no
+    cassette `graph`) means base's live channels may be a different agent than the recording —
+    do not call that a schema change and wipe an unexplained label. Differing shapes with no
+    sided add/delete label are case 2's concern, not reducer's."""
+    labels = NodeLabels(root=(), propagated=(), inconclusive={"worker": UNEXPLAINED})
+    base_g = _reducer_graph("t133_skip_base", "operator.add")
+    head_g = _reducer_graph("t133_skip_head", "replace")
+    channels = (channel_fingerprints(base_g), channel_fingerprints(head_g))
+    assert channels[0] != channels[1]
+    head_nodes = {"plan", "worker", "collect"}
+    kept, bad = guard_labels(labels, graphs=(None, head_nodes), channels=channels)
+    assert bad is None
+    assert kept == labels
+    # Shapes differ but the labelled node is on both sides — not rename-like; still not case 3.
+    shared = NodeLabels(root=(), propagated=(), inconclusive={"mid": UNEXPLAINED})
+    differing, also = guard_labels(
+        shared, graphs=({"old", "mid"}, {"mid", "new"}), channels=channels
+    )
+    assert also is None
+    assert differing == shared

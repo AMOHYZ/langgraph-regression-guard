@@ -147,8 +147,20 @@ def guard_labels(
                 "rename",
             )
 
+    # Case 3: only when both shapes are known and equal. Unknown base shape (no cassette
+    # `graph`) can pair base's live channels with a different recording; differing shapes are
+    # case 2. Same nodes + different channel fingerprints is a real schema/reducer shift.
     base_ch, head_ch = channels
-    if base_ch is not None and head_ch is not None and base_ch != head_ch and labelled:
+    same_shape = (
+        base_g is not None and head_g is not None and frozenset(base_g) == frozenset(head_g)
+    )
+    if (
+        same_shape
+        and base_ch is not None
+        and head_ch is not None
+        and base_ch != head_ch
+        and labelled
+    ):
         changed = sorted(k for k in set(base_ch) | set(head_ch) if base_ch.get(k) != head_ch.get(k))
         unexplained = {n for n, why in labels.inconclusive.items() if why == UNEXPLAINED}
         schema_wrong = bool(unexplained) or (
