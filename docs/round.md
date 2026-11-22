@@ -9,7 +9,8 @@ seen each case, and outlives the round.
 gate rounds: `lgcov round new` and `lgcov guard`, with `lgcov-round.yaml` and `exposure.json`.
 `lgcov round init`, `lock` and `check` work on a [benchmark round](benchmark-rounds.md), which fixes
 what `lgcov bench` compares and keeps its own `exposure.jsonl`. Neither command reads the other's
-files.
+files. Case pools (optimiser vs gate) and `lineage.json` are a third concern:
+[`lgcov pools check`](pools.md).
 
 **`lgcov ci` and the Action don't call `lgcov guard` yet.** Until they do, a round holds only where
 you run the command yourself, and nothing records exposure on its own.

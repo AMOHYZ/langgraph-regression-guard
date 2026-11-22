@@ -193,6 +193,18 @@ from lgcov.metrics import (
     summarize,
 )
 from lgcov.normalize import normalize
+from lgcov.pools import (
+    DEFAULT_GATE,
+    DEFAULT_LINEAGE,
+    DEFAULT_OPTIMISER,
+    DEFAULT_ROUND,
+    check_pools,
+    current_judge_from_round,
+    lineage_pool_mismatches,
+    load_cases,
+    parse_lineage,
+    pools_paths_edited,
+)
 from lgcov.review import Changes, ReviewDecision, apply_decision, reject_changes, unwritable
 from lgcov.review_apply import (
     FileChanges,
@@ -1161,6 +1173,13 @@ def _cassettes_edited(args: argparse.Namespace, cfg: Config) -> bool:
     return bool(args.policy_dir) and _tree(Path(cfg.cassette_dir)) != _tree(Path(base))
 
 
+def _pools_edited(args: argparse.Namespace) -> bool:
+    """T124: this PR changed lineage.json or a case pool; the gate reads those from the base."""
+    if not args.policy_dir:
+        return False
+    return pools_paths_edited(Path("."), Path(args.policy_dir))
+
+
 def _base_graph(
     args: argparse.Namespace, cfg: Config, cassettes_edited: bool
 ) -> tuple[frozenset[str] | None, str]:
@@ -1361,11 +1380,13 @@ def _evaluate(
     if run.head is None:
         return CiResult(fail_on, harness_error=run.harness_error)
     edited = _cassettes_edited(args, cfg)
+    pools_edited = _pools_edited(args)
     partial = CiResult(
         fail_on,
         run.graph_lines,
         run.graph_note,
         cassettes_edited=edited,
+        pools_edited=pools_edited,
         lint_summary=run.lint_summary,
         lint_lines=run.lint_lines,
     )
@@ -3795,7 +3816,65 @@ def _command(argv: list[str]) -> int | None:
         return _cassette_accept(argv[1:])
     if argv[:1] == ["guard"]:
         return _guard_cmd(argv[1:])
+    if argv[:2] == ["pools", "check"]:
+        return _pools_check_cmd(argv[2:])
+    if argv[:1] == ["pools"]:
+        print(
+            "lgcov pools: takes check (lgcov pools check)",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     return None
+
+
+def _pools_check_cmd(argv: list[str]) -> int:
+    """T124: exit 2 unless optimiser and gate pools are clean (ids, judge fit, near-exact text)."""
+    ap = argparse.ArgumentParser(prog="lgcov pools check")
+    ap.add_argument("--optimiser", default=DEFAULT_OPTIMISER, help="optimiser case pool folder")
+    ap.add_argument("--gate", default=DEFAULT_GATE, help="gate case pool folder")
+    ap.add_argument(
+        "--lineage",
+        default=DEFAULT_LINEAGE,
+        help="pool membership and judges_fitted (not candidates_seen)",
+    )
+    ap.add_argument(
+        "--round",
+        default=DEFAULT_ROUND,
+        help="locked gate round on the base: its judge is the current judge",
+    )
+    ap.add_argument(
+        "--policy-dir",
+        help="checkout of the PR's base: lineage and round are read from here when set",
+    )
+    args = ap.parse_args(argv)
+    root = Path(args.policy_dir) if args.policy_dir else Path(".")
+    lineage_path = root / args.lineage if args.policy_dir else Path(args.lineage)
+    round_path = root / args.round if args.policy_dir else Path(args.round)
+    try:
+        cases = load_cases(Path(args.optimiser), Path(args.gate))
+        lineage = (
+            parse_lineage(lineage_path.read_text(encoding="utf-8"))
+            if lineage_path.is_file()
+            else {}
+        )
+        judge = (
+            current_judge_from_round(round_path.read_text(encoding="utf-8"))
+            if round_path.is_file()
+            else None
+        )
+    except (OSError, ValueError) as exc:
+        print(f"lgcov pools check: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    problems = [
+        *lineage_pool_mismatches(cases, lineage),
+        *check_pools(cases, lineage, judge),
+    ]
+    if problems:
+        print("lgcov pools check: pools are not independent:", file=sys.stderr)
+        print("\n".join(f"- {p}" for p in problems), file=sys.stderr)
+        return EXIT_ERROR
+    print(f"Pools are clean: {len(cases)} case(s).")
+    return 0
 
 
 def _graph_diff(argv: list[str]) -> int:
@@ -3854,6 +3933,7 @@ commands:
   round check       exit 2 if a locked SHA moved or a case was already exposed
   round new         lock a round: its cases, judge, margins and candidates
   guard             exit 2 if the round moved or this commit isn't locked in it
+  pools check       exit 2 if optimiser and gate pools overlap or leak judge fit
   bench             score the root / propagated labels against hand-written ones
   metrics summary   summarize per-PR records: overridden blocks, label burden, cost, time
   selfcheck         run the harness on fixtures whose outcome is known

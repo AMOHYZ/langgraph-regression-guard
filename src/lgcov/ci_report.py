@@ -94,6 +94,7 @@ class CiResult:
     harm_reasons: dict[str, str] | None = None
     notes: tuple[str, ...] = ()
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
+    pools_edited: bool = False  # T124: this PR changed lineage.json or a case pool folder
     harness_error: str = ""
     harness_node: str = ""  # T074: the network trouble surfaced inside this node
     crash: str = ""  # T074: e.g. "Node `classify` raised ValueError: ..."; an agent failure
@@ -155,6 +156,7 @@ class CiResult:
                 nothing_ran=self.timing is not None and self.timing.live == 0,
                 first_adoption=self.first_adoption,
                 cassettes_edited=self.cassettes_edited,
+                pools_edited=self.pools_edited,
                 code_failures=self.gate.code_failures,
                 hidden_failures=self.gate.hidden_failures,
                 unmeasured_drift=needs_human_unmeasured,
