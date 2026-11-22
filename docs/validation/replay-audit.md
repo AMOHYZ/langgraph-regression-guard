@@ -8,7 +8,9 @@ pattern it can't replay safely say `unsupported` with a reason? Audited on 6 Nov
 input the key can see, which covers plain chains, loops, Send fan-out, plain subgraphs, reducers
 and async nodes. It serves stale outputs, with no drift, when a change reaches only a Store, or a
 value that stays masked by ruling: a message's id, usage and other metadata, or a key like
-`run_id`. lgcov has no `unsupported` result, so what it can't replay ends in a raw error.
+`run_id`. T133 adds an `unsupported` result with a reason for patterns attribution can't
+label safely (cases 1–3 in PR A): see [supported-pattern-matrix.md](supported-pattern-matrix.md).
+Crashes for checkpointer / interrupt (rows 4a, 6a, 6b) still exit 2 until PR B.
 
 The retried writes and the stale hits in rows 1a, 3a and 5a are fixed: see Side-effect safety and
 How a step is matched. Each finding still open is a strict xfail in

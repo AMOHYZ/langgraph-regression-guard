@@ -15,7 +15,7 @@ from fixtures.graphs import ASK, Ask, AskData, AskDataShorter, AskModel, AskMode
 from fixtures.langsmith_api import EXAMPLES, KEY, Fake, Reply
 
 from examples.synthetic_agents import AGENTS, SUPPORT, SUPPORT_CLIENT, SUPPORT_NESTED
-from lgcov.attribution import GRAPH_NOT_GIVEN, UNEXPLAINED, Benchmark, NodeLabels, NoiseCheck
+from lgcov.attribution import UNEXPLAINED, Benchmark, NodeLabels, NoiseCheck
 from lgcov.cassette import (
     SCHEME,
     Cassette,
@@ -3790,10 +3790,10 @@ def test_changed_parts_make_a_same_code_node_root() -> None:
     drifts = [list(compared_run(base, fresh, (), None).drifts)]
     assert {d.node for d in drifts[0]} == {"brief", "report"}
     # Same code, no parts: propagated (or unexplained first-drift), never root by fingerprint.
-    same = _node_labels([base], [fresh], drifts, {"brief": Probe(True)})
+    same, _ = _node_labels([base], [fresh], drifts, {"brief": Probe(True)})
     assert "brief" not in same.root
     parts: dict[str, Part] = {"brief.temperature": {"fingerprint": "a"}}
-    labelled = _node_labels(
+    labelled, _ = _node_labels(
         [base],
         [fresh],
         drifts,
@@ -3836,7 +3836,7 @@ def test_recorded_samples_quiet_a_first_node_under_its_noise() -> None:
     checks = judge_samples([base], [fresh])
     assert checks["brief"].drifted is False
     quiet = {n for n, c in checks.items() if not c.drifted}
-    labels = _node_labels([base], [fresh], drifts, {}, quiet=quiet)
+    labels, _ = _node_labels([base], [fresh], drifts, {}, quiet=quiet)
     assert (labels.root, labels.propagated, labels.inconclusive) == ((), (), {})
 
 
@@ -3874,9 +3874,11 @@ def test_bench_and_ci_name_the_same_roots_on_a_multi_root_pr(
 
     real, seen = cli._node_labels, []
 
-    def spy(*args: object, **kwargs: object) -> NodeLabels:
-        seen.append(real(*args, **kwargs))  # type: ignore[arg-type]  # passed through as given
-        return seen[-1]
+    def spy(*args: object, **kwargs: object) -> tuple[NodeLabels, object]:
+        # T133: `_node_labels` returns (labels, Unsupported | None); spy keeps labels only.
+        labels, bad = real(*args, **kwargs)  # type: ignore[arg-type]
+        seen.append(labels)
+        return labels, bad
 
     monkeypatch.setattr(cli, "_node_labels", spy)
     assert _bench(tmp_path, str(BENCH), "--only", "multi_root")[0] == 0
@@ -3941,7 +3943,7 @@ def test_a_rerouted_node_gets_the_same_label_with_one_run_or_two(keep: list[int]
     runs, fresh = [base[i] for i in keep], [head[i] for i in keep]
     drifts = [list(compared_run(r, f, (), None).drifts) for r, f in zip(runs, fresh, strict=True)]
     nodes = {"classify", "lookup", "respond"}
-    labels = _node_labels(runs, fresh, drifts, {}, graphs=(nodes, nodes))
+    labels, _ = _node_labels(runs, fresh, drifts, {}, graphs=(nodes, nodes))
     assert (labels.root, labels.propagated) == (("classify",), ("lookup", "respond"))
     assert labels.inconclusive == {}
 
@@ -3970,7 +3972,7 @@ def test_a_state_class_gets_the_labels_a_typeddict_state_gets(
     run = replay_run(pr, saved, serve=True)
     probes = probe_nodes(pr, [saved], changed_nodes(pr, [saved]))
     nodes = {"prep", "cut"}
-    labels = _node_labels(
+    labels, _ = _node_labels(
         [saved], [list(run.steps)], [list(run.drifts)], probes, graphs=(nodes, nodes)
     )
     assert (labels.root, labels.propagated, labels.inconclusive) == (root, (), inconclusive)
@@ -4076,13 +4078,13 @@ def _kept_reroute(tmp_path: Path, names: dict[str, object]) -> Benchmark:
             {},
             ("classify",),
             ("respond",),
-            {"audit": GRAPH_NOT_GIVEN["base"], "lookup": GRAPH_NOT_GIVEN["head"]},
+            {},  # T133: GRAPH_NOT_GIVEN nodes become unsupported, not inconclusive
         ),
         (
             {"head": HEAD_NODES},
             ("classify",),
             ("lookup", "respond"),
-            {"audit": GRAPH_NOT_GIVEN["base"]},
+            {},  # T133: audit was GRAPH_NOT_GIVEN → stripped; unsupported reason on the side
         ),
     ],
     ids=["both sides saved", "kept before T242", "head's alone"],

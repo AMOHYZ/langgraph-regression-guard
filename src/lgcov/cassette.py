@@ -40,6 +40,7 @@ from lgcov.messages import decode, encode
 from lgcov.normalize import key_view, normalize, redact_secrets
 from lgcov.rebind import Ambiguous, rebind
 from lgcov.snapshot import node_tools
+from lgcov.unsupported import Unsupported
 
 # T248: a tool call that ended this way is never compared, served or labelled; the rest of its
 # run is not checked, and the verdict is INCONCLUSIVE (ruling 1).
@@ -1511,13 +1512,15 @@ def replay_steps(
 @dataclass(frozen=True)
 class Replay:
     """T089: one cassette replayed: drift, the fresh steps, how each call ran and, if the
-    run stopped early, the nodes from there on that weren't checked."""
+    run stopped early, the nodes from there on that weren't checked. T133: `unsupported` when
+    attribution for this run isn't safe (reason on the type)."""
 
     drifts: tuple[Drift, ...]
     steps: tuple[Step, ...]
     calls: tuple[Call, ...]
     halt: Halt | None = None
     not_checked: tuple[str, ...] = ()  # the halted node first, then the recorded ones after
+    unsupported: Unsupported | None = None  # T133: set by callers that guard labels
 
     @property
     def rebind_skipped(self) -> tuple[str, ...]:

@@ -252,6 +252,7 @@ from lgcov.synthetic_score import (
     shared_report,
 )
 from lgcov.taxonomy import KPISpec, PendingReview, load_taxonomy
+from lgcov.unsupported import Unsupported, channel_fingerprints, guard_labels, visit_counts
 from lgcov.verdict_actions import CI_STATUSES, MODES, CodeFailure, gate_findings
 
 # 0 = no change / accepted, 1 = graph/replay changed or named node not drifted,
@@ -501,7 +502,8 @@ def _node_labels(
     router_probes: Sequence[ProbeStep] = (),
     base_parts: Mapping[str, Part] | None = None,
     head_parts: Mapping[str, str | None] | None = None,
-) -> NodeLabels:
+    channels: tuple[Mapping[str, str] | None, Mapping[str, str] | None] = (None, None),
+) -> tuple[NodeLabels, Unsupported | None]:
     """T222: each drifted node's label, from the recorded runs, the PR's steps for each and their
     drifts: what `lgcov ci` ships and what `lgcov bench` scores, so the two can't disagree.
     Root by fingerprint and probe (`classify`, T162), then what a run's order, routers and inputs
@@ -512,7 +514,10 @@ def _node_labels(
     whose parts changed counts as fingerprint-changed.
 
     T193: units count as nodes, by their path (`answer.respond`), on both sides (`with_units`). A
-    container gets no label when a unit inside it is root: the unit explains its drift."""
+    container gets no label when a unit inside it is root: the unit explains its drift.
+
+    T133: `channels` (base, head) are state-channel fingerprints; when attribution is unsafe,
+    labels are cleared and an `Unsupported` reason is returned instead."""
     top = {s.node for steps in (*(r.steps for r in runs), *fresh) for s in steps}
     route_hits = route_changed_runs(runs, fresh, router_probes)
     runs = [replace(r, steps=with_units(r.steps)) for r in runs]
@@ -548,7 +553,15 @@ def _node_labels(
     )
     # The trust rules: the PR's code writes the units, so only a root unit, which blocks too, can
     # take its container's label away. A unit base never recorded is never propagated (`classify`).
-    return _without_containers(labels, set(labels.root) - top)
+    labels = _without_containers(labels, set(labels.root) - top)
+    # T133: occurrence pairing is per run; any mismatched visit counts make attribution unsafe.
+    for recorded, steps in zip(runs, fresh, strict=True):
+        guarded, bad = guard_labels(
+            labels, graphs, (visit_counts(recorded.steps), visit_counts(steps)), channels
+        )
+        if bad is not None:
+            return guarded, bad
+    return guard_labels(labels, graphs, channels=channels)
 
 
 def _without_containers(labels: NodeLabels, explaining: Collection[str]) -> NodeLabels:
@@ -1180,6 +1193,20 @@ def _pools_edited(args: argparse.Namespace) -> bool:
     return pools_paths_edited(Path("."), Path(args.policy_dir))
 
 
+def _base_channels(args: argparse.Namespace, cfg: Config) -> dict[str, str] | None:
+    """T133: state-channel fingerprints from the base checkout's graph, when that checkout is
+    available. None when there is no base dir or the graph won't load."""
+    if not args.base_dir:
+        return None
+    target = _in_dir(args.base_dir, cfg.graph_entrypoint)
+    if target is None or not Path(target.rpartition(":")[0]).is_file():
+        return None
+    try:
+        return channel_fingerprints(_load_graph(target, "lgcov_base_channels"))
+    except Exception:
+        return None
+
+
 def _base_graph(
     args: argparse.Namespace, cfg: Config, cassettes_edited: bool
 ) -> tuple[frozenset[str] | None, str]:
@@ -1364,6 +1391,7 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
         fresh=tuple(FreshRun(r.steps, r.calls, r.halt) for r in replays),
         probes=probes,
         parts=head_parts or None,
+        channels=channel_fingerprints(graph) or None,
         agent_seconds=perf_counter() - agent_start,
         budget_hit=budget.hit,
     )
@@ -1434,7 +1462,8 @@ def _evaluate(
     changed = {n for n in checks if base_codes.get(n) != head_codes.get(n)}
     noise_probes = {n: Probe(checks[n].drifted or None, checks[n].verdict) for n in changed}
     quiet = {n for n, c in checks.items() if not c.drifted} - changed
-    labels = _node_labels(
+    base_channels = _base_channels(args, cfg)
+    labels, unsupported = _node_labels(
         runs,
         fresh_steps,
         drifts,
@@ -1445,7 +1474,9 @@ def _evaluate(
         router_probes=run.probes,  # T221: which runs a changed router's route differed in
         base_parts=recording.parts,  # T239: recording vs head part fingerprints
         head_parts=run.parts,
+        channels=(base_channels, run.channels),
     )
+    unsupported_reasons = (unsupported.reason,) if unsupported else ()
     blocking = {*labels.root, *labels.inconclusive}
     root, downstream = sorted(blocking), list(labels.propagated)
     # T199: the comment's tally line: each run's root and inconclusive nodes, in run order.
@@ -1512,6 +1543,7 @@ def _evaluate(
         ),
         tier=policy.tier,
         not_checked=not_checked,
+        unsupported=unsupported_reasons,
         timing=replace(timing, total=run.seconds + perf_counter() - start),
     )
     try:
@@ -3297,7 +3329,9 @@ def _labelled(
     judged = {n: Probe(checks[n].drifted or None, checks[n].verdict) for n in changed}
     quiet = {n for n, c in checks.items() if not c.drifted} - changed
     fresh = [r.steps for r in sides[1]]
-    labels = _node_labels(sides[0], fresh, drifts, {**probes, **judged}, quiet=quiet, graphs=graphs)
+    labels, _bad = _node_labels(
+        sides[0], fresh, drifts, {**probes, **judged}, quiet=quiet, graphs=graphs
+    )
     return Result(
         b.name,
         labels.root,
@@ -3337,7 +3371,7 @@ def _shipped(case: Replayed, base_nodes: Collection[str] | None = None) -> Found
     ran = probe_steps(case.graph, runs, changed_nodes(case.graph, runs))
     probes = judge_probes(runs, ran + (probe_units(case.graph, runs) if units else ()))
     graphs = (base_nodes, set(getattr(case.graph, "nodes", {})))
-    labels = _node_labels(runs, [done.steps], [list(done.drifts)], probes, graphs=graphs)
+    labels, _bad = _node_labels(runs, [done.steps], [list(done.drifts)], probes, graphs=graphs)
     sides = ({s.node for s in case.base.steps}, {s.node for s in done.steps})
     return Found(
         frozenset(labels.root),

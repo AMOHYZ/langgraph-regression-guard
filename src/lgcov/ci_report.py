@@ -95,6 +95,7 @@ class CiResult:
     notes: tuple[str, ...] = ()
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
     pools_edited: bool = False  # T124: this PR changed lineage.json or a case pool folder
+    unsupported: tuple[str, ...] = ()  # T133: attribution that isn't safe
     harness_error: str = ""
     harness_node: str = ""  # T074: the network trouble surfaced inside this node
     crash: str = ""  # T074: e.g. "Node `classify` raised ValueError: ..."; an agent failure
@@ -141,6 +142,9 @@ class CiResult:
             enforced_nodes = drifted if enforced else ()
             unenforced = bool(drifted) and not enforced
             needs_human_unmeasured = False
+        # T133: unsafe attribution → needs_human; do not also fail on the remaining labels.
+        if self.unsupported:
+            enforced_nodes, unenforced, needs_human_unmeasured = (), False, False
         return decide_action(
             Evidence(
                 self.gate.statistical,
@@ -157,6 +161,7 @@ class CiResult:
                 first_adoption=self.first_adoption,
                 cassettes_edited=self.cassettes_edited,
                 pools_edited=self.pools_edited,
+                unsupported=self.unsupported,
                 code_failures=self.gate.code_failures,
                 hidden_failures=self.gate.hidden_failures,
                 unmeasured_drift=needs_human_unmeasured,
