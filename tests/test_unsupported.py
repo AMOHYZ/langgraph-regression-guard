@@ -23,10 +23,10 @@ from lgcov.attribution import (
     explain_runs,
 )
 from lgcov.cassette import Cassette, Replay, accept_nodes, record, replay_run, runs_to_json
-from lgcov.unsupported import UnsupportedError
 from lgcov.ci_report import CiResult, Tally, render_ci_report
 from lgcov.cli import _run_root, main
 from lgcov.unsupported import (
+    UnsupportedError,
     channel_fingerprints,
     guard_labels,
     visit_counts,
