@@ -71,7 +71,7 @@ def harm_for_roots(
     specs = load_taxonomy(taxonomy).kpi_specs
     failed, judged = code_check_new_failures(base, pr, specs)
     code = [s for s in specs if s.judge == "code"]
-    checks: dict[str, dict[str, str] | None] = {
+    checks: dict[str, dict[str, object] | None] = {
         s.name: (dict(s.check) if s.check is not None else None) for s in code
     }
     # Prefer the PR path; fall back to base when the PR never visited the root.

@@ -34,12 +34,16 @@ kpis:
   `description`, `rubric` are required.
 - `failure_mode` must reference a declared failure-mode `id`; the error names
   the offending KPI.
-- `judge` must be `jev`, `code`, `fake` or `llm`. A `code` judge (T072) decides with
-  the rule in `check`: `node_visited`, `node_not_visited`, `tool_called`, `tool_not_called`
-  , `max_steps` (the run takes at most `n` steps), or `node_sequence` and `tool_sequence`
-  (the `nodes` or `tools` listed appear in that order; others may come between). A `jev` judge
-  calls the Jev service (`JEV_API_URL`, `JEV_API_KEY`); `fake` is the offline stand-in;
-  `llm`, a general LLM judge, runs in the nightly tier only (T089).
+- `judge` must be `jev`, `code`, `fake` or `llm`. A `code` judge (T072/T264) decides with
+  the rule in `check`: `node_visited`, `node_not_visited`, `tool_called`, `tool_not_called`,
+  `max_steps` (the run takes at most `n` steps), `node_sequence` / `tool_sequence`
+  (listed names in order; others may come between; unit paths like `sub.inner` are allowed),
+  or `output_contains` / `output_matches` (substring / regex over the named node's output;
+  the `pattern` for `output_matches` is taken from the **base-ref** taxonomy). Optional
+  `when: {input_contains: ...}` skips the check for non-matching run inputs (out of scope —
+  not a pass). A `jev` judge calls the Jev service (`JEV_API_URL`, `JEV_API_KEY`); `fake` is
+  the offline stand-in and **never measures** a root (T264); `llm` runs in the nightly tier
+  only (T089).
 - Bands (T063): code judges always block: a check that passed on the base and fails on the PR
   exits 1, whatever the paired test says ([gate.md](gate.md)). A model judge's band (blocking, flag or
   advisory) comes from `lgcov calibrate` against human labels; with no labels it is

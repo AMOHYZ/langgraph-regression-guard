@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from enum import IntEnum
-from typing import Literal
+from typing import Any, Literal
 
 FailOn = Literal["root-drift", "any-drift", "never", "harmed-root"]
 FAIL_ON_VALUES: tuple[FailOn, ...] = ("root-drift", "any-drift", "never", "harmed-root")
@@ -61,19 +61,28 @@ def _first_index(path: Sequence[str], name: str) -> int | None:
 
 def check_observes_root(
     root: str,
-    check: Mapping[str, str] | None,
+    check: Mapping[str, Any] | None,
     *,
     path: Sequence[str] | None = None,
+    judge: str | None = None,
 ) -> bool:
     """True when this check can observe the root's output or something downstream of it.
 
-    `check` is None for non-code KPIs (LLM / fake / jev): the taxonomy node match is enough.
-    Presence on the root itself never observes. With `path`, a presence (or node_sequence)
-    check scoped only to nodes that appear before the root does not observe either.
+    `check` is None for non-code KPIs (LLM / jev): the taxonomy node match is enough.
+    `judge: fake` never observes (constant label; T264). Presence on the root itself never
+    observes. With `path`, a presence (or node_sequence) check scoped only to nodes that
+    appear before the root does not observe either. `output_contains` / `output_matches`
+    observe the named node's output.
     """
+    if judge == "fake":
+        return False
     if check is None:
         return True
     kind = check.get("type", "")
+    if kind == "fake":
+        return False
+    if kind in ("output_contains", "output_matches"):
+        return True
     if kind in PRESENCE_CHECK_TYPES:
         target = check.get("node", "")
         if not target or target == root:
@@ -102,14 +111,14 @@ def check_observes_root(
     return True
 
 
-def _is_presence_on_root(root: str, check: Mapping[str, str] | None) -> bool:
+def _is_presence_on_root(root: str, check: Mapping[str, Any] | None) -> bool:
     if check is None:
         return False
     return check.get("type", "") in PRESENCE_CHECK_TYPES and check.get("node", "") == root
 
 
 def _is_upstream_only(
-    root: str, check: Mapping[str, str] | None, path: Sequence[str] | None
+    root: str, check: Mapping[str, Any] | None, path: Sequence[str] | None
 ) -> bool:
     """True when the check only looks at nodes that run before the root on `path`."""
     if check is None or path is None:
@@ -143,7 +152,7 @@ def _is_upstream_only(
 def _unmeasured_reason(
     root: str,
     candidates: Sequence[str],
-    kpi_checks: Mapping[str, Mapping[str, str] | None] | None,
+    kpi_checks: Mapping[str, Mapping[str, Any] | None] | None,
     path: Sequence[str] | None,
     *,
     observing_none_ran: bool,
@@ -153,7 +162,7 @@ def _unmeasured_reason(
     if not candidates:
         return REASON_NO_CHECK
 
-    def check_of(name: str) -> Mapping[str, str] | None:
+    def check_of(name: str) -> Mapping[str, Any] | None:
         if kpi_checks is None:
             return None
         return kpi_checks.get(name)
@@ -171,15 +180,17 @@ def root_harm_statuses(
     failed_kpis: frozenset[str],
     judged_kpis: frozenset[str],
     *,
-    kpi_checks: Mapping[str, Mapping[str, str] | None] | None = None,
+    kpi_checks: Mapping[str, Mapping[str, Any] | None] | None = None,
     path: Sequence[str] | None = None,
+    kpi_judges: Mapping[str, str] | None = None,
 ) -> dict[str, HarmStatus]:
     """T262: harm status per drift root from lgcov's own checks only.
 
     A KPI is a candidate when its taxonomy `node` matches that root. It measures the root
     only when its check can observe the root's output or something downstream (`kpi_checks`
     + optional run `path`). `failed_kpis` are blocking KPIs that BLOCK or code checks that
-    newly fail; `judged_kpis` are those that actually ran. No truth label is read.
+    newly fail; `judged_kpis` are those that actually ran (a `when:` skip is not judged).
+    No truth label is read.
     """
     statuses, _ = root_harm(
         roots,
@@ -188,6 +199,7 @@ def root_harm_statuses(
         judged_kpis,
         kpi_checks=kpi_checks,
         path=path,
+        kpi_judges=kpi_judges,
     )
     return statuses
 
@@ -197,9 +209,10 @@ def root_unmeasured_reasons(
     kpi_nodes: Mapping[str, str],
     judged_kpis: frozenset[str],
     *,
-    kpi_checks: Mapping[str, Mapping[str, str] | None] | None = None,
+    kpi_checks: Mapping[str, Mapping[str, Any] | None] | None = None,
     path: Sequence[str] | None = None,
     failed_kpis: frozenset[str] | None = None,
+    kpi_judges: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Reason string per unmeasured root (empty map entries omitted for measured roots)."""
     _, reasons = root_harm(
@@ -209,6 +222,7 @@ def root_unmeasured_reasons(
         judged_kpis,
         kpi_checks=kpi_checks,
         path=path,
+        kpi_judges=kpi_judges,
     )
     return reasons
 
@@ -219,8 +233,9 @@ def root_harm(
     failed_kpis: frozenset[str],
     judged_kpis: frozenset[str],
     *,
-    kpi_checks: Mapping[str, Mapping[str, str] | None] | None = None,
+    kpi_checks: Mapping[str, Mapping[str, Any] | None] | None = None,
     path: Sequence[str] | None = None,
+    kpi_judges: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, HarmStatus], dict[str, str]]:
     """Statuses plus a reason for each unmeasured root."""
     covering: dict[str, list[str]] = {}
@@ -233,7 +248,8 @@ def root_harm(
         observing: list[str] = []
         for kpi in candidates:
             check = None if kpi_checks is None else kpi_checks.get(kpi)
-            if check_observes_root(root, check, path=path):
+            kind = None if kpi_judges is None else kpi_judges.get(kpi)
+            if check_observes_root(root, check, path=path, judge=kind):
                 observing.append(kpi)
         ran = [k for k in observing if k in judged_kpis]
         if not observing:

@@ -32,12 +32,46 @@ or slice group never goes further than its KPIs' own verdicts.
 
   | Check kind | Measures a taxonomy root? |
   |---|---|
-  | LLM / fake / jev judge on that node | Yes (rubric over cassette output) |
+  | LLM / **jev** judge on that node | Yes (rubric over cassette output) |
+  | `judge: fake` (constant label) | **No** (T264; never observes) |
+  | `output_contains` / `output_matches` on that node | Yes (reads node output) |
   | `tool_called` / `tool_not_called` / `tool_sequence` / `max_steps` | Yes (run-level effects) |
   | `node_visited` / `node_not_visited` on a **downstream** node | Yes |
-  | `node_sequence` that includes a node **after** the root | Yes |
+  | `node_sequence` that includes a node **after** the root (incl. `sub.inner`) | Yes |
   | `node_visited` / `node_not_visited` on the root itself | **No** (presence only) |
   | Check scoped only to nodes **before** the root on the run path | **No** |
+  | Check skipped by `when:` for every sample | **Unmeasured** for that root (not "no harm seen") |
+
+  **T264 examples** (how YAML maps under #230 harm status):
+
+  ```yaml
+  # 1) output_contains / output_matches — measured when the check runs
+  - name: respond_shipped
+    node: respond
+    judge: code
+    check: {type: output_contains, text: shipped}
+    # or: check: {type: output_matches, pattern: "Status:\\s+SHIPPED"}  # pattern from base-ref
+  # → root `respond` is measured (pass → no harm seen; fail → harmed)
+
+  # 2) when: — skipped samples do not measure
+  - name: order_shipped
+    node: respond
+    judge: code
+    check:
+      type: output_contains
+      text: shipped
+      when: {input_contains: order}
+  # → input without "order": check skipped → that case contributes nothing
+  # → if every sample skips, root stays unmeasured (never "no harm seen")
+  # → if any sample runs the check, root is measured from those samples only
+
+  # 3) unit path sub.inner — trajectory checks via with_units
+  - name: inner_ran
+    node: before
+    judge: code
+    check: {type: node_sequence, nodes: "before,sub.inner,after"}
+  # → measures when the sequence includes a node after the root (incl. sub.inner)
+  ```
 - **A code check's new failure blocks outside these numbers.** A check that passed on the base
   and fails on the PR exits 1 on one case, whatever the paired test says. So it has no false-alarm
   bound: a check whose path varies between runs of an unchanged agent will block by chance, on

@@ -49,7 +49,7 @@ class KPISpec:
     labels: tuple[str, ...] = BINARY_LABELS
     score_map: dict[str, float] = field(default_factory=lambda: {"pass": 1.0, "fail": 0.0})
     label_hints: dict[str, str] = field(default_factory=dict)
-    check: dict[str, str] | None = None  # only for judge: code (T072)
+    check: dict[str, object] | None = None  # judge: code (T072); may nest `when:` (T264)
     margin: float | None = None  # T091: non-inferiority margin δ; None = gate.margin
 
     def to_kpi(self) -> KPI:
@@ -103,6 +103,21 @@ def _failure_mode(raw: object, index: int) -> FailureMode:
     )
 
 
+def _normalize_check(check: Mapping[str, object]) -> dict[str, object]:
+    """T197 lists → comma names; T264 keep nested `when:` as a mapping."""
+    out: dict[str, object] = {}
+    for key, value in check.items():
+        if key == "when":
+            if not isinstance(value, Mapping):
+                raise ValueError("check 'when' must be a mapping")
+            out[key] = {str(k): str(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            out[key] = ",".join(map(str, value))
+        else:
+            out[key] = str(value)
+    return out
+
+
 def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
     d = _mapping(raw, "entry", f"kpis[{index}]")
     name = _str(d, "name", f"kpis[{index}]")
@@ -145,12 +160,7 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
         labels=labels,
         score_map=score_map,
         label_hints={k: str(v) for k, v in hints.items()},
-        check=(
-            # T197: a YAML list is a sequence check's names
-            {k: ",".join(map(str, v)) if isinstance(v, list) else str(v) for k, v in check.items()}
-            if check is not None
-            else None
-        ),
+        check=(_normalize_check(check) if check is not None else None),
         margin=margin,
     )
     spec.to_kpi()  # KPI's own label/score checks, at load time rather than build time

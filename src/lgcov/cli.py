@@ -1632,22 +1632,27 @@ def _evaluate(
     # T262: harm status from this run's KPIs/code checks only (never a truth label).
     failed_kpis = {f.kpi for f in findings.code_failures} | {f.kpi for f in hidden}
     failed_kpis |= {s.kpi for s in stats if s.blocking and s.decision == "BLOCK"}
-    kpi_checks: dict[str, dict[str, str] | None] = {
+    kpi_checks: dict[str, dict[str, object] | None] = {
         spec.name: (dict(spec.check) if spec.check is not None else None) for spec in l2[0]
     }
+    kpi_judges = {spec.name: spec.judge for spec in l2[0]}
     # First-seen node order across PR replays (upstream vs downstream for observe-root).
+    # Prefer unit paths so subgraph names like sub.inner participate in observe-root.
     path_nodes: list[str] = []
     for _, steps in pairs:
-        for step in steps:
+        for step in with_units(steps):
             if step.node not in path_nodes:
                 path_nodes.append(step.node)
+    # A KPI skipped by `when:` on every sample has n=0 / no samples — not judged.
+    judged_kpis = frozenset(s.kpi for s in stats if s.samples > 0 or s.n > 0)
     harm, harm_reasons = root_harm(
         root,
         {spec.name: spec.node for spec in l2[0]},
         frozenset(failed_kpis),
-        frozenset(s.kpi for s in stats),
+        judged_kpis,
         kpi_checks=kpi_checks,
         path=tuple(path_nodes) or None,
+        kpi_judges=kpi_judges,
     )
     return replace(
         result,
@@ -2097,10 +2102,12 @@ def _l2_judge(spec: KPISpec, jev_model: str | None = None, jev_timeout_s: float 
             raise ValueError(
                 f"KPI '{spec.name}': fake check keys {unknown} not in {_FAKE_CHECK_KEYS}"
             )
-        every = check.get("fail_every", "0")
+        every_raw = check.get("fail_every", "0")
+        every = every_raw if isinstance(every_raw, str) else ""
         if not every.isdigit():
             raise ValueError(f"KPI '{spec.name}': fail_every must be a whole number")
-        when = check.get("when_input_contains", "")
+        when_raw = check.get("when_input_contains", "")
+        when = when_raw if isinstance(when_raw, str) else ""
         return FakeJudge(kpi, "pass", fail_every=int(every), when_input_contains=when)
     return JevJudge(kpi, model=jev_model, timeout_s=jev_timeout_s)
 
@@ -2108,30 +2115,64 @@ def _l2_judge(spec: KPISpec, jev_model: str | None = None, jev_timeout_s: float 
 _Cases = dict[str, tuple[NodeState, NodeState]]
 
 
-def _l2_cases(spec: KPISpec, runs: list[list[Step]], stopped: Collection[int] = ()) -> _Cases:
+def _l2_cases(
+    spec: KPISpec,
+    runs: list[list[Step]],
+    stopped: Collection[int] = (),
+    *,
+    run_inputs: Sequence[Mapping[str, object]] | None = None,
+) -> _Cases:
     """One case per run: the trace for code judges, else the node's own input and output. A
     run in `stopped` has no whole-run case: its trace is cut off, and its last step isn't the
     final one, so a code check would read as failed when it was never checked. The trace's
-    tools are the whole run's, whatever node the KPI names (T181)."""
+    tools are the whole run's, whatever node the KPI names (T181).
+
+    T264: `output_*` checks read the named node's output; `when:` skips out-of-scope runs
+    (omitted from the map — not a pass). Trajectory nodes include unit paths (`sub.inner`).
+    """
+    from lgcov.code_judges import CONTENT_CHECK_TYPES, check_in_scope
+
     cases: _Cases = {}
     for i, steps in enumerate(runs):
         if i in stopped and (spec.judge == "code" or spec.node == "final"):
             continue
+        inputs: Mapping[str, object] = {}
+        if run_inputs is not None and i < len(run_inputs):
+            inputs = run_inputs[i]
+        if (
+            spec.judge == "code"
+            and spec.check is not None
+            and not check_in_scope(spec.check, inputs)
+        ):
+            continue  # when: skip — unmeasured for this case, never a silent pass
         case_id = f"run-{i}/{spec.node}"
+        units = with_units(steps)
         if spec.judge == "code":
             tools = run_tools([s.output for s in steps])
-            cases[case_id] = ({}, {"trace": {"nodes": [s.node for s in steps], "tools": tools}})
+            kind = str((spec.check or {}).get("type", ""))
+            node_out: dict[str, object] = {
+                "trace": {"nodes": [s.node for s in units], "tools": tools}
+            }
+            if kind in CONTENT_CHECK_TYPES:
+                step = next((s for s in units if s.node == spec.node), None)
+                if step is None:
+                    continue
+                output = step.output if isinstance(step.output, dict) else {"output": step.output}
+                node_out.update(plain(output) if isinstance(output, dict) else {"output": output})
+            cases[case_id] = (dict(inputs), node_out)
             continue
         if spec.node == "final":
             step = steps[-1] if steps else None
         else:
-            step = next((s for s in steps if s.node == spec.node), None)
+            step = next((s for s in units if s.node == spec.node), None)
+            if step is None:
+                step = next((s for s in steps if s.node == spec.node), None)
         if step is not None:
             # T165: plain, since judges send it as JSON and reviews save it as JSON
             node_in = plain(step.input) if isinstance(step.input, dict) else {}
             output = step.output if isinstance(step.output, dict) else {"output": step.output}
-            node_out = plain(output)
-            cases[case_id] = (node_in, node_out)
+            node_out2 = plain(output)
+            cases[case_id] = (node_in, node_out2)
     return cases
 
 
@@ -2142,8 +2183,14 @@ def _l2_plan(
     stopped: Collection[int] = (),
 ) -> list[tuple[KPISpec, _Cases, _Cases]]:
     base, fresh = [r.steps for r in runs], [steps for _, steps in replays]
+    inputs = [dict(r.inputs) for r in runs]
     return [
-        (spec, _l2_cases(spec, base, stopped), _l2_cases(spec, fresh, stopped)) for spec in specs
+        (
+            spec,
+            _l2_cases(spec, base, stopped, run_inputs=inputs),
+            _l2_cases(spec, fresh, stopped, run_inputs=inputs),
+        )
+        for spec in specs
     ]
 
 
