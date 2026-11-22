@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Held-out synthetic cases (T264).** `examples/synthetic_agents/held_out.py` lists ~30
+  labeled edits (demo/fanout/subgraph) with user-consequence truth and `harm_on` scope.
+  Not wired into AGENTS / every_case / bench.
 - **Content code checks (T264).** `output_contains` / `output_matches` read a named node's
   output so a root can be measured without a model. Optional `when: {input_contains: ...}`
   skips out-of-scope inputs (unmeasured for that case — never a silent "no harm seen").
