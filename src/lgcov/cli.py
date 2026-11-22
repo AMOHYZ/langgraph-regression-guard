@@ -561,9 +561,14 @@ def _node_labels(
     # take its container's label away. A unit base never recorded is never propagated (`classify`).
     labels = _without_containers(labels, set(labels.root) - top)
     # T133: occurrence pairing is per run; any mismatched visit counts make attribution unsafe.
+    # Case 6: pass steps so add_messages id-only changes can become unsupported.
     for recorded, steps in zip(runs, fresh, strict=True):
         guarded, bad = guard_labels(
-            labels, graphs, (visit_counts(recorded.steps), visit_counts(steps)), channels
+            labels,
+            graphs,
+            (visit_counts(recorded.steps), visit_counts(steps)),
+            channels,
+            steps=(recorded.steps, steps),
         )
         if bad is not None:
             return guarded, bad
