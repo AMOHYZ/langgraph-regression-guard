@@ -1,0 +1,602 @@
+{
+  "date": "2026-11-22",
+  "cases": 90,
+  "edits": 30,
+  "agents": 3,
+  "classes": 11,
+  "labels": {
+    "benign": 20,
+    "regressed": 41,
+    "inert": 29
+  },
+  "all_edits": [
+    {
+      "method": "lgcov root",
+      "cases": {
+        "precision": {
+          "hits": 35,
+          "of": 55,
+          "value": 0.6363636363636364
+        },
+        "recall": {
+          "hits": 35,
+          "of": 41,
+          "value": 0.8536585365853658
+        },
+        "coverage": {
+          "hits": 55,
+          "of": 58,
+          "value": 0.9482758620689655
+        },
+        "false_flag": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 12,
+          "of": 19,
+          "value": 0.631578947368421
+        },
+        "recall": {
+          "hits": 12,
+          "of": 14,
+          "value": 0.8571428571428571
+        },
+        "coverage": {
+          "hits": 19,
+          "of": 20,
+          "value": 0.95
+        },
+        "false_flag": {
+          "hits": 7,
+          "of": 7,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "first drift + router rule",
+      "cases": {
+        "precision": {
+          "hits": 29,
+          "of": 58,
+          "value": 0.5
+        },
+        "recall": {
+          "hits": 29,
+          "of": 41,
+          "value": 0.7073170731707317
+        },
+        "coverage": {
+          "hits": 49,
+          "of": 58,
+          "value": 0.8448275862068966
+        },
+        "false_flag": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 10,
+          "of": 20,
+          "value": 0.5
+        },
+        "recall": {
+          "hits": 10,
+          "of": 14,
+          "value": 0.7142857142857143
+        },
+        "coverage": {
+          "hits": 17,
+          "of": 20,
+          "value": 0.85
+        },
+        "false_flag": {
+          "hits": 7,
+          "of": 7,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "edited node from the diff",
+      "cases": {
+        "precision": {
+          "hits": 41,
+          "of": 90,
+          "value": 0.45555555555555555
+        },
+        "recall": {
+          "hits": 41,
+          "of": 41,
+          "value": 1.0
+        },
+        "coverage": {
+          "hits": 58,
+          "of": 58,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 14,
+          "of": 30,
+          "value": 0.4666666666666667
+        },
+        "recall": {
+          "hits": 14,
+          "of": 14,
+          "value": 1.0
+        },
+        "coverage": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 7,
+          "of": 7,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "first divergence",
+      "cases": {
+        "precision": {
+          "hits": 21,
+          "of": 58,
+          "value": 0.3620689655172414
+        },
+        "recall": {
+          "hits": 21,
+          "of": 41,
+          "value": 0.5121951219512195
+        },
+        "coverage": {
+          "hits": 41,
+          "of": 58,
+          "value": 0.7068965517241379
+        },
+        "false_flag": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 7,
+          "of": 20,
+          "value": 0.35
+        },
+        "recall": {
+          "hits": 7,
+          "of": 14,
+          "value": 0.5
+        },
+        "coverage": {
+          "hits": 14,
+          "of": 20,
+          "value": 0.7
+        },
+        "false_flag": {
+          "hits": 7,
+          "of": 7,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "end-to-end",
+      "cases": {
+        "precision": {
+          "hits": 0,
+          "of": 0,
+          "value": null
+        },
+        "recall": {
+          "hits": 0,
+          "of": 41,
+          "value": 0.0
+        },
+        "coverage": {
+          "hits": 0,
+          "of": 58,
+          "value": 0.0
+        },
+        "false_flag": {
+          "hits": 0,
+          "of": 20,
+          "value": 0.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 0,
+          "of": 0,
+          "value": null
+        },
+        "recall": {
+          "hits": 0,
+          "of": 14,
+          "value": 0.0
+        },
+        "coverage": {
+          "hits": 0,
+          "of": 20,
+          "value": 0.0
+        },
+        "false_flag": {
+          "hits": 0,
+          "of": 7,
+          "value": 0.0
+        }
+      }
+    }
+  ],
+  "single_node": [
+    {
+      "method": "lgcov root",
+      "cases": {
+        "precision": {
+          "hits": 30,
+          "of": 50,
+          "value": 0.6
+        },
+        "recall": {
+          "hits": 30,
+          "of": 33,
+          "value": 0.9090909090909091
+        },
+        "coverage": {
+          "hits": 50,
+          "of": 50,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 10,
+          "of": 17,
+          "value": 0.5882352941176471
+        },
+        "recall": {
+          "hits": 10,
+          "of": 11,
+          "value": 0.9090909090909091
+        },
+        "coverage": {
+          "hits": 17,
+          "of": 17,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 7,
+          "of": 7,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "first drift + router rule",
+      "cases": {
+        "precision": {
+          "hits": 21,
+          "of": 50,
+          "value": 0.42
+        },
+        "recall": {
+          "hits": 21,
+          "of": 33,
+          "value": 0.6363636363636364
+        },
+        "coverage": {
+          "hits": 41,
+          "of": 50,
+          "value": 0.82
+        },
+        "false_flag": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 7,
+          "of": 17,
+          "value": 0.4117647058823529
+        },
+        "recall": {
+          "hits": 7,
+          "of": 11,
+          "value": 0.6363636363636364
+        },
+        "coverage": {
+          "hits": 14,
+          "of": 17,
+          "value": 0.8235294117647058
+        },
+        "false_flag": {
+          "hits": 7,
+          "of": 7,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "edited node from the diff",
+      "cases": {
+        "precision": {
+          "hits": 33,
+          "of": 78,
+          "value": 0.4230769230769231
+        },
+        "recall": {
+          "hits": 33,
+          "of": 33,
+          "value": 1.0
+        },
+        "coverage": {
+          "hits": 50,
+          "of": 50,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 11,
+          "of": 26,
+          "value": 0.4230769230769231
+        },
+        "recall": {
+          "hits": 11,
+          "of": 11,
+          "value": 1.0
+        },
+        "coverage": {
+          "hits": 17,
+          "of": 17,
+          "value": 1.0
+        },
+        "false_flag": {
+          "hits": 7,
+          "of": 7,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "first divergence",
+      "cases": {
+        "precision": {
+          "hits": 21,
+          "of": 50,
+          "value": 0.42
+        },
+        "recall": {
+          "hits": 21,
+          "of": 33,
+          "value": 0.6363636363636364
+        },
+        "coverage": {
+          "hits": 41,
+          "of": 50,
+          "value": 0.82
+        },
+        "false_flag": {
+          "hits": 20,
+          "of": 20,
+          "value": 1.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 7,
+          "of": 17,
+          "value": 0.4117647058823529
+        },
+        "recall": {
+          "hits": 7,
+          "of": 11,
+          "value": 0.6363636363636364
+        },
+        "coverage": {
+          "hits": 14,
+          "of": 17,
+          "value": 0.8235294117647058
+        },
+        "false_flag": {
+          "hits": 7,
+          "of": 7,
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "method": "end-to-end",
+      "cases": {
+        "precision": {
+          "hits": 0,
+          "of": 0,
+          "value": null
+        },
+        "recall": {
+          "hits": 0,
+          "of": 33,
+          "value": 0.0
+        },
+        "coverage": {
+          "hits": 0,
+          "of": 50,
+          "value": 0.0
+        },
+        "false_flag": {
+          "hits": 0,
+          "of": 20,
+          "value": 0.0
+        }
+      },
+      "by_edit": {
+        "precision": {
+          "hits": 0,
+          "of": 0,
+          "value": null
+        },
+        "recall": {
+          "hits": 0,
+          "of": 11,
+          "value": 0.0
+        },
+        "coverage": {
+          "hits": 0,
+          "of": 17,
+          "value": 0.0
+        },
+        "false_flag": {
+          "hits": 0,
+          "of": 7,
+          "value": 0.0
+        }
+      }
+    }
+  ],
+  "end_to_end_caught": {
+    "hits": 38,
+    "of": 41,
+    "value": 0.926829268292683
+  },
+  "end_to_end_false": {
+    "hits": 14,
+    "of": 20,
+    "value": 0.7
+  },
+  "aa": [],
+  "noise_rule": [],
+  "per_node": [
+    {
+      "edits": "All",
+      "precision": {
+        "hits": 35,
+        "of": 55,
+        "value": 0.6363636363636364
+      },
+      "recall": {
+        "hits": 35,
+        "of": 41,
+        "value": 0.8536585365853658
+      },
+      "exact": {
+        "hits": 35,
+        "of": 41,
+        "value": 0.8536585365853658
+      },
+      "inconclusive": 0,
+      "one_sided": {
+        "hits": 0,
+        "of": 55,
+        "value": 0.0
+      }
+    },
+    {
+      "edits": "Single-node",
+      "precision": {
+        "hits": 30,
+        "of": 50,
+        "value": 0.6
+      },
+      "recall": {
+        "hits": 30,
+        "of": 33,
+        "value": 0.9090909090909091
+      },
+      "exact": {
+        "hits": 30,
+        "of": 33,
+        "value": 0.9090909090909091
+      },
+      "inconclusive": 0,
+      "one_sided": {
+        "hits": 0,
+        "of": 50,
+        "value": 0.0
+      }
+    }
+  ],
+  "shared": null,
+  "harm": {
+    "enforced_false_flag": {
+      "hits": 4,
+      "of": 20,
+      "value": 0.2
+    },
+    "measured_recall": {
+      "hits": 18,
+      "of": 21,
+      "value": 0.8571428571428571
+    },
+    "unmeasured_rooted": {
+      "hits": 25,
+      "of": 55,
+      "value": 0.45454545454545453
+    },
+    "by_tag": {
+      "requirement": {
+        "enforced_false_flag": {
+          "hits": 1,
+          "of": 20,
+          "value": 0.05
+        },
+        "measured_recall": {
+          "hits": 13,
+          "of": 18,
+          "value": 0.7222222222222222
+        },
+        "unmeasured_rooted": {
+          "hits": 29,
+          "of": 55,
+          "value": 0.5272727272727272
+        }
+      },
+      "format": {
+        "enforced_false_flag": {
+          "hits": 3,
+          "of": 20,
+          "value": 0.15
+        },
+        "measured_recall": {
+          "hits": 8,
+          "of": 14,
+          "value": 0.5714285714285714
+        },
+        "unmeasured_rooted": {
+          "hits": 34,
+          "of": 55,
+          "value": 0.6181818181818182
+        }
+      }
+    }
+  }
+}

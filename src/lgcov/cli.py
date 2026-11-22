@@ -3626,6 +3626,12 @@ def _bench_synthetic(out: Path, results: Path, *, held_out: bool = False) -> int
     section = render_section(report)
     if held_out:
         section = section.replace("## Synthetic", "## Held-out", 1)
+    else:
+        # Keep the opt-in held-out pointer after the suite section (T264).
+        section = (
+            section.rstrip("\n") + " Held-out cases (T264) are opt-in and separate: "
+            "`lgcov bench --synthetic --held-out` (does not mix into the suite above).\n"
+        )
     doc = out.read_text(encoding="utf-8") if out.exists() else ""
     merged = _replace_held_out_section(doc, section) if held_out else replace_section(doc, section)
     for path, text in ((out, merged), (results, report_json(report))):
