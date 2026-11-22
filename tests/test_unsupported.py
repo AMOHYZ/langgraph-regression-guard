@@ -1,4 +1,4 @@
-"""T133 PR A: `Unsupported(reason)` for attribution that isn't safe (cases 1–3)."""
+"""T133: `Unsupported(reason)` for attribution that isn't safe (PR A: 1–3; PR B: 5, 7–9)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
-from fixtures.replay_audit import loop
+from fixtures.replay_audit import interrupt, loop, parallel_update, side_effect, subgraph
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
 
 from lgcov.attribution import (
     GRAPH_NOT_GIVEN,
@@ -19,9 +21,17 @@ from lgcov.attribution import (
     classify,
     explain_runs,
 )
-from lgcov.cassette import Cassette, accept_nodes, record, replay_run
+from lgcov.cassette import (
+    Cassette,
+    Replay,
+    UnsupportedError,
+    accept_nodes,
+    record,
+    replay_run,
+    runs_to_json,
+)
 from lgcov.ci_report import CiResult, Tally, render_ci_report
-from lgcov.cli import _run_root
+from lgcov.cli import _run_root, main
 from lgcov.unsupported import (
     channel_fingerprints,
     guard_labels,
@@ -30,6 +40,10 @@ from lgcov.unsupported import (
 from lgcov.verdict_actions import Evidence, decide_action
 
 NO_DECISION = "⚠️ No decision: needs_human"
+
+
+def _how(fresh: Replay) -> list[tuple[str, str]]:
+    return [(c.node, c.how) for c in fresh.calls]
 
 
 def _load(name: str, src: str) -> Any:
@@ -346,3 +360,133 @@ def test_reducer_guard_needs_known_equal_graph_shapes() -> None:
     )
     assert also is None
     assert differing == shared
+
+
+# --- Case 5: subgraph / parent checkpointer (crash → unsupported) ---
+
+VALUE: dict[str, object] = {"value": 1}
+
+
+def test_parent_checkpointer_replay_is_unsupported_not_a_crash() -> None:
+    cassette = Cassette.from_json(record(subgraph.build(2), VALUE).to_json())
+    pr = subgraph.build(2, parent_checkpointer=InMemorySaver())
+    fresh = replay_run(pr, cassette, serve=True)
+    assert fresh.unsupported is not None
+    assert fresh.unsupported.pattern == "checkpointer"
+    assert "checkpointer" in fresh.unsupported.reason.lower()
+    assert fresh.drifts == ()
+
+
+def test_parent_checkpointer_record_is_unsupported_not_a_crash() -> None:
+    with pytest.raises(UnsupportedError) as caught:
+        record(subgraph.build(2, parent_checkpointer=InMemorySaver()), VALUE)
+    assert caught.value.unsupported.pattern == "checkpointer"
+    assert "checkpointer" in caught.value.unsupported.reason.lower()
+
+
+@pytest.mark.parametrize("sub_checkpointer", [None, True], ids=["default", "checkpointer_true"])
+def test_subgraph_checkpointer_without_parent_stays_supported(sub_checkpointer: object) -> None:
+    """T152 row 4: no parent checkpointer — default or True — still serves; keep labels."""
+    spy = Mock()
+    cassette = Cassette.from_json(record(subgraph.build(2, spy, sub_checkpointer), VALUE).to_json())
+    spy.reset_mock()
+    fresh = replay_run(subgraph.build(2, spy, sub_checkpointer), cassette, serve=True)
+    assert fresh.unsupported is None
+    assert _how(fresh) == [("prep", "served"), ("after", "served")]
+    assert spy.call_count == 1
+
+
+# --- Case 7: parallel InvalidUpdateError (crash → unsupported) ---
+
+
+def test_parallel_invalid_update_replay_is_unsupported_not_a_crash() -> None:
+    cassette = Cassette.from_json(record(parallel_update.build_reduced(), {}).to_json())
+    fresh = replay_run(parallel_update.build_conflict(), cassette, serve=True)
+    assert fresh.unsupported is not None
+    assert fresh.unsupported.pattern == "invalid_update"
+    assert "InvalidUpdate" in fresh.unsupported.reason or "parallel" in fresh.unsupported.reason
+
+
+def test_parallel_invalid_update_record_is_unsupported_not_a_crash() -> None:
+    with pytest.raises(UnsupportedError) as caught:
+        record(parallel_update.build_conflict(), {})
+    assert caught.value.unsupported.pattern == "invalid_update"
+
+
+# --- Case 8: re-triggered interrupt (crash → unsupported) ---
+
+QUESTION: dict[str, object] = {"question": "refund?"}
+
+
+def test_interrupted_run_replay_is_unsupported_not_a_crash() -> None:
+    # Record still captures the interrupt step today; replay must not TypeError on compare.
+    cassette = Cassette.from_json(record(interrupt.build(), QUESTION).to_json())
+    assert any(s.node == "__interrupt__" for s in cassette.steps)
+    fresh = replay_run(interrupt.build(), cassette, serve=True)
+    assert fresh.unsupported is not None
+    assert fresh.unsupported.pattern == "interrupt"
+    assert "interrupt" in fresh.unsupported.reason.lower()
+
+
+def test_interrupted_run_with_checkpointer_is_unsupported_not_a_crash() -> None:
+    cassette = Cassette.from_json(record(interrupt.build(), QUESTION).to_json())
+    pr = interrupt.build(checkpointer=InMemorySaver())
+    fresh = replay_run(pr, cassette, serve=True)
+    assert fresh.unsupported is not None
+    assert fresh.unsupported.pattern in {"interrupt", "checkpointer"}
+
+
+# --- Case 9: Store reads (detectable → unsupported; no silent stale) ---
+
+
+def test_store_graph_serve_is_unsupported_not_silent_stale() -> None:
+    spy, backend = Mock(), InMemoryStore()
+    cassette = Cassette.from_json(
+        record(side_effect.build_with_store("old", backend, spy), {}).to_json()
+    )
+    spy.reset_mock()
+    fresh = replay_run(side_effect.build_with_store("new", backend, spy), cassette, serve=True)
+    assert fresh.unsupported is not None
+    assert fresh.unsupported.pattern == "store"
+    assert "store" in fresh.unsupported.reason.lower()
+    assert spy.call_count == 0  # did not silently serve a stale Y
+
+
+@pytest.mark.parametrize(
+    ("source", "base", "inputs", "needle"),
+    [
+        pytest.param(
+            "from langgraph.checkpoint.memory import InMemorySaver\n"
+            "from fixtures.replay_audit.subgraph import build\n"
+            "graph = build(2, parent_checkpointer=InMemorySaver())\n",
+            subgraph.build(2),
+            VALUE,
+            "checkpointer",
+            id="checkpointer",
+        ),
+        pytest.param(
+            "from fixtures.replay_audit.interrupt import build\ngraph = build()\n",
+            interrupt.build(),
+            QUESTION,
+            "interrupt",
+            id="interrupt",
+        ),
+    ],
+)
+def test_lgcov_replay_says_unsupported_instead_of_harness_exit_2(
+    source: str,
+    base: object,
+    inputs: dict[str, object],
+    needle: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Was exit 2 harness; now unsupported → exit 0, reason printed, not a silent pass."""
+    (tmp_path / "baseline.json").write_text(runs_to_json([record(base, inputs)]), encoding="utf-8")
+    (tmp_path / "graph.py").write_text(source, encoding="utf-8")
+    code = main(["replay", f"{tmp_path / 'graph.py'}:graph", str(tmp_path / "baseline.json")])
+    out = capsys.readouterr()
+    text = f"{out.out}\n{out.err}".lower()
+    assert code == 0
+    assert "unsupported" in text or needle in text
+    assert "replay failed outside node code" not in text
