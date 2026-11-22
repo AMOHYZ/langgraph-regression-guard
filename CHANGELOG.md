@@ -10,7 +10,10 @@
   [docs/gate.md](docs/gate.md) and [docs/taxonomy.md](docs/taxonomy.md).
 - **Synthetic harm plumbing (T264).** `code_check_new_failures` / `harm_for_roots` evaluate
   content checks on the named node's output (via `with_units`), honor `when:` skips as
-  unjudged, and treat `judge: fake` as never measuring. No taxonomy/score change yet.
+  unjudged, and treat `judge: fake` as never measuring.
+- **Synthetic content taxonomies (T264).** Demo, fanout and subgraph taxonomies now use
+  `output_contains` / `output_matches` checks tagged requirement/format. Synthetic harm
+  rates and `docs/benchmark.md` reflect the measured cases (not presence-only unmeasured).
 
 - **Case pools (T124).** `lgcov pools check` keeps optimiser and gate cases apart:
   refuses the same case id in two pools, a gate case the locked round's judge was fitted on,
@@ -21,7 +24,7 @@
   rounds do not clear a fit. On a PR, lineage and pools are read from the base; editing them
   yields `needs_human` (`pools_edited`). [docs/pools.md](docs/pools.md).
 - **Gate behaviour change (T262).** Each drift root gets a harm status from lgcov's own KPIs/code checks only (`harmed` / `no harm seen` / `unmeasured`); `classify` is unchanged and never reads a synthetic truth label. New `fail-on: harmed-root` fails only on harmed roots; unmeasured roots are `needs_human` (never a pass); no-harm-seen alone does not fail (pass / exit 0). Default remains `root-drift` (any root fails). A covering check **measures** a root only when it can observe that root's output or something downstream: same-node `node_visited` / `node_not_visited`, and checks scoped only to upstream nodes, leave the root unmeasured (the PR comment names why, e.g. "only a presence check covers this node").
-- **Synthetic bench (T262).** Demo, fanout and subgraph code-check taxonomies (committed before measure) drive harm status on synthetic cases. With today's trajectory presence taxonomies, rooted cases are unmeasured under the observe-root rule. `lgcov bench --synthetic` reports enforced-root false flags and measured recall beside the drift-root score. Does not call or copy the suite's outcome helper.
+- **Synthetic bench (T262).** Demo, fanout and subgraph code-check taxonomies (committed before measure) drive harm status on synthetic cases. Content checks (T264) measure covered roots; uncovered nodes stay unmeasured under the observe-root rule. `lgcov bench --synthetic` reports enforced-root false flags and measured recall beside the drift-root score. Does not call or copy the suite's outcome helper.
 - **Gate behaviour change.** Labels read chat-model `parts` (T239): a unit whose part fingerprints differ from the recording counts as fingerprint-changed for root/propagated, and the comment names those parts with the root. The candidate job writes head's part fingerprints (schema 3). Replay already serves a step only when every named part still matches.
 - **Gate behaviour change.** Labels name a changed router only when the route differed (T221): the candidate's router probe on base's `router_state`, or paired `routed` when there was no state. A router edit that still returns base's targets is no longer root of drift a later node caused.
 - **Gate behaviour change.** A tool unit whose `status` is `timeout`, `rate_limited` or `server_error` is never compared, never served and never labelled (T248). That unit and the rest of its run are not checked, so the verdict is INCONCLUSIVE (needs_human), never a pass. `success` and `error` compare as before.

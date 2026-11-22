@@ -1,6 +1,7 @@
-"""T262: synthetic harm status from committed code-check taxonomies only.
+"""T262/T264: synthetic harm status from committed code-check taxonomies only.
 
 Harm status must not call or copy outcome_ok, and must not read regressed.
+Content taxonomies (T264) measure covered roots; uncovered nodes stay unmeasured.
 """
 
 from collections.abc import Mapping
@@ -48,16 +49,21 @@ def test_code_checks_on_an_unchanged_demo_run_have_no_new_failures() -> None:
     specs = load_taxonomy(ROOT / TAXONOMY_BY_AGENT["demo"]).kpi_specs
     failed, judged = code_check_new_failures(base, base, specs)
     assert failed == frozenset()
-    assert judged == frozenset(s.name for s in specs)
+    # Order question: hours-scoped when: KPIs stay unjudged (never a silent pass).
+    assert judged == frozenset(
+        {
+            "lookup_order_shipped",
+            "respond_includes_shipped",
+            "respond_echoes_order_question",
+        }
+    )
 
 
-def test_harm_status_for_demo_roots_presence_checks_do_not_measure() -> None:
-    """Demo path checks are same-node presence or sequences with no node after the root."""
+def test_harm_status_for_demo_roots_content_checks_measure_covered_nodes() -> None:
+    """Demo content checks observe lookup_order and respond; plan has no covering KPI."""
     specs = load_taxonomy(ROOT / TAXONOMY_BY_AGENT["demo"]).kpi_specs
     covered = {s.name: s.node for s in specs}
     checks = {s.name: dict(s.check) for s in specs if s.check is not None}
-    # With the run path, presence on the root and sequences that never name a
-    # node after it leave those roots unmeasured (T262 observe-root).
     statuses = root_harm_statuses(
         ("lookup_order", "respond", "plan"),
         covered,
@@ -67,8 +73,8 @@ def test_harm_status_for_demo_roots_presence_checks_do_not_measure() -> None:
         path=("classify", "lookup_order", "respond"),
     )
     assert statuses == {
-        "lookup_order": "unmeasured",
-        "respond": "unmeasured",
+        "lookup_order": "no harm seen",
+        "respond": "no harm seen",
         "plan": "unmeasured",
     }
 
@@ -106,8 +112,8 @@ def test_a_benign_demo_root_is_no_harm_seen_or_unmeasured_not_harmed() -> None:
     assert all(statuses[r] != "harmed" for r in roots), statuses
 
 
-def test_all_regressed_cases_are_unmeasured_with_todays_taxonomies() -> None:
-    """With today's node_visited taxonomies, every rooted regressed case is unmeasured."""
+def test_content_taxonomies_measure_some_but_not_all_regressed_roots() -> None:
+    """T264 content taxonomies measure covered roots; uncovered nodes stay unmeasured."""
     from examples.synthetic_agents import AGENTS
     from lgcov.cli import _shipped
 
@@ -120,6 +126,10 @@ def test_all_regressed_cases_are_unmeasured_with_todays_taxonomies() -> None:
             assert roots, (agent.name, case.truth)
             rel = TAXONOMY_BY_AGENT[agent.name]
             statuses = harm_for_roots(case.base, case.pr, roots, ROOT / rel)
-            assert all(s == "unmeasured" for s in statuses.values()), (agent.name, statuses)
             rows.append(statuses)
     assert len(rows) == 31
+    measured = sum(1 for st in rows if any(s != "unmeasured" for s in st.values()))
+    unmeasured = sum(1 for st in rows if all(s == "unmeasured" for s in st.values()))
+    assert measured == 12
+    assert unmeasured == 19
+    assert any(s == "harmed" for st in rows for s in st.values())
