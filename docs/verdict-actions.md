@@ -17,6 +17,7 @@ against that function.
 | CI status | The `ci-status` input, which your workflow fills in. lgcov doesn't read your other jobs. |
 | Adoption permission | The `mode` input: `enforcing` (the default) or `advisory`. A PR whose base has no policy yet is advisory whatever `mode` says ([trust-boundary.md](trust-boundary.md)). |
 | Edited cassettes | This PR changes anything under `cassette_dir`, the expected outputs it is graded on. |
+| Edited pools / lineage | This PR changes `lineage.json` or a case pool folder (`cases/optimiser`, `cases/gate`). The gate reads those from the base. |
 
 ## States
 
@@ -37,21 +38,22 @@ The first matching row wins. "The switch" is `fail-on-inconclusive` or
 | 10 | `abstained` | A judge abstained on a blocking KPI, even under a SHIP | ⚠️ No decision: needs_human | Read the cases for `<kpi>` and decide. If the judge is wrong, record it with `lgcov review override`. | 0, or 1 with the switch | 0 | `needs_human` |
 | 11 | `inconclusive` | Statistical INCONCLUSIVE | ⚠️ No decision: needs_human | Read the KPI table, then merge on your own judgement or add the cases it asks for. | 0, or 1 with the switch | 0 | `needs_human` |
 | 12 | `cassettes_edited` | This PR edits its own cassettes, even under a SHIP | ⚠️ No decision: needs_human | Read the cassette diff and decide: this PR changed the expected outputs it is graded on, so lgcov can't vouch for it. | 0 | 0 | `needs_human` |
-| 13 | `unmeasured_root` | Drift root(s) no **observing** KPI/code check covers, under `fail-on: harmed-root` (even with a SHIP). Presence-only or upstream-only checks do not measure; the comment names why. | ⚠️ No decision: needs_human | Read the unmeasured root(s) and decide, or add a KPI/code check that observes their output or something downstream. `fail-on: harmed-root` never treats unmeasured drift as a pass. | 0 | 0 | `needs_human` |
-| 14 | `drift_not_enforced` | Drift, `fail-on: never`, no statistical verdict | ⚠️ No decision: needs_human | Read the drift table and decide. `fail-on: never` means lgcov won't fail this check on drift. | 0 | 0 | `needs_human` |
-| 15 | `advisory_drop_only` | No statistical verdict, and an advisory KPI dropped | ⚠️ No decision: needs_human | `<kpi>` dropped, but no KPI here can block yet. Decide yourself; `lgcov calibrate` is what lets its judge block. | 0 | 0 | `needs_human` |
-| 16 | `ship_advisory_drop` | SHIP, and an advisory KPI dropped | ⚠️ lgcov: SHIP (N blocking KPIs), advisory drop in `<kpi>` | Look at `<kpi>`: it dropped, but its judge is advisory and can't block this PR. | 0 | 0 | `pass` |
-| 17 | `nothing_ran` | Every node was served, so nothing re-ran; SHIP or no statistical verdict | 🟢 lgcov: every node served, nothing re-ran | Review as usual. lgcov measured nothing here: every node's code and masked input match the recording, so it was served. A change that reaches only a masked value, such as a run id or a message's usage, or a Store isn't seen. | 0 | 0 | `pass` |
-| 18 | `ship` | SHIP | 🟢 lgcov: SHIP (N blocking KPIs) | Review as usual. SHIP covers these KPIs on the recorded cases, nothing else. | 0 | 0 | `pass` |
-| 19 | `no_drift_no_kpi` | No drift, and no blocking KPI judged | 🟢 lgcov: no drift (no blocking KPI judged) | Review as usual. lgcov compared the recorded runs; it judged no KPI that can block. | 0 | 0 | `pass` |
+| 13 | `pools_edited` | This PR edits `lineage.json` or a case pool folder, even under a SHIP | ⚠️ No decision: needs_human | Read the pool / lineage diff and decide: this PR changed case pools or lineage.json, which the gate reads from the base, so lgcov can't vouch for it. | 0 | 0 | `needs_human` |
+| 14 | `unmeasured_root` | Drift root(s) no **observing** KPI/code check covers, under `fail-on: harmed-root` (even with a SHIP). Presence-only or upstream-only checks do not measure; the comment names why. | ⚠️ No decision: needs_human | Read the unmeasured root(s) and decide, or add a KPI/code check that observes their output or something downstream. `fail-on: harmed-root` never treats unmeasured drift as a pass. | 0 | 0 | `needs_human` |
+| 15 | `drift_not_enforced` | Drift, `fail-on: never`, no statistical verdict | ⚠️ No decision: needs_human | Read the drift table and decide. `fail-on: never` means lgcov won't fail this check on drift. | 0 | 0 | `needs_human` |
+| 16 | `advisory_drop_only` | No statistical verdict, and an advisory KPI dropped | ⚠️ No decision: needs_human | `<kpi>` dropped, but no KPI here can block yet. Decide yourself; `lgcov calibrate` is what lets its judge block. | 0 | 0 | `needs_human` |
+| 17 | `ship_advisory_drop` | SHIP, and an advisory KPI dropped | ⚠️ lgcov: SHIP (N blocking KPIs), advisory drop in `<kpi>` | Look at `<kpi>`: it dropped, but its judge is advisory and can't block this PR. | 0 | 0 | `pass` |
+| 18 | `nothing_ran` | Every node was served, so nothing re-ran; SHIP or no statistical verdict | 🟢 lgcov: every node served, nothing re-ran | Review as usual. lgcov measured nothing here: every node's code and masked input match the recording, so it was served. A change that reaches only a masked value, such as a run id or a message's usage, or a Store isn't seen. | 0 | 0 | `pass` |
+| 19 | `ship` | SHIP | 🟢 lgcov: SHIP (N blocking KPIs) | Review as usual. SHIP covers these KPIs on the recorded cases, nothing else. | 0 | 0 | `pass` |
+| 20 | `no_drift_no_kpi` | No drift, and no blocking KPI judged | 🟢 lgcov: no drift (no blocking KPI judged) | Review as usual. lgcov compared the recorded runs; it judged no KPI that can block. | 0 | 0 | `pass` |
 
 Under `fail-on: harmed-root`, roots whose covering checks ran and none failed (`no harm
-seen`) also land on row 19: that mode does not fail on them (pass / exit 0). Unmeasured
-roots use row 13 instead.
+seen`) also land on row 20: that mode does not fail on them (pass / exit 0). Unmeasured
+roots use row 14 instead.
 
 A run this PR removes from its cassettes gets a note naming it, and changes no row. Rows 4 and 5
 block on one case, with no false-alarm bound; [gate.md](gate.md) says why and how to
-opt out. Row 17 names what serving can miss, and [the replay audit](validation/replay-audit.md) has
+opt out. Row 18 names what serving can miss, and [the replay audit](validation/replay-audit.md) has
 the detail.
 
 ## What changes a row, and what doesn't
@@ -76,13 +78,14 @@ line under the next step, or says no blocking KPI was judged.
 
 ## The green tick
 
-A composite Action can only pass or fail its check, so rows 9 to 15 exit 0 and GitHub shows
+A composite Action can only pass or fail its check, so rows 9 to 16 exit 0 and GitHub shows
 a green tick by default. That tick is not a pass. The comment says so in its next step, and
 the Action adds a `::warning` annotation whenever `verdict` is `needs_human`. To make rows 9
 to 11 fail the check instead, turn the switch on. Row 12 stays exit 0 either way, or a
 re-baseline could never land in its own PR: protect `cassette_dir` with CODEOWNERS if that
-needs a named reviewer. Row 13 (`unmeasured_root`) stays exit 0: unmeasured drift under
-`fail-on: harmed-root` needs a human and is never a pass.
+needs a named reviewer. Rows 13 (`pools_edited`) and 14 (`unmeasured_root`) stay exit 0:
+pool/lineage edits and unmeasured drift under `fail-on: harmed-root` need a human and are
+never a pass.
 
 ## Passing approval and CI status
 

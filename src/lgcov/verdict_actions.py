@@ -76,6 +76,11 @@ _ROWS: dict[str, tuple[str, str]] = {
         "Read the cassette diff and decide: this PR changed the expected outputs it is graded "
         "on, so lgcov can't vouch for it.",
     ),
+    "pools_edited": (
+        _NO_DECISION,
+        "Read the pool / lineage diff and decide: this PR changed case pools or lineage.json, "
+        "which the gate reads from the base, so lgcov can't vouch for it.",
+    ),
     "unmeasured_root": (
         _NO_DECISION,
         "Read the unmeasured root(s) and decide, or add a KPI/code check that observes their "
@@ -126,6 +131,9 @@ _INCONCLUSIVE_NOTE = (
 _UNDECIDED = {  # each state a human decides, and what its exit 0 means
     **dict.fromkeys(_SWITCHABLE, _INCONCLUSIVE_NOTE),
     "cassettes_edited": "This check exits 0 so that a re-baseline can land. That is not a pass.",
+    "pools_edited": (
+        "This check exits 0 because pool and lineage edits need a human. That is not a pass."
+    ),
     "unmeasured_root": (
         "This check exits 0 because unmeasured roots under `fail-on: harmed-root` need a human. "
         "That is not a pass."
@@ -211,6 +219,7 @@ class Evidence:
     nothing_ran: bool = False  # every node was served, so this run measured nothing
     first_adoption: bool = False  # T154: the base has no policy yet, so this PR's own is used
     cassettes_edited: bool = False  # T154: this PR changed the expected outputs it is graded on
+    pools_edited: bool = False  # T124: this PR changed lineage.json or a case pool folder
     code_failures: tuple[CodeFailure, ...] = ()  # a policy violation, whatever the test says
     hidden_failures: tuple[CodeFailure, ...] = ()  # the same, with a re-baseline hiding it
     unmeasured_drift: bool = False  # T262: roots no KPI/check covers, under fail-on: harmed-root
@@ -264,6 +273,8 @@ def _state(e: Evidence) -> str:
         return "inconclusive"
     if e.cassettes_edited:
         return "cassettes_edited"
+    if e.pools_edited:
+        return "pools_edited"
     if e.unmeasured_drift:  # T262: even under a SHIP — unmeasured is never a pass
         return "unmeasured_root"
     if e.statistical is None and e.unenforced_drift:

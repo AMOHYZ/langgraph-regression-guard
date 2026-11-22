@@ -759,8 +759,8 @@ uv run python -m lgcov.docs_lint      # docs/banned-phrases.txt and the tagline;
 ## Roadmap
 
 - Sequential stopping (mSPRT) for the KPI gate.
-- Three case pools, dev, gate and audit, with exposure flowing one way only: what the gate
-  and audit pools contain never reaches whoever writes the PR.
+- Case pools: optimiser and gate folders with `lgcov pools check` and `lineage.json`
+  ([docs/pools.md](docs/pools.md)). Audit pool still planned (T138).
 - Eval pools as an input alongside the baseline cassettes.
 - An adoption path for each change: eligible → human approval → baseline update → merge →
   deploy.

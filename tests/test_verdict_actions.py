@@ -46,6 +46,7 @@ ROWS: dict[str, Evidence] = {
     "abstained": Evidence(abstained=("tone",), statistical="INCONCLUSIVE", k_gate=1),
     "inconclusive": Evidence(statistical="INCONCLUSIVE", k_gate=1),
     "cassettes_edited": Evidence(cassettes_edited=True, statistical="SHIP", k_gate=2),
+    "pools_edited": Evidence(pools_edited=True, statistical="SHIP", k_gate=2),
     "unmeasured_root": Evidence(unmeasured_drift=True, statistical="SHIP", k_gate=1),
     "drift_not_enforced": Evidence(unenforced_drift=True),
     "advisory_drop_only": Evidence(advisory_drops=("tone",)),
@@ -253,6 +254,13 @@ def test_a_pr_that_edits_its_own_cassettes_can_never_ship() -> None:
             assert (a.headline, a.verdict) == (NO_DECISION, "needs_human")
 
 
+def test_a_pr_that_edits_pools_or_lineage_is_needs_human() -> None:
+    """T124: lineage/pool edits → needs_human; the gate reads those from the base."""
+    action = decide_action(Evidence(pools_edited=True, statistical="SHIP", k_gate=2))
+    assert (action.state, action.verdict, action.exit_code) == ("pools_edited", "needs_human", 0)
+    assert "lineage" in action.next_step
+
+
 def test_a_re_baseline_can_still_land_with_the_switch_on() -> None:
     # T154: the gate honours a PR's cassettes, or `cassette accept` could never land.
     action = decide_action(replace(ROWS["cassettes_edited"], inconclusive_blocks=True))
@@ -283,6 +291,7 @@ def test_an_undecided_run_says_what_its_exit_code_means() -> None:
     assert "that is not a finding against the agent" in switched.next_step
     for state in (
         "cassettes_edited",
+        "pools_edited",
         "unmeasured_root",
         "drift_not_enforced",
         "advisory_drop_only",
@@ -434,6 +443,16 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             replay_lines=NO_DRIFT,
             tally=UNTOUCHED_0,
             notes=("⚠️ This PR changes `cassettes`, the expected outputs this gate compares.",),
+        ),
+        0,
+        "needs_human",
+    ),
+    "pools_edited": (
+        replace(
+            SHIPPED,
+            pools_edited=True,
+            replay_lines=NO_DRIFT,
+            tally=UNTOUCHED_0,
         ),
         0,
         "needs_human",
