@@ -1644,12 +1644,12 @@ def _evaluate(
             if step.node not in path_nodes:
                 path_nodes.append(step.node)
     # A KPI skipped by `when:` on every sample has n=0 / no samples — not judged.
-    judged = frozenset(s.kpi for s in stats if s.samples > 0 or s.n > 0)
+    judged_kpis = frozenset(s.kpi for s in stats if s.samples > 0 or s.n > 0)
     harm, harm_reasons = root_harm(
         root,
         {spec.name: spec.node for spec in l2[0]},
         frozenset(failed_kpis),
-        judged,
+        judged_kpis,
         kpi_checks=kpi_checks,
         path=tuple(path_nodes) or None,
         kpi_judges=kpi_judges,
@@ -2102,10 +2102,12 @@ def _l2_judge(spec: KPISpec, jev_model: str | None = None, jev_timeout_s: float 
             raise ValueError(
                 f"KPI '{spec.name}': fake check keys {unknown} not in {_FAKE_CHECK_KEYS}"
             )
-        every = check.get("fail_every", "0")
+        every_raw = check.get("fail_every", "0")
+        every = every_raw if isinstance(every_raw, str) else ""
         if not every.isdigit():
             raise ValueError(f"KPI '{spec.name}': fail_every must be a whole number")
-        when = check.get("when_input_contains", "")
+        when_raw = check.get("when_input_contains", "")
+        when = when_raw if isinstance(when_raw, str) else ""
         return FakeJudge(kpi, "pass", fail_every=int(every), when_input_contains=when)
     return JevJudge(kpi, model=jev_model, timeout_s=jev_timeout_s)
 
