@@ -1,45 +1,74 @@
-# Blind requirement checks for the demo support agent (T262 measure).
-# Path policy only (judge: code). No fake content judges.
-# Harm is relative (pass on base → fail on PR): class-specific checks may fail
-# on a correct base for the other question kind without false-flagging.
+# T264 content checks for the demo support agent (requirement + format tags).
+# judge: code only. Harm is relative (pass on base → fail on PR).
 version: 1
-system: demo_agent
+system: demo
 failure_modes:
-  - id: classify_skipped
-    description: classify never runs, so order vs hours routing never happens.
-  - id: skipped_order_lookup
-    description: An order question never visits lookup_order, so status is never fetched.
-  - id: wrong_hours_lookup
-    description: A non-order (hours) question incorrectly visits lookup_order.
+  - id: order_tool_lost
+    description: lookup_order no longer returns the shipped status for an order question.
+  - id: respond_drops_context
+    description: respond drops order status, the question echo, or the support prompt tail.
 kpis:
-  - name: classify_runs
-    failure_mode: classify_skipped
-    node: classify
-    judge: code
-    description: Every run classifies before routing.
-    rubric: Did the run visit classify?
-    check: {type: node_visited, node: classify}
-
-  - name: order_lookup_runs
-    failure_mode: skipped_order_lookup
+  # tag: requirement
+  - name: lookup_order_shipped
+    failure_mode: order_tool_lost
     node: lookup_order
     judge: code
-    description: Order questions fetch status via lookup_order (hours fail this on a correct base; only a new miss blocks).
-    rubric: Did the run visit lookup_order?
-    check: {type: node_visited, node: lookup_order}
+    description: Order lookup still returns the shipped status string.
+    rubric: 'Does lookup_order output contain "order #42: shipped"?'
+    check:
+      type: output_contains
+      text: "order #42: shipped"
+      when:
+        input_contains: order
 
-  - name: hours_skips_lookup
-    failure_mode: wrong_hours_lookup
-    node: lookup_order
-    judge: code
-    description: Hours questions must not call the order tool (order questions fail this on a correct base; only a new hit blocks).
-    rubric: Did the run avoid lookup_order?
-    check: {type: node_not_visited, node: lookup_order}
-
-  - name: order_path_sequence
-    failure_mode: skipped_order_lookup
+  # tag: requirement
+  - name: respond_includes_shipped
+    failure_mode: respond_drops_context
     node: respond
     judge: code
-    description: Order path is classify → lookup_order → respond (others may intervene).
-    rubric: Did classify, lookup_order, then respond appear in that order?
-    check: {type: node_sequence, nodes: [classify, lookup_order, respond]}
+    description: The answer still states that the order shipped.
+    rubric: Does respond output contain shipped?
+    check:
+      type: output_contains
+      text: shipped
+      when:
+        input_contains: order
+
+  # tag: format
+  - name: respond_echoes_order_question
+    failure_mode: respond_drops_context
+    node: respond
+    judge: code
+    description: Respond still echoes the exact order-question fixture string.
+    rubric: Does respond output contain "Where is my order?"?
+    check:
+      type: output_contains
+      text: "Where is my order?"
+      when:
+        input_contains: order
+
+  # tag: format
+  - name: respond_echoes_hours_question
+    failure_mode: respond_drops_context
+    node: respond
+    judge: code
+    description: Respond still echoes the exact hours-question fixture string.
+    rubric: Does respond output contain "What are your hours?"?
+    check:
+      type: output_contains
+      text: "What are your hours?"
+      when:
+        input_contains: hours
+
+  # tag: format
+  - name: respond_keeps_support_prompt_tail
+    failure_mode: respond_drops_context
+    node: respond
+    judge: code
+    description: Respond still carries the support-agent prompt-tail artifact.
+    rubric: Does respond output contain "support agent"?
+    check:
+      type: output_contains
+      text: "support agent"
+      when:
+        input_contains: hours

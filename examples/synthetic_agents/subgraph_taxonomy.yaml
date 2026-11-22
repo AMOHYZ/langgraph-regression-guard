@@ -1,26 +1,83 @@
-# Blind requirement checks for the subgraph agent (T262 measure).
-# Path policy only (judge: code). Top-level node names only (sub, not sub.inner).
-# No fake content judges.
+# T264 content checks for the subgraph agent (requirement + format tags).
+# judge: code only. Harm is relative (pass on base → fail on PR).
 version: 1
-system: subgraph_agent
+system: subgraph
 failure_modes:
-  - id: preprocess_skipped
-    description: before never runs, so the question is never normalized into the subgraph.
-  - id: no_subgraph
-    description: The subgraph node never ran.
+  - id: inner_style_lost
+    description: "The inner draft drops the long: style prefix or the question echo."
+  - id: after_answer_corrupt
+    description: The after node no longer uppercases the long-style answer.
 kpis:
-  - name: before_runs
-    failure_mode: preprocess_skipped
-    node: before
+  # tag: requirement
+  - name: inner_draft_long_style
+    failure_mode: inner_style_lost
+    node: sub.inner
     judge: code
-    description: Every run normalizes the question before the subgraph.
-    rubric: Did the run visit before?
-    check: {type: node_visited, node: before}
+    description: "The inner draft still uses the long: style contract."
+    rubric: 'Does sub.inner output contain "long:"?'
+    check:
+      type: output_contains
+      text: "long:"
 
-  - name: sub_runs
-    failure_mode: no_subgraph
-    node: sub
+  # tag: format
+  - name: inner_draft_keeps_order_question
+    failure_mode: inner_style_lost
+    node: sub.inner
     judge: code
-    description: The subgraph container still runs (top-level name seen by harm path).
-    rubric: Did the run visit sub?
-    check: {type: node_visited, node: sub}
+    description: The inner draft still echoes the exact order-question fixture.
+    rubric: Does sub.inner output contain "Where is my order?"?
+    check:
+      type: output_contains
+      text: "Where is my order?"
+      when:
+        input_contains: order
+
+  # tag: format
+  - name: inner_draft_keeps_hours_question
+    failure_mode: inner_style_lost
+    node: sub.inner
+    judge: code
+    description: The inner draft still echoes the exact hours-question fixture.
+    rubric: Does sub.inner output contain "What are your hours?"?
+    check:
+      type: output_contains
+      text: "What are your hours?"
+      when:
+        input_contains: hours
+
+  # tag: requirement
+  - name: after_answer_long_upper
+    failure_mode: after_answer_corrupt
+    node: after
+    judge: code
+    description: "After still uppercases the long style into LONG:."
+    rubric: 'Does after output contain "LONG:"?'
+    check:
+      type: output_contains
+      text: "LONG:"
+
+  # tag: format
+  - name: after_answer_has_order_upper
+    failure_mode: after_answer_corrupt
+    node: after
+    judge: code
+    description: After still uppercases the order-question fixture.
+    rubric: Does after output contain "WHERE IS MY ORDER?"?
+    check:
+      type: output_contains
+      text: "WHERE IS MY ORDER?"
+      when:
+        input_contains: order
+
+  # tag: format
+  - name: after_answer_has_hours_upper
+    failure_mode: after_answer_corrupt
+    node: after
+    judge: code
+    description: After still uppercases the hours-question fixture.
+    rubric: Does after output contain "WHAT ARE YOUR HOURS?"?
+    check:
+      type: output_contains
+      text: "WHAT ARE YOUR HOURS?"
+      when:
+        input_contains: hours

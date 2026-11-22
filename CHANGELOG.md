@@ -10,7 +10,9 @@
   [docs/gate.md](docs/gate.md) and [docs/taxonomy.md](docs/taxonomy.md).
 - **Synthetic harm plumbing (T264).** `code_check_new_failures` / `harm_for_roots` evaluate
   content checks on the named node's output (via `with_units`), honor `when:` skips as
-  unjudged, and treat `judge: fake` as never measuring. No taxonomy/score change yet.
+  unjudged, and treat `judge: fake` as never measuring.
+- **Synthetic content taxonomies (T264).** Demo, fanout and subgraph taxonomies now use
+  `output_contains` / `output_matches` checks tagged requirement/format. No score yet.
 
 - **Case pools (T124).** `lgcov pools check` keeps optimiser and gate cases apart:
   refuses the same case id in two pools, a gate case the locked round's judge was fitted on,
