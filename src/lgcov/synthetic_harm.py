@@ -18,6 +18,7 @@ from lgcov.cassette import Cassette, Step, with_units
 from lgcov.code_judges import CONTENT_CHECK_TYPES, check_in_scope, code_judge
 from lgcov.drift_gate import HarmStatus, root_harm_statuses
 from lgcov.messages import plain, run_tools
+from lgcov.taxonomy import CHECK_TAGS as CHECK_TAGS  # re-export for score-by-tag callers
 from lgcov.taxonomy import KPISpec, load_taxonomy
 
 # Agent name -> taxonomy path relative to the repo root. Written and committed before measure.
@@ -94,9 +95,21 @@ def harm_for_roots(
     pr: Cassette,
     roots: Sequence[str],
     taxonomy: Path,
+    *,
+    only_tag: str | None = None,
 ) -> dict[str, HarmStatus]:
-    """Harm status per root from the taxonomy's code checks on these two cassettes."""
+    """Harm status per root from the taxonomy's code checks on these two cassettes.
+
+    T264: when `only_tag` is set, only KPIs with that `tag:` count as covering or
+    newly failing. A root is then "harmed under requirement" (resp. format) iff a
+    covering check with that tag newly fails; with no observing check of that tag
+    the root stays unmeasured for the slice. `judge: fake` still never measures.
+    """
+    if only_tag is not None and only_tag not in CHECK_TAGS:
+        raise ValueError(f"unknown check tag {only_tag!r}, expected one of {CHECK_TAGS}")
     specs = load_taxonomy(taxonomy).kpi_specs
+    if only_tag is not None:
+        specs = tuple(s for s in specs if s.tag == only_tag)
     failed, judged = code_check_new_failures(base, pr, specs)
     # Include fake KPIs in covering so judge:fake is explicitly non-observing (never measures).
     checks: dict[str, dict[str, object] | None] = {

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Score by taxonomy tag (T264).** Synthetic content KPIs carry a first-class `tag:`
+  (`requirement` or `format`; comments kept). `harm_for_roots(..., only_tag=)` and the
+  synthetic / held-out bench report enforced-root false flags, measured recall, and
+  unmeasured rates overall **and** per tag. Definition: a root is harmed under a tag iff
+  a covering check with that tag newly fails (observe-root rule unchanged); KPIs of the
+  other tag are ignored for that slice. `judge: fake` still never measures.
 - **Held-out synthetic cases (T264).** `examples/synthetic_agents/held_out.py` lists ~30
   labeled edits (demo/fanout/subgraph) with user-consequence truth and `harm_on` scope.
   Opt-in only: `every_held_out_case()` / `lgcov bench --synthetic --held-out` (separate

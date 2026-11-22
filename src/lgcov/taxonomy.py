@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import yaml
 
@@ -15,6 +16,9 @@ VERSION = 1
 JUDGE_KINDS = ("jev", "code", "fake", "llm")  # T089: llm, a general LLM judge, nightly only
 BINARY_LABELS = ("pass", "fail")
 REVIEW_STATES = ("pending", "approved")  # T106; an entry with no `review` was human-written
+# T264: synthetic content-check slice (requirement vs format). Optional on a KPI.
+CHECK_TAGS = ("requirement", "format")
+CheckTag = Literal["requirement", "format"]
 
 
 class PendingReview(ValueError):
@@ -51,6 +55,7 @@ class KPISpec:
     label_hints: dict[str, str] = field(default_factory=dict)
     check: dict[str, object] | None = None  # judge: code (T072); may nest `when:` (T264)
     margin: float | None = None  # T091: non-inferiority margin δ; None = gate.margin
+    tag: CheckTag | None = None  # T264: requirement vs format scoring slice
 
     def to_kpi(self) -> KPI:
         return KPI(
@@ -150,6 +155,13 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
         if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
             raise ValueError(f"{where}: 'margin' must be a number in 0..1")
         margin = float(value)
+    tag: CheckTag | None = None
+    if "tag" in d:
+        raw_tag = d["tag"]
+        known: dict[str, CheckTag] = {"requirement": "requirement", "format": "format"}
+        if not isinstance(raw_tag, str) or raw_tag not in known:
+            raise ValueError(f"{where}: unknown tag {raw_tag!r}, expected one of {CHECK_TAGS}")
+        tag = known[raw_tag]
     spec = KPISpec(
         name=name,
         failure_mode=failure_mode,
@@ -162,6 +174,7 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
         label_hints={k: str(v) for k, v in hints.items()},
         check=(_normalize_check(check) if check is not None else None),
         margin=margin,
+        tag=tag,
     )
     spec.to_kpi()  # KPI's own label/score checks, at load time rather than build time
     if judge == "code":

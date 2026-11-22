@@ -5,7 +5,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Literal, Protocol, TypedDict
 
 from lgcov.cassette import Cassette
@@ -319,11 +319,17 @@ class Row:
 
 @dataclass(frozen=True)
 class HarmRates:
-    """T262: enforced-root false flags and measured recall beside the drift-root score."""
+    """T262: enforced-root false flags and measured recall beside the drift-root score.
+
+    T264: `by_tag` holds the same three rates restricted to KPIs tagged `requirement`
+    or `format`. A root is harmed under a tag iff a covering check with that tag newly
+    fails; overall rates still use every KPI.
+    """
 
     enforced_false_flag: Rate  # of benign cases, any root is harmed (would fail harmed-root)
     measured_recall: Rate  # of failing cases with a measured root, any root is harmed
     unmeasured_rooted: Rate  # of cases with roots, every root is unmeasured
+    by_tag: Mapping[str, "HarmRates"] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -658,6 +664,7 @@ def render_section(report: Report) -> str:
             f"{_plain(harm.enforced_false_flag)}; measured recall is "
             f"{_plain(harm.measured_recall)} "
             f"(unmeasured rooted cases {_plain(harm.unmeasured_rooted)})."
+            + _harm_by_tag_phrase(harm)
         )
     det_label = [a for _, a in report.aa if a.arm != "seeded noise"]
     label_honesty = (
@@ -720,6 +727,7 @@ def render_section(report: Report) -> str:
             f"`fail-on: harmed-root` are {_plain(harm.enforced_false_flag)}, and measured recall "
             f"is {_plain(harm.measured_recall)} "
             f"(rooted cases still unmeasured: {_plain(harm.unmeasured_rooted)})."
+            + _harm_by_tag_phrase(harm)
             if harm is not None
             else "This run scores drift only when no taxonomy is wired."
         )
@@ -869,20 +877,49 @@ def report_json(report: Report) -> str:
                     for group, n in report.per_node
                 ],
                 "shared": _shared_json(report.shared),
-                "harm": (
-                    None
-                    if report.harm is None
-                    else {
-                        "enforced_false_flag": _rate_json(report.harm.enforced_false_flag),
-                        "measured_recall": _rate_json(report.harm.measured_recall),
-                        "unmeasured_rooted": _rate_json(report.harm.unmeasured_rooted),
-                    }
-                ),
+                "harm": None if report.harm is None else _harm_json(report.harm),
             },
             indent=2,
         )
         + "\n"
     )
+
+
+def _harm_json(harm: HarmRates) -> dict[str, object]:
+    out: dict[str, object] = {
+        "enforced_false_flag": _rate_json(harm.enforced_false_flag),
+        "measured_recall": _rate_json(harm.measured_recall),
+        "unmeasured_rooted": _rate_json(harm.unmeasured_rooted),
+    }
+    if harm.by_tag:
+        out["by_tag"] = {
+            tag: {
+                "enforced_false_flag": _rate_json(slice_.enforced_false_flag),
+                "measured_recall": _rate_json(slice_.measured_recall),
+                "unmeasured_rooted": _rate_json(slice_.unmeasured_rooted),
+            }
+            for tag, slice_ in harm.by_tag.items()
+        }
+    return out
+
+
+def _harm_by_tag_phrase(harm: HarmRates) -> str:
+    """T264: one sentence for requirement/format slices beside the overall rates."""
+    if not harm.by_tag:
+        return ""
+    parts: list[str] = []
+    for tag in ("requirement", "format"):
+        slice_ = harm.by_tag.get(tag)
+        if slice_ is None:
+            continue
+        parts.append(
+            f"{tag} enforced-root false flags {_plain(slice_.enforced_false_flag)}, "
+            f"measured recall {_plain(slice_.measured_recall)} "
+            f"(unmeasured {_plain(slice_.unmeasured_rooted)})"
+        )
+    if not parts:
+        return ""
+    return " By taxonomy tag: " + "; ".join(parts) + "."
 
 
 def replace_section(doc: str, section: str) -> str:

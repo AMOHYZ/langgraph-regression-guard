@@ -25,7 +25,21 @@ kpis:
     label_hints: {pass: ..., fail: ...}  # optional
     score_map: {pass: 1.0, fail: 0.0}     # optional, default for binary
     check: {type: tool_not_called, tool: ...}  # only for judge: code (T072)
+    tag: requirement                # optional; requirement | format (T264 scoring slice)
 ```
+
+## Check tags (T264)
+
+Synthetic content taxonomies may set `tag: requirement` or `tag: format` on a KPI
+(YAML comments `# tag: …` above the entry are documentation only; the field is what
+loads). When scoring by tag (`harm_for_roots(..., only_tag=)` / `lgcov bench --synthetic`):
+
+- **Overall** rates still use every KPI.
+- **Requirement slice:** only `tag: requirement` KPIs count as covering or newly failing.
+  A root is harmed under requirement iff one of those covering checks newly fails.
+- **Format slice:** the same rule with `tag: format` KPIs only.
+- A root with no observing check of that tag stays **unmeasured** for the slice.
+- `judge: fake` still never measures a root.
 
 ## Validation (load-time, all raise ValueError)
 
@@ -44,6 +58,8 @@ kpis:
   not a pass). A `jev` judge calls the Jev service (`JEV_API_URL`, `JEV_API_KEY`); `fake` is
   the offline stand-in and **never measures** a root (T264); `llm` runs in the nightly tier
   only (T089).
+- Optional `tag` must be `requirement` or `format` (T264). Omitted means the KPI is not
+  part of a tag slice (overall scoring still includes it).
 - Bands (T063): code judges always block: a check that passed on the base and fails on the PR
   exits 1, whatever the paired test says ([gate.md](gate.md)). A model judge's band (blocking, flag or
   advisory) comes from `lgcov calibrate` against human labels; with no labels it is

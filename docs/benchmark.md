@@ -1,6 +1,6 @@
 # Attribution benchmark
 
-**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. Re-scored offline with the multi-root rule (T162), the pilot's saved runs name no root: see [Multi-root re-score](#multi-root-re-score-t162). On 72 synthetic cases from 3 questions (2 recorded, 1 in-process), the labels `lgcov ci` ships catch 31 of 31 regressed cases and name a root on 24 of 24 harmless ones (T262); both node-naming baselines flag all 24. Counted per node, root precision is 0.56 (31 of 55). Under `fail-on: harmed-root` with the suite's code-check taxonomies, enforced-root false flags are 0.25 (6 of 24) and measured recall is 0.83 (10 of 12) (rooted cases unmeasured: 0.53 (29 of 55)).
+**5-10 PRs are a pilot, not a precision guarantee, and so far there's one PR.** On open_deep_research #163, run twice, root recall is 0.17 (1 of 6) on the pilot and 0.20 (1 of 5) on the `gpt-6-luna` rerun, so lgcov missed most of the labelled roots. Root precision is 1 of 1 (95% interval 0.21 to 1.00), and it's the same single root both times. Re-scored offline with the multi-root rule (T162), the pilot's saved runs name no root: see [Multi-root re-score](#multi-root-re-score-t162). On 72 synthetic cases from 3 questions (2 recorded, 1 in-process), the labels `lgcov ci` ships catch 31 of 31 regressed cases and name a root on 24 of 24 harmless ones (T262); both node-naming baselines flag all 24. Counted per node, root precision is 0.56 (31 of 55). Under `fail-on: harmed-root` with the suite's code-check taxonomies, enforced-root false flags are 0.25 (6 of 24) and measured recall is 0.83 (10 of 12) (rooted cases unmeasured: 0.53 (29 of 55)). By taxonomy tag: requirement enforced-root false flags 0.17 (4 of 24), measured recall 0.82 (9 of 11); format enforced-root false flags 0.08 (2 of 24), measured recall 1.00 (4 of 4).
 
 ## What was measured
 
@@ -13,7 +13,7 @@ Each kind of evidence has its own section, and their numbers never combine: demo
 - **One real PR (n=1).** Both runs are the same PR and question, so they aren't two data points.
 - **The edited-node baseline ties lgcov on single-node edits,** on recall, 1.00 (20 of 20) each, and on coverage, 1.00 (44 of 44) each. lgcov is ahead only on case-level precision, 0.45 against 0.35: see [Synthetic](#synthetic).
 - **`lgcov ci` tells an added node from a newly reached one when the baseline holds `graph` and isn't stale (T243 / T238).** The synthetic bench gives lgcov both graphs, so a node a route stopped or started reaching is propagated there, and exact match on all edits is 1.00 (31 of 31): see [Per node](#per-node). Without a trusted `graph`, a node only the PR reached still reads inconclusive either way and blocks either way. `lgcov bench` gives real rows both graphs too: each side saves the node names of the graph it ran (T242), and `--from-runs` reads them. Runs kept before that have none, so there a node only one side ran stays inconclusive.
-- **Drift roots still flag every harmless edit (T262); harmed-root does not.** lgcov names a root on 24 of 24 harmless synthetic cases, and both node-naming baselines flag 24 of 24 too. With the suite's code-check taxonomies, enforced-root false flags under `fail-on: harmed-root` are 0.25 (6 of 24), and measured recall is 0.83 (10 of 12) (rooted cases unmeasured: 0.53 (29 of 55)). On edits the diff can't pin to one node, it names a root on 14 of 14 harmless cases.
+- **Drift roots still flag every harmless edit (T262); harmed-root does not.** lgcov names a root on 24 of 24 harmless synthetic cases, and both node-naming baselines flag 24 of 24 too. With the suite's code-check taxonomies, enforced-root false flags under `fail-on: harmed-root` are 0.25 (6 of 24), and measured recall is 0.83 (10 of 12) (rooted cases unmeasured: 0.53 (29 of 55)). By taxonomy tag: requirement 0.17 FF / 0.82 recall; format 0.08 FF / 1.00 recall. On edits the diff can't pin to one node, it names a root on 14 of 14 harmless cases.
 - **The synthetic bench labels the nodes inside a subgraph, as `lgcov ci` does on a schema-2 baseline** (T193). `lgcov record` writes those units by default. A baseline recorded earlier, schema 1, still calls a subgraph inconclusive, since a subgraph has no fingerprint. Before the bench recorded units it missed 6 of 32 drift roots on edits the diff can't pin to one node, all six inside a subgraph, and on single-node edits the subgraph edits were inconclusive. Now it finds all 32: each of the 32 nodes it names is a drift root, and 14 of them are regression roots. See [Edits the diff can't pin to one node](#edits-the-diff-cant-pin-to-one-node).
 - **Synthetic cases come from our own generator,** so they share its assumptions about what an edit looks like; real PRs (T171) are the check.
 - **Usage counts are pending.** Request, token and error counts for the `gpt-6-luna` runs and the pilot still have to come from the usage page: see [Cost per run](#cost-per-run).
@@ -45,7 +45,7 @@ lgcov bench tests/fixtures/bench
 
 ## Synthetic
 
-**24 of 24 harmless refactors are named root.** Under `fail-on: harmed-root`, enforced-root false flags are 0.25 (6 of 24); measured recall is 0.83 (10 of 12) (unmeasured rooted cases 0.53 (29 of 55)).
+**24 of 24 harmless refactors are named root.** Under `fail-on: harmed-root`, enforced-root false flags are 0.25 (6 of 24); measured recall is 0.83 (10 of 12) (unmeasured rooted cases 0.53 (29 of 55)). By taxonomy tag: requirement enforced-root false flags 0.17 (4 of 24), measured recall 0.82 (9 of 11) (unmeasured 0.62 (34 of 55)); format enforced-root false flags 0.08 (2 of 24), measured recall 1.00 (4 of 4) (unmeasured 0.78 (43 of 55)).
 
 Run 2026-11-22: 72 cases from 3 questions (2 recorded, 1 in-process) across 24 distinct edits on 3 offline agents, covering all 8 classes in [mutations.yaml](mutations.yaml) (31 regressed, 24 benign, 17 inert). Suite recordings are schema 2 (default since #208). No paid calls. These numbers never combine with the real PRs below.
 
@@ -106,7 +106,7 @@ Cases sharing an edit aren't independent, so each edit also gets one vote, by ma
 
 - **Edited node from the diff matches or beats lgcov on recall and coverage on single-node edits:** recall 1.00 (20 of 20) against 1.00 (20 of 20), and coverage 1.00 (44 of 44) against 1.00 (44 of 44). Its false-flag rate is 1.00 (24 of 24). On precision lgcov is ahead by case, 0.45 (20 of 44) against 0.35 (20 of 57), because it stays quiet on an edit that changed nothing. By edit the two are level, as the table above shows.
 - **Edits the diff can't pin to one node (T182) are scored on their own,** [below](#edits-the-diff-cant-pin-to-one-node): there the edited node from the diff has no single node to name.
-- **lgcov flags harmless changes as drift roots (T262):** its drift-root false-flag rate is 1.00 (24 of 24) on single-node edits, against 1.00 (24 of 24) for the edited node from the diff. With the suite's code-check taxonomies, enforced-root false flags under `fail-on: harmed-root` are 0.25 (6 of 24), and measured recall is 0.83 (10 of 12) (rooted cases still unmeasured: 0.53 (29 of 55)). A changed run lgcov names no root on is one it left inconclusive, not one it found harmless, and end-to-end's 0 only means it names no node.
+- **lgcov flags harmless changes as drift roots (T262):** its drift-root false-flag rate is 1.00 (24 of 24) on single-node edits, against 1.00 (24 of 24) for the edited node from the diff. With the suite's code-check taxonomies, enforced-root false flags under `fail-on: harmed-root` are 0.25 (6 of 24), and measured recall is 0.83 (10 of 12) (rooted cases still unmeasured: 0.53 (29 of 55)). By taxonomy tag: requirement enforced-root false flags 0.17 (4 of 24), measured recall 0.82 (9 of 11) (unmeasured 0.62 (34 of 55)); format enforced-root false flags 0.08 (2 of 24), measured recall 1.00 (4 of 4) (unmeasured 0.78 (43 of 55)). A changed run lgcov names no root on is one it left inconclusive, not one it found harmless, and end-to-end's 0 only means it names no node.
 - **On a router or fan-out edit lgcov names the routing node,** from the router's fingerprint, and first divergence names a node downstream: recall on all edits is 1.00 (31 of 31) against 0.55 (17 of 31). On single-node edits it is 1.00 (20 of 20) against 0.85 (17 of 20).
 - **End-to-end names no node.** As a detector, its final answer changed on 1.00 (31 of 31) regressed cases and on 0.92 (22 of 24) harmless ones.
 
@@ -228,6 +228,96 @@ uv run lgcov bench --synthetic
 
 This replaces only this section. Plain `lgcov bench` rewrites the whole file, so run this again after it. Held-out cases (T264) are opt-in and separate: `lgcov bench --synthetic --held-out` (does not mix into the suite above).
 
+## Held-out
+
+**20 of 20 harmless refactors are named root.** Under `fail-on: harmed-root`, enforced-root false flags are 0.20 (4 of 20); measured recall is 0.86 (18 of 21) (unmeasured rooted cases 0.45 (25 of 55)). By taxonomy tag: requirement enforced-root false flags 0.05 (1 of 20), measured recall 0.72 (13 of 18) (unmeasured 0.53 (29 of 55)); format enforced-root false flags 0.15 (3 of 20), measured recall 0.57 (8 of 14) (unmeasured 0.62 (34 of 55)).
+
+Run 2026-11-22: 90 cases from 3 questions (2 recorded, 1 in-process) across 30 distinct edits on 3 offline agents, covering all 11 classes in [mutations.yaml](mutations.yaml) (41 regressed, 20 benign, 29 inert). Suite recordings are schema 2 (default since #208). No paid calls. These numbers never combine with the real PRs below.
+
+- **Precision:** of the cases where a method names a node, the share where that node is the edited one and the edit regressed.
+- **Recall:** of regressed cases, the share where the edited node is named.
+- **Coverage:** of cases where the edit changed the run, the share where the edited node is named.
+- **False flag:** of cases where the edit changed the run and nothing regressed, the share where a method names a node.
+
+Single-node leaves out the router and fan-out edits, which change a conditional edge. All scores them against the edge's source node, the node that routes: its own output doesn't change, so a method that names it has to see the router's code.
+
+### By case
+
+| Edits | Method | Precision | Recall | Coverage | False flag |
+|---|---|---|---|---|---|
+| All | lgcov root | 0.64 (35 of 55) | 0.85 (35 of 41) | 0.95 (55 of 58) | 1.00 (20 of 20) |
+| All | first drift + router rule | 0.50 (29 of 58) | 0.71 (29 of 41) | 0.84 (49 of 58) | 1.00 (20 of 20) |
+| All | edited node from the diff | 0.46 (41 of 90) | 1.00 (41 of 41) | 1.00 (58 of 58) | 1.00 (20 of 20) |
+| All | first divergence | 0.36 (21 of 58) | 0.51 (21 of 41) | 0.71 (41 of 58) | 1.00 (20 of 20) |
+| All | end-to-end | — | 0.00 (0 of 41) | 0.00 (0 of 58) | 0.00 (0 of 20) |
+| Single-node | lgcov root | 0.60 (30 of 50) | 0.91 (30 of 33) | 1.00 (50 of 50) | 1.00 (20 of 20) |
+| Single-node | first drift + router rule | 0.42 (21 of 50) | 0.64 (21 of 33) | 0.82 (41 of 50) | 1.00 (20 of 20) |
+| Single-node | edited node from the diff | 0.42 (33 of 78) | 1.00 (33 of 33) | 1.00 (50 of 50) | 1.00 (20 of 20) |
+| Single-node | first divergence | 0.42 (21 of 50) | 0.64 (21 of 33) | 0.82 (41 of 50) | 1.00 (20 of 20) |
+| Single-node | end-to-end | — | 0.00 (0 of 33) | 0.00 (0 of 50) | 0.00 (0 of 20) |
+
+### One vote per edit
+
+Cases sharing an edit aren't independent, so each edit also gets one vote, by majority across its questions. Each cell gives the rate, the count and a 95% Wilson interval.
+
+| Edits | Method | Precision | Recall | Coverage | False flag |
+|---|---|---|---|---|---|
+| All | lgcov root | 0.63 (12 of 19; 0.41–0.81) | 0.86 (12 of 14; 0.60–0.96) | 0.95 (19 of 20; 0.76–0.99) | 1.00 (7 of 7; 0.65–1.00) |
+| All | first drift + router rule | 0.50 (10 of 20; 0.30–0.70) | 0.71 (10 of 14; 0.45–0.88) | 0.85 (17 of 20; 0.64–0.95) | 1.00 (7 of 7; 0.65–1.00) |
+| All | edited node from the diff | 0.47 (14 of 30; 0.30–0.64) | 1.00 (14 of 14; 0.78–1.00) | 1.00 (20 of 20; 0.84–1.00) | 1.00 (7 of 7; 0.65–1.00) |
+| All | first divergence | 0.35 (7 of 20; 0.18–0.57) | 0.50 (7 of 14; 0.27–0.73) | 0.70 (14 of 20; 0.48–0.85) | 1.00 (7 of 7; 0.65–1.00) |
+| All | end-to-end | — | 0.00 (0 of 14; 0.00–0.22) | 0.00 (0 of 20; 0.00–0.16) | 0.00 (0 of 7; 0.00–0.35) |
+| Single-node | lgcov root | 0.59 (10 of 17; 0.36–0.78) | 0.91 (10 of 11; 0.62–0.98) | 1.00 (17 of 17; 0.82–1.00) | 1.00 (7 of 7; 0.65–1.00) |
+| Single-node | first drift + router rule | 0.41 (7 of 17; 0.22–0.64) | 0.64 (7 of 11; 0.35–0.85) | 0.82 (14 of 17; 0.59–0.94) | 1.00 (7 of 7; 0.65–1.00) |
+| Single-node | edited node from the diff | 0.42 (11 of 26; 0.26–0.61) | 1.00 (11 of 11; 0.74–1.00) | 1.00 (17 of 17; 0.82–1.00) | 1.00 (7 of 7; 0.65–1.00) |
+| Single-node | first divergence | 0.41 (7 of 17; 0.22–0.64) | 0.64 (7 of 11; 0.35–0.85) | 0.82 (14 of 17; 0.59–0.94) | 1.00 (7 of 7; 0.65–1.00) |
+| Single-node | end-to-end | — | 0.00 (0 of 11; 0.00–0.26) | 0.00 (0 of 17; 0.00–0.18) | 0.00 (0 of 7; 0.00–0.35) |
+
+### Per node
+
+`lgcov root` above is the label `lgcov ci` ships. It can name several nodes on one case, or none, so here each node it names root counts on its own. A case with only an inconclusive node names no root: a miss for recall, and not counted in precision.
+
+- **Precision:** of the nodes named root, the share that are the edited node of a regressed case.
+- **Recall:** of regressed cases, the share whose edited node is named root.
+- **Exact match:** of regressed cases, the share where the roots named are exactly the edited node.
+- **One side only:** of the nodes named root, the share named because only base or only the PR ran them.
+
+| Edits | Precision | Recall | Exact match | Inconclusive cases | One side only |
+|---|---|---|---|---|---|
+| All | 0.64 (35 of 55) | 0.85 (35 of 41) | 0.85 (35 of 41) | 0 | 0.00 (0 of 55) |
+| Single-node | 0.60 (30 of 50) | 0.91 (30 of 33) | 0.91 (30 of 33) | 0 | 0.00 (0 of 50) |
+
+### What this says
+
+- **Edited node from the diff matches or beats lgcov on recall and coverage on single-node edits:** recall 1.00 (33 of 33) against 0.91 (30 of 33), and coverage 1.00 (50 of 50) against 1.00 (50 of 50). Its false-flag rate is 1.00 (20 of 20). On precision lgcov is ahead by case, 0.60 (30 of 50) against 0.42 (33 of 78), because it stays quiet on an edit that changed nothing. By edit the two are level, as the table above shows.
+- **This benchmark can't show where lgcov adds value.** lgcov's case rests on edits the diff can't pin to one node: a shared helper, a model or version swap, a shared config. Those are follow-up T182 and aren't here.
+- **lgcov flags harmless changes as drift roots (T262):** its drift-root false-flag rate is 1.00 (20 of 20) on single-node edits, against 1.00 (20 of 20) for the edited node from the diff. With the suite's code-check taxonomies, enforced-root false flags under `fail-on: harmed-root` are 0.20 (4 of 20), and measured recall is 0.86 (18 of 21) (rooted cases still unmeasured: 0.45 (25 of 55)). By taxonomy tag: requirement enforced-root false flags 0.05 (1 of 20), measured recall 0.72 (13 of 18) (unmeasured 0.53 (29 of 55)); format enforced-root false flags 0.15 (3 of 20), measured recall 0.57 (8 of 14) (unmeasured 0.62 (34 of 55)). A changed run lgcov names no root on is one it left inconclusive, not one it found harmless, and end-to-end's 0 only means it names no node.
+- **On a router or fan-out edit lgcov names the routing node,** from the router's fingerprint, and first divergence names a node downstream: recall on all edits is 0.85 (35 of 41) against 0.51 (21 of 41). On single-node edits it is 0.91 (30 of 33) against 0.64 (21 of 33).
+- **End-to-end names no node.** As a detector, its final answer changed on 0.93 (38 of 41) regressed cases and on 0.70 (14 of 20) harmless ones.
+
+### A/A re-runs
+
+Each question re-run with no edit. These runs aren't in the case count. Label flips are base-vs-base attribution: the share of re-runs where any root or drifted label appears.
+
+| Agent | Arm | Re-runs | Output flips | Outcome flips | Label flips | What it is |
+|---|---|---|---|---|---|---|
+
+### Limitations
+
+- Exact match on the edited node: parent-only naming counts as a miss, so an edit to `sub.inner` is a miss whatever a method says about `sub`.
+- The base runs hold the units inside a subgraph, so lgcov labels as `lgcov ci` does on a baseline recorded with `lgcov record --schema 2` (T193; default since #208). On a baseline recorded without it, lgcov calls a subgraph inconclusive, since a subgraph has no fingerprint.
+- A router edit counts as a hit whenever the router's code changed and a node drifted after it. lgcov doesn't check that the run took another branch, and no case here has a router edit beside a node edit.
+- Fake models and small graphs, so these numbers don't predict a real PR.
+- The regression label comes from each agent's own outcome check.
+- The two order questions gave every edit the same label, so the case-level numbers count some edits more than their evidence supports.
+
+Reproduce:
+
+```bash
+uv run lgcov bench --synthetic
+```
+
+This replaces only this section. Plain `lgcov bench` rewrites the whole file, so run this again after it.
 ## Real PRs
 
 A pilot, not a precision guarantee: one PR, one question, one run per side each time, and lgcov named one root each time. These numbers stay out of the sections above. This section is written by hand. The tables just below are the first run, on `gpt-4.1`. The second run, on `gpt-6-luna`, is at the end.
