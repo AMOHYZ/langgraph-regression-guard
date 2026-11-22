@@ -83,6 +83,25 @@ def test_several_samples_one_in_scope_measures() -> None:
     assert harmed == {"respond": "harmed"}
 
 
+def test_several_samples_all_skipped_is_unmeasured() -> None:
+    """Several samples, every one skipped by when: → root stays unmeasured."""
+    statuses = root_harm_statuses(
+        ("respond",),
+        {"order_status": "respond"},
+        failed_kpis=frozenset(),
+        judged_kpis=frozenset(),  # n samples, all when:-skipped → never judged
+        kpi_checks={
+            "order_status": {
+                "type": "output_contains",
+                "text": "shipped",
+                "when": {"input_contains": "order"},
+            }
+        },
+        kpi_judges={"order_status": "code"},
+    )
+    assert statuses == {"respond": "unmeasured"}
+
+
 def test_taxonomy_preserves_when_and_builds_output_check() -> None:
     tax = parse_taxonomy(
         {
