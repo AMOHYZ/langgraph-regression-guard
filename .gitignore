@@ -221,3 +221,6 @@ __marimo__/
 
 # lgcov local metrics / cache
 .lgcov/
+
+# T198: live LangSmith trace smoke output (never commit trace contents)
+.lgcov-langsmith-traces/

@@ -1,7 +1,8 @@
-"""T103: read-only LangSmith interop.
+"""T103 / T198: read-only LangSmith interop.
 
 `lgcov import langsmith` turns a dataset's examples into lgcov cases, the graph inputs
 `lgcov record --inputs` takes, and a sidecar of each example's id and reference outputs.
+`lgcov import langsmith --traces` (T198) imports recent root runs the same way.
 `lgcov ci` links the experiment on lgcov.yaml's dataset that ran on this commit: the
 newest whose metadata.git.commit, which the SDK's evaluate() records, is a commit it names.
 
@@ -120,6 +121,13 @@ class LangSmith:
         """The dataset's experiments, LangSmith's sessions against it, up to EXPERIMENTS."""
         return list(self._items("/sessions", {"reference_dataset": dataset_id}, EXPERIMENTS))
 
+    def traces(self, limit: int | None = None, *, project: str | None = None) -> list[Item]:
+        """T198: recent root runs (traces), oldest-first after `traces_to_cases` sorts them."""
+        params: dict[str, str | int] = {"is_root": "true"}
+        if project:
+            params["session"] = project
+        return list(self._items("/runs", params, limit))
+
 
 def from_env(client: GetClient | None = None) -> LangSmith | None:
     """The API that LANGSMITH_API_KEY, LANGSMITH_ENDPOINT and LANGSMITH_WORKSPACE_ID name;
@@ -144,6 +152,29 @@ def cases(examples: Sequence[Item]) -> tuple[list[dict[str, object]], list[dict[
             raise LangSmithError(f"LangSmith example {name}: its inputs aren't an object")
         inputs.append(given)
         sidecar.append({"example_id": example.get("id"), "outputs": example.get("outputs")})
+    return inputs, sidecar
+
+
+def traces_to_cases(
+    runs: Sequence[Item],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """T198: graph inputs from root runs, oldest first, with run ids in the sidecar (pure)."""
+    order = sorted(runs, key=lambda e: (str(e.get("start_time", "")), str(e.get("id", ""))))
+    inputs: list[dict[str, object]] = []
+    sidecar: list[dict[str, object]] = []
+    for run in order:
+        given = run.get("inputs")
+        if not isinstance(given, dict):
+            name = run.get("id")
+            raise LangSmithError(f"LangSmith run {name}: its inputs aren't an object")
+        inputs.append(given)
+        sidecar.append(
+            {
+                "run_id": run.get("id"),
+                "outputs": run.get("outputs"),
+                "name": run.get("name"),
+            }
+        )
     return inputs, sidecar
 
 
