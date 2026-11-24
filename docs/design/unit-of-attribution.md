@@ -31,8 +31,10 @@ function named with no file is in [`cassette.py`](../../src/lgcov/cassette.py).
 - **Tools.** `node_tools()` in [`snapshot.py`](../../src/lgcov/snapshot.py) reads which tools
   each `ToolNode` exposes. No command calls it, only its tests. The code judges
   ([`code_judges.py`](../../src/lgcov/code_judges.py)) read a trace built by `_l2_cases` in
-  `cli.py`: the run's top-level node names, and the tool calls its AI messages asked for
-  (`run_tools` in [`messages.py`](../../src/lgcov/messages.py)), over the whole run.
+  `cli.py`: the run's node names (incl. unit paths), and for `tool_called` /
+  `tool_not_called` only the KPI's named node's tool calls (`tools_for_node` in
+  [`messages.py`](../../src/lgcov/messages.py); T210). `tool_sequence` still reads the whole
+  run. A named node that was not recorded leaves the check unmeasured.
 
 So a tool call is something a judge can ask about. It is never a step, never served, and never
 root or propagated. A skill and a sub-agent don't exist for lgcov at all.

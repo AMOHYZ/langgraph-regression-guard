@@ -35,7 +35,8 @@ or slice group never goes further than its KPIs' own verdicts.
   | LLM / **jev** judge on that node | Yes (rubric over cassette output) |
   | `judge: fake` (constant label) | **No** (T264; never observes) |
   | `output_contains` / `output_matches` on that node | Yes (reads node output) |
-  | `tool_called` / `tool_not_called` / `tool_sequence` / `max_steps` | Yes (run-level effects) |
+  | `tool_called` / `tool_not_called` on that node | Yes (that node's tool calls; T210) |
+  | `tool_sequence` / `max_steps` | Yes (run-level effects) |
   | `node_visited` / `node_not_visited` on a **downstream** node | Yes |
   | `node_sequence` that includes a node **after** the root (incl. `sub.inner`) | Yes |
   | `node_visited` / `node_not_visited` on the root itself | **No** (presence only) |
@@ -83,13 +84,16 @@ or slice group never goes further than its KPIs' own verdicts.
     fails on the PR exits 1, named as hidden by the re-baseline. Otherwise the comment says no
     decision and it exits 0, so an intended change can land. A run the PR removes from its
     cassettes has nothing to compare against, so the comment names it, and it doesn't block.
-  - `tool_called` and `tool_not_called` see the tools a run called, read from the AI messages in
-    its steps, but over the whole run: `node:` isn't applied to them yet, so a tool another node
-    calls passes or fails the check too. The comment says so for each tool check.
-  - `node_sequence` and `tool_sequence` read the whole run too. A name that is in neither the
-    base's recorded runs nor the PR's graph (a typo, or a node inside a subgraph, which lgcov
-    doesn't record yet) leaves the check not checked, with a ⚠️ line, and never fails the PR. A
-    name the base's runs have and the PR dropped is judged, so it fails.
+  - `tool_called` and `tool_not_called` see only the tools the KPI's `node:` called (T210), read
+    from that node's AI messages (including unit paths like `sub.inner`). A tool another node
+    called does not pass or fail the check. If the named node was not recorded (e.g. it only ran
+    inside a subgraph), the check is unmeasured for that case — never a silent pass. The comment
+    no longer warns "whole-run" for these checks.
+  - `tool_sequence` still reads the whole run; the comment says so. `node_sequence` and
+    `tool_sequence`: a name that is in neither the base's recorded runs nor the PR's graph (a
+    typo, or a node inside a subgraph, which lgcov doesn't record yet) leaves the check not
+    checked, with a ⚠️ line, and never fails the PR. A name the base's runs have and the PR
+    dropped is judged, so it fails.
 - **The 2.5%** is at the default α = 0.05. With no discordant pair, SHIP reads the no-drop
   bound at α/2 instead of the CI. That is the same 2.5% at α = 0.05, and more if α is set
   higher, as the PR comment then says. Simulated with a BCa interval, it held from N = 200

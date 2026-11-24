@@ -17,7 +17,7 @@ from pathlib import Path
 from lgcov.cassette import Cassette, Step, with_units
 from lgcov.code_judges import CONTENT_CHECK_TYPES, check_in_scope, code_judge
 from lgcov.drift_gate import HarmStatus, root_harm_statuses
-from lgcov.messages import plain, run_tools
+from lgcov.messages import plain, run_tools, tools_for_node
 from lgcov.taxonomy import CHECK_TAGS as CHECK_TAGS  # re-export for score-by-tag callers
 from lgcov.taxonomy import KPISpec, load_taxonomy
 
@@ -29,15 +29,27 @@ TAXONOMY_BY_AGENT: dict[str, str] = {
 }
 
 
+_NODE_SCOPED_TOOLS = frozenset({"tool_called", "tool_not_called"})
+
+
 def _trace_and_content(
     steps: Sequence[Step],
     *,
     node: str,
     kind: str,
 ) -> dict[str, object] | None:
-    """Judge input like CI `_l2_cases`: trace for trajectory; node output for content."""
+    """Judge input like CI `_l2_cases`: trace for trajectory; node output for content.
+
+    T210: tool_called / tool_not_called use only the named node's tools; missing node → None.
+    """
     units = with_units(steps)
-    tools = run_tools([s.output for s in steps])
+    if kind in _NODE_SCOPED_TOOLS:
+        scoped = tools_for_node([(s.node, s.output) for s in units], node)
+        if scoped is None:
+            return None
+        tools = scoped
+    else:
+        tools = run_tools([s.output for s in steps])
     out: dict[str, object] = {"trace": {"nodes": [s.node for s in units], "tools": tools}}
     if kind not in CONTENT_CHECK_TYPES:
         return out

@@ -132,6 +132,18 @@ def run_tools(outputs: Sequence[object]) -> list[str]:
     return tools
 
 
+def tools_for_node(node_outputs: Sequence[tuple[str, object]], node: str) -> list[str] | None:
+    """T210: tools the named node called, or None when that node was not recorded.
+
+    None means unmeasured (e.g. the node ran only inside a subgraph): never treat as a pass.
+    An empty list means the node was recorded and asked for no tools.
+    """
+    matched = [out for name, out in node_outputs if name == node]
+    if not matched:
+        return None
+    return run_tools(matched)
+
+
 def encode(value: object) -> object:
     # json.dumps calls this for each value it can't write itself
     if isinstance(value, BaseMessage):
