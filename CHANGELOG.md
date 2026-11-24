@@ -35,6 +35,11 @@
   (diff → nodes → KPIs → verdict → approver → state). Docs map to EU AI Act Art. 17(1)
   and ISO/IEC 42001 8.1 as **evidence only**, never a compliance claim.
   [docs/change-record.md](docs/change-record.md).
+- **Divergence monitor (T122).** Same-property branch scores
+  (`checks_same_property: true`) that diverge beyond MDE become
+  `needs_human` with a reason; divergence alone never exits 1. Structural
+  (non-same-property) divergence adds an investigate note to the PR comment
+  only. New verdict-actions row `same_property_divergence`.
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
   per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,

@@ -92,6 +92,11 @@ _ROWS: dict[str, tuple[str, str]] = {
         "output or something downstream. "
         "`fail-on: harmed-root` never treats unmeasured drift as a pass.",
     ),
+    "same_property_divergence": (
+        _NO_DECISION,
+        "Same-property checks diverged beyond MDE ({divergence}). Decide yourself; divergence "
+        "alone never fails the check.",
+    ),
     "drift_not_enforced": (
         _NO_DECISION,
         "Read the drift table and decide. `fail-on: never` means lgcov won't fail this check on "
@@ -143,6 +148,9 @@ _UNDECIDED = {  # each state a human decides, and what its exit 0 means
     "unmeasured_root": (
         "This check exits 0 because unmeasured roots under `fail-on: harmed-root` need a human. "
         "That is not a pass."
+    ),
+    "same_property_divergence": (
+        "This check exits 0 because same-property divergence alone never fails. That is not a pass."
     ),
     "drift_not_enforced": (
         "This check exits 0 because `fail-on: never` does not block on drift. That is not a pass."
@@ -230,6 +238,8 @@ class Evidence:
     code_failures: tuple[CodeFailure, ...] = ()  # a policy violation, whatever the test says
     hidden_failures: tuple[CodeFailure, ...] = ()  # the same, with a re-baseline hiding it
     unmeasured_drift: bool = False  # T262: roots no KPI/check covers, under fail-on: harmed-root
+    same_property_divergence: str = ""  # T122: same-property |Δ| > MDE reason → needs_human
+    structural_divergence_note: str = ""  # T122: investigate note in PR comment only
     inconclusive_blocks: bool = False  # the switch: an undecided run fails the check
     mode: Mode = "enforcing"
     approved_by: tuple[str, ...] = ()  # recorded only
@@ -286,6 +296,8 @@ def _state(e: Evidence) -> str:
         return "unsupported"
     if e.unmeasured_drift:  # T262: even under a SHIP — unmeasured is never a pass
         return "unmeasured_root"
+    if e.same_property_divergence:  # T122: beyond MDE → needs_human, never exit 1 alone
+        return "same_property_divergence"
     if e.statistical is None and e.unenforced_drift:
         return "drift_not_enforced"
     if e.statistical is None and e.advisory_drops:
@@ -311,7 +323,14 @@ def _details(e: Evidence) -> tuple[str, ...]:
         status.append(f"Human approval: {names} (recorded; it does not change the verdict)")
     if e.ci_status:
         status.append(f"Other CI: {e.ci_status}")
-    return (" · ".join(status), *((_ADVISORY_LINE,) if e.mode == "advisory" else ()))
+    extra: list[str] = []
+    if e.structural_divergence_note:  # T122: investigate note only
+        extra.append(e.structural_divergence_note)
+    return (
+        " · ".join(status),
+        *extra,
+        *((_ADVISORY_LINE,) if e.mode == "advisory" else ()),
+    )
 
 
 def _failed(failures: Sequence[CodeFailure], where: str) -> list[str]:
@@ -333,6 +352,7 @@ def decide_action(e: Evidence) -> Action:
         "abstained": _code(e.abstained),
         "dropped": _code(e.advisory_drops),
         "unsupported": "; ".join(e.unsupported),
+        "divergence": e.same_property_divergence,
         "blocking": f"{e.k_gate} blocking KPI{'' if e.k_gate == 1 else 's'}",
     }
     headline, step = (text.format(**fill) for text in _ROWS[state])
