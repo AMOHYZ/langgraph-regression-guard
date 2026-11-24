@@ -322,7 +322,9 @@ This replaces only this section. Plain `lgcov bench` rewrites the whole file, so
 
 A pilot, not a precision guarantee: one PR, one question, one run per side each time, and lgcov named one root each time. These numbers stay out of the sections above. This section is written by hand. The tables just below are the first run, on `gpt-4.1`. The second run, on `gpt-6-luna`, is at the end.
 
-TODO(T171): 2-3 more hand-labelled real PRs
+TODO(T171): 2-3 more hand-labelled real PRs — blind packs checked in under
+[benchmark/label-packs/](benchmark/label-packs/) (gemini #90/#35, local-deep-researcher #81);
+fill `root` / `propagated` / `unaffected` there, then promote to yaml rows.
 
 | | |
 |---|---|
