@@ -236,6 +236,9 @@ lgcov record --inputs cases.json
 - **`--limit N`** imports at most N examples, and **`--split NAME`** imports only that
   split.
 - **Without the key**, it imports nothing and exits 2.
+- **`--traces`** (T198) imports recent root runs instead of a dataset:  
+  `lgcov import langsmith --traces --limit 3 --out .lgcov-langsmith-traces/cases.json`  
+  (that folder is gitignored). Optional `--project` filters by LangSmith project/session.
 
 The PR report links the LangSmith experiment that ran on the commit it checked:
 

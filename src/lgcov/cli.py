@@ -182,6 +182,7 @@ from lgcov.langsmith import (
     experiment_url,
     from_env,
     matching,
+    traces_to_cases,
 )
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
@@ -950,15 +951,31 @@ _langsmith_client: GetClient | None = None
 
 
 def _import_langsmith(argv: list[str]) -> int:
-    """T103: a LangSmith dataset's examples as lgcov cases, read-only."""
+    """T103 / T198: LangSmith dataset examples or root traces as lgcov cases, read-only."""
     ap = argparse.ArgumentParser(prog="lgcov import langsmith")
-    ap.add_argument("--dataset", required=True, help="the LangSmith dataset's name")
+    ap.add_argument(
+        "--traces",
+        action="store_true",
+        help="T198: import recent root runs (traces) instead of a dataset's examples",
+    )
+    ap.add_argument("--dataset", help="the LangSmith dataset's name (required unless --traces)")
+    ap.add_argument(
+        "--project",
+        help="T198: with --traces, optional LangSmith project / session name filter",
+    )
     ap.add_argument("--out", default="cases.json", help="where the cases go (cases.json)")
-    ap.add_argument("--limit", type=int, help="import at most this many examples")
+    ap.add_argument("--limit", type=int, help="import at most this many examples or traces")
     ap.add_argument("--split", help="import only this split of the dataset")
     args = ap.parse_args(argv)
     if args.limit is not None and args.limit < 1:
         ap.error("--limit must be at least 1")
+    if args.traces:
+        if args.dataset:
+            ap.error("--dataset cannot be used with --traces")
+        if args.split:
+            ap.error("--split cannot be used with --traces")
+    elif not args.dataset:
+        ap.error("--dataset is required unless --traces is set")
     ls = from_env(_langsmith_client)
     if ls is None:
         print(
@@ -967,18 +984,23 @@ def _import_langsmith(argv: list[str]) -> int:
         )
         return EXIT_ERROR
     try:
-        dataset_id = ls.dataset_id(args.dataset)
-        inputs, sidecar = cases(ls.examples(dataset_id, args.limit, args.split))
+        if args.traces:
+            inputs, sidecar = traces_to_cases(ls.traces(args.limit, project=args.project))
+            source = "traces" + (f" (project `{args.project}`)" if args.project else "")
+        else:
+            dataset_id = ls.dataset_id(args.dataset)
+            inputs, sidecar = cases(ls.examples(dataset_id, args.limit, args.split))
+            source = f"dataset `{args.dataset}`"
     except LangSmithError as exc:
         print(f"lgcov import langsmith: {exc}", file=sys.stderr)
         return EXIT_ERROR
     out = Path(args.out)
-    beside = out.with_suffix(".langsmith.json")  # example ids and outputs, in the same order
+    beside = out.with_suffix(".langsmith.json")  # example/run ids and outputs, same order
     out.parent.mkdir(parents=True, exist_ok=True)
     for path, body in ((out, inputs), (beside, sidecar)):
         path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(
-        f"Imported {len(inputs)} cases from LangSmith dataset `{args.dataset}` to {out} "
+        f"Imported {len(inputs)} cases from LangSmith {source} to {out} "
         f"(ids and outputs in {beside}); record them with `lgcov record --inputs {out}`"
     )
     return 0
@@ -4284,7 +4306,8 @@ def _command(argv: list[str]) -> int | None:
         return _import_langsmith(argv[2:])
     if argv[:1] == ["import"]:
         print(
-            "lgcov import: the one source is langsmith (lgcov import langsmith --dataset X)",
+            "lgcov import: the one source is langsmith "
+            "(lgcov import langsmith --dataset X | --traces)",
             file=sys.stderr,
         )
         return EXIT_ERROR
@@ -4405,7 +4428,7 @@ commands:
   taxonomy check    validate a taxonomy and print its KPIs
   taxonomy draft    draft failure modes and KPIs from traces, each pending review
   taxonomy approve  approve one drafted entry
-  import langsmith  turn a LangSmith dataset's examples into lgcov cases
+  import langsmith  turn LangSmith dataset examples or --traces into lgcov cases
   round init        write an unfrozen benchmark round to fill in
   round lock        freeze a benchmark round and record its SHAs
   round check       exit 2 if a locked SHA moved or a case was already exposed

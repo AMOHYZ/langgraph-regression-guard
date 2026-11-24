@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **`lgcov import langsmith --traces` (T198).** Import recent LangSmith root runs as
+  lgcov cases (read-only; `LANGSMITH_API_KEY` from env only, never printed). Optional
+  `--project` / `--limit`. Live smoke writes under `.lgcov-langsmith-traces/` (gitignored).
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
   per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,
