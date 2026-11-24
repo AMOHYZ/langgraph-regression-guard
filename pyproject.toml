@@ -1,7 +1,7 @@
 [project]
 name = "lgcov"
 version = "0.6.0"
-description = "Catch silent regressions in LangGraph agents on every PR. lgcov re-runs only the nodes a PR can reach and shows which node's output changed first."
+description = "A CI gate for LangGraph agents that a pull request can't grade itself. Early: names which change did it — which node's output changed first."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
