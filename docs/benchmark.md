@@ -320,7 +320,15 @@ uv run lgcov bench --synthetic
 This replaces only this section. Plain `lgcov bench` rewrites the whole file, so run this again after it.
 ## Real PRs
 
-A pilot, not a precision guarantee: one PR, one question, one run per side each time, and lgcov named one root each time. These numbers stay out of the sections above. This section is written by hand. The tables just below are the first run, on `gpt-4.1`. The second run, on `gpt-6-luna`, is at the end.
+A pilot, not a precision guarantee: one PR, one question, one run per side each time, and lgcov named one root each time. These numbers stay out of the sections above. Narrative tables below are written by hand; `### Metrics from results (offline)` is filled by `lgcov bench --fill-real-prs` (T101-B). The first hand run used `gpt-4.1`; the second, `gpt-6-luna`, is at the end.
+
+### Metrics from results (offline)
+
+Filled offline from `benchmark-results.json` (T101-B). Does not rewrite the hand narrative below. **Reenact contrast** here means the same *first divergence* baseline the synthetic tables already compare against — not a Reenact product hook.
+
+| PR / benchmark | root precision | root recall | propagated precision | propagated recall |
+|---|---|---|---|---|
+| open_deep_research-163 | pending labels | pending labels | pending labels | pending labels |
 
 TODO(T171): 2-3 more hand-labelled real PRs — blind packs checked in under
 [benchmark/label-packs/](benchmark/label-packs/) (gemini #90/#35, local-deep-researcher #81);

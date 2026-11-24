@@ -595,3 +595,104 @@ def results_json(results: Sequence[Result]) -> str:
         },
     }
     return json.dumps(doc, indent=2) + "\n"
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        return int(value)
+    return default
+
+
+def _as_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        return float(value)
+    return default
+
+
+def _prf_cell(score: Mapping[str, object], *, kind: Literal["precision", "recall"]) -> str:
+    tp = _as_int(score.get("tp", 0))
+    fp = _as_int(score.get("fp", 0))
+    fn = _as_int(score.get("fn", 0))
+    value = _as_float(score.get(kind, 0.0))
+    denom = (tp + fp) if kind == "precision" else (tp + fn)
+    if denom == 0:
+        return f"{value:.2f} (0 of 0)"
+    return f"{value:.2f} ({tp} of {denom})"
+
+
+_REAL_PR_METRICS_HEADING = "### Metrics from results (offline)"
+
+
+def render_real_pr_metrics(doc: Mapping[str, object]) -> str:
+    """T101-B: markdown subsection from `benchmark-results.json` for the Real PRs section.
+
+    Rows with `status` pending/reviewed (or any non-empty status) show **pending labels**.
+    Offline only — never runs agents. Reenact contrast = first-divergence baseline already
+    used in the synthetic tables (not a separate product integration).
+    """
+    rows = doc.get("benchmarks", [])
+    if not isinstance(rows, list):
+        raise ValueError("benchmarks must be a list")
+    lines = [
+        _REAL_PR_METRICS_HEADING,
+        "",
+        "Filled offline from `benchmark-results.json` (T101-B). Does not rewrite the hand "
+        "narrative below. **Reenact contrast** here means the same *first divergence* "
+        "baseline the synthetic tables already compare against — not a Reenact product hook.",
+        "",
+        "| PR / benchmark | root precision | root recall | propagated precision | "
+        "propagated recall |",
+        "|---|---|---|---|---|",
+    ]
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            raise ValueError("each benchmark must be an object")
+        name = str(raw.get("name", ""))
+        status = str(raw.get("status", "") or "")
+        error = str(raw.get("error", "") or "")
+        if status or error:
+            cell = "pending labels" if status else f"error: {error}"
+            lines.append(f"| {name} | {cell} | {cell} | {cell} | {cell} |")
+            continue
+        root = raw.get("root", {})
+        prop = raw.get("propagated", {})
+        if not isinstance(root, Mapping) or not isinstance(prop, Mapping):
+            raise ValueError(f"{name}: root/propagated must be objects")
+        lines.append(
+            f"| {name} | {_prf_cell(root, kind='precision')} | {_prf_cell(root, kind='recall')} "
+            f"| {_prf_cell(prop, kind='precision')} | {_prf_cell(prop, kind='recall')} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def fill_real_pr_metrics(markdown: str, section: str) -> str:
+    """Replace `### Metrics from results (offline)` under Real PRs; keep the rest intact."""
+    body = section.rstrip("\n") + "\n"
+    found = re.search(
+        rf"^{re.escape(_REAL_PR_METRICS_HEADING)}\n(?:(?!^### |^## ).*\n?)*",
+        markdown,
+        re.MULTILINE,
+    )
+    if found:
+        return markdown[: found.start()] + body + markdown[found.end() :]
+    real = re.search(r"^## Real PRs\n", markdown, re.MULTILINE)
+    if real:
+        # Insert after the Real PRs heading line and one blank/intro paragraph if present.
+        after = real.end()
+        # Skip one blank line + first paragraph block so hand intro stays above metrics.
+        rest = markdown[after:]
+        para = re.match(r"(?:\n|.)*?\n\n", rest, re.DOTALL)
+        insert_at = after + (para.end() if para else 0)
+        return markdown[:insert_at] + body + "\n" + markdown[insert_at:]
+    return markdown.rstrip("\n") + "\n\n" + body
