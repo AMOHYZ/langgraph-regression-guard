@@ -113,3 +113,5 @@ or slice group never goes further than its KPIs' own verdicts.
   ([the fixes](design/gate-false-ship.md)).
 - **On a PR, these settings come from the base commit,** so a PR can't change what grades it. What
   that does and doesn't stop is in [the trust boundary](trust-boundary.md).
+- **Criteria drift** (rubric / label meaning moves while bands stay old) is a separate loop from
+  agent drift: [criteria-drift.md](criteria-drift.md) (T196, spec only).
