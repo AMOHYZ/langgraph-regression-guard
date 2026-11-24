@@ -39,20 +39,22 @@ Pool membership and which judge versions were **fitted** on each case:
 }
 ```
 
-`candidates_seen` is **not** stored here. Read it from [`exposure.json`](round.md)
-(`CaseExposure.candidates`). Copying it into lineage is refused.
+`candidates_seen` is **not** stored here. Read it from the **gate round** ledger
+[`exposure.json`](round.md) (`CaseExposure.candidates`). Copying it into lineage is refused.
+(A [benchmark round](benchmark-rounds.md) has a different ledger, `exposure.jsonl`.)
 
-Elapsed rounds do **not** make a case independent. A later round number, or waiting for more
-rounds, does not clear `judges_fitted`.
+Elapsed **gate** rounds do **not** make a case independent. A later round number, or waiting for
+more rounds, does not clear `judges_fitted`.
 
 ## `lgcov pools check`
 
 Exits 0 when the pools are clean, and 2 otherwise, naming every problem:
 
 1. **Same case id in two pools** — a case file under both `cases/optimiser` and `cases/gate`.
-2. **Gate case the current judge was fitted on** — the current judge is the locked gate
-   round's judge (`model`, `version`, prompt hash) on the **base** ref. With no locked round,
-   the check cannot decide: that is a refusal, not a pass.
+2. **Gate case the current judge was fitted on** — the current judge is the locked **gate
+   round**'s judge (`model`, `version`, prompt hash) on the **base** ref (`lgcov-round.yaml` /
+   `lgcov round new`, not a benchmark round). With no locked gate round, the check cannot
+   decide: that is a refusal, not a pass.
 3. **Near-exact duplicate text** — two different ids share a `v1:` hash of normalised input
    text (NFKC, casefold, collapse whitespace, trim). That catches exact and near-exact
    duplicates only, **not** paraphrases.

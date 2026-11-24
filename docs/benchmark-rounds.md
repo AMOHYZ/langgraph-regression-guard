@@ -1,8 +1,26 @@
 # Benchmark rounds
 
-A benchmark round fixes which commits a benchmark compares and which cases they see, before they run. Its exposure ledger records what each candidate has already seen, so a later round can't reuse a case and report it as fresh.
+A **benchmark round** fixes which commits a benchmark compares and which cases they see, before
+they run. Its exposure ledger records what each candidate has already seen, so a later round can't
+reuse a case and report it as fresh.
 
-This is about `lgcov bench`, not the gate. **A benchmark round and a gate round are different things that share a word.** `lgcov round init`, `lock` and `check` work on a benchmark round, at a path you choose, with `exposure.jsonl` next to it. `lgcov round new` and `lgcov guard` work on a [gate round](round.md), in `lgcov-round.yaml` at the repo's root, with `exposure.json`. Neither command reads the other's files.
+This is about `lgcov bench`, not the gate.
+
+## Naming: benchmark round vs gate round
+
+**The word "round" means two different things in this repo.** Prefer the full name ("benchmark
+round" or "gate round") in docs and talk — the short word alone is ambiguous.
+
+| | Benchmark round (this page) | Gate round |
+|---|---|---|
+| Purpose | Lock what `lgcov bench` compares | Lock what `lgcov guard` / the gate may use |
+| Commands | `lgcov round init`, `lock`, `check` | `lgcov round new`, `lgcov guard` |
+| Path | Any path you choose (usually under `docs/benchmark/rounds/`) | `lgcov-round.yaml` at the **repo root** |
+| Ledger | `exposure.jsonl` next to the round file | `exposure.json` (JSON object) |
+| Docs | this page | [round.md](round.md) (gate rounds) |
+
+`lgcov round init`, `lock` and `check` work on a benchmark round. `lgcov round new` and
+`lgcov guard` work on a [gate round](round.md). Neither command reads the other's files.
 
 ## The round file
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Round naming (T236).** Docs and CLI help keep both names and spell out the split: a *gate
+  round* (`lgcov round new` / `lgcov guard`, root `lgcov-round.yaml` + `exposure.json`) vs a
+  *benchmark round* (`lgcov round init|lock|check`, path of your choice + `exposure.jsonl`). No
+  rename.
 - **`lgcov import langsmith --traces` (T198).** Import recent LangSmith root runs as
   lgcov cases (read-only; `LANGSMITH_API_KEY` from env only, never printed). Optional
   `--project` / `--limit`. Live smoke writes under `.lgcov-langsmith-traces/` (gitignored).
