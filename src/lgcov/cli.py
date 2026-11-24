@@ -26,6 +26,15 @@ from typing import Any
 
 import yaml
 
+from lgcov.adoption import (
+    ChangeRecord,
+    IllegalTransition,
+    StaleApproval,
+    approve_bind,
+    load_change_record,
+    require_fresh_approval,
+    save_change_record,
+)
 from lgcov.attribution import (
     NEEDS_LIVE,
     ROUTING,
@@ -1095,6 +1104,13 @@ def _cassette_accept(argv: list[str]) -> int:
         help="take the fresh runs from this file, which `lgcov ci --candidate-out` wrote, "
         "instead of running the graph: nothing is imported",
     )
+    # T155-B: when a change record is in play, refuse without a fresh approval.
+    ap.add_argument("--require-approval", action="store_true", help="T155-B: need fresh approval")
+    ap.add_argument("--change-record", help="path to change-record.json (T155)")
+    ap.add_argument("--base-sha", help="base commit SHA to match the approval")
+    ap.add_argument("--candidate-sha", help="candidate commit SHA to match the approval")
+    ap.add_argument("--base-hash", help="base content hash to match the approval")
+    ap.add_argument("--candidate-hash", help="candidate content hash to match the approval")
     args = ap.parse_args(argv)
     if bool(args.nodes) == args.all_drifted:
         print(
@@ -1102,6 +1118,12 @@ def _cassette_accept(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return EXIT_ERROR
+    if args.require_approval or args.change_record:
+        try:
+            _check_accept_approval(args)
+        except (OSError, ValueError, StaleApproval) as exc:
+            print(f"lgcov cassette accept: {exc}", file=sys.stderr)
+            return EXIT_ERROR
     named = {n for n in (args.nodes or "").split(",") if n}
     # T186: from a candidate file no graph loads, so a stand-in entrypoint validates
     standin = "candidate.py:unused" if args.candidate_in else None
@@ -1164,7 +1186,38 @@ def _cassette_accept(argv: list[str]) -> int:
     print(summary, end="")
     print(f"wrote {path}")
     print(f"wrote {summary_path}")
+    if args.change_record:
+        try:
+            # Named `change`, not `record`: that name is the cassette.record import.
+            change = load_change_record(Path(args.change_record))
+            if change.state == "approved":
+                advanced = change.advance("baseline_updated")
+                save_change_record(Path(args.change_record), advanced)
+        except (OSError, ValueError, IllegalTransition) as exc:
+            print(f"lgcov cassette accept: change record: {exc}", file=sys.stderr)
+            return EXIT_ERROR
     return 0
+
+
+def _check_accept_approval(args: argparse.Namespace) -> None:
+    """T155-B: cassette accept needs a non-stale approval when a change record is required."""
+    path = Path(args.change_record) if args.change_record else Path("change-record.json")
+    if not path.is_file():
+        raise StaleApproval(f"no change record at {path}; run `lgcov review approve` first")
+    needed = (args.base_sha, args.candidate_sha, args.base_hash, args.candidate_hash)
+    if any(v is None for v in needed):
+        raise ValueError(
+            "with --require-approval / --change-record, pass --base-sha, --candidate-sha, "
+            "--base-hash and --candidate-hash"
+        )
+    record = load_change_record(path)
+    require_fresh_approval(
+        record,
+        base_sha=str(args.base_sha),
+        candidate_sha=str(args.candidate_sha),
+        base_hash=str(args.base_hash),
+        candidate_hash=str(args.candidate_hash),
+    )
 
 
 def _graph_diff_lines(diff: GraphDiff) -> list[str]:
@@ -2628,6 +2681,8 @@ def _calibrate_cmd(argv: list[str]) -> int:
 _REVIEW_USAGE = (
     "usage: lgcov review override --kpi KPI --case-id CASE --judge-label LABEL "
     "--human-label LABEL --reviewer NAME [--note TEXT]\n"
+    "       lgcov review approve --pr N --base-sha SHA --candidate-sha SHA "
+    "--base-hash H --candidate-hash H --approver NAME [--override] [--note TEXT]\n"
     "       lgcov review reject --base-dir DIR [--config FILE] [--cassette-dir DIR]\n"
     "       lgcov review fetch --event FILE --out DIR [--cassette-dir DIR] [--taxonomy FILE]\n"
     "       lgcov review apply --dir DIR\n"
@@ -3323,6 +3378,89 @@ def _review_commit(argv: list[str], client: Client | None = None) -> int:
     return code
 
 
+def _change_record_export_cmd(argv: list[str]) -> int:
+    """T129: write JSON + markdown evidence for a PR from a change record."""
+    from lgcov.change_record_export import ExportPayload, export_json, export_markdown
+
+    ap = argparse.ArgumentParser(prog="lgcov change-record export")
+    ap.add_argument("--change-record", default="change-record.json")
+    ap.add_argument("--diff", default="", help="short diff summary")
+    ap.add_argument("--nodes", default="", help="comma-separated affected nodes")
+    ap.add_argument("--kpis", default="", help="comma-separated KPI names")
+    ap.add_argument("--out-dir", default=".", help="directory for change-<pr>.json/.md")
+    args = ap.parse_args(argv)
+    try:
+        record = load_change_record(Path(args.change_record))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"lgcov change-record export: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    payload = ExportPayload.from_record(
+        record,
+        diff_summary=args.diff,
+        affected_nodes=tuple(n for n in args.nodes.split(",") if n),
+        kpis=tuple(k for k in args.kpis.split(",") if k),
+    )
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    jpath, mpath = out / f"change-{record.pr}.json", out / f"change-{record.pr}.md"
+    export_json(jpath, payload)
+    export_markdown(mpath, payload)
+    print(f"wrote {jpath}")
+    print(f"wrote {mpath}")
+    return 0
+
+
+def _review_approve(argv: list[str]) -> int:
+    """T155-B: bind approval to base/candidate SHAs + hashes; write the change record."""
+    ap = argparse.ArgumentParser(prog="lgcov review approve")
+    ap.add_argument("--pr", type=int, required=True, help="pull request number")
+    ap.add_argument("--base-sha", required=True)
+    ap.add_argument("--candidate-sha", required=True)
+    ap.add_argument("--base-hash", required=True, help="content hash of the base side")
+    ap.add_argument("--candidate-hash", required=True, help="content hash of the candidate")
+    ap.add_argument("--approver", required=True)
+    ap.add_argument(
+        "--override",
+        action="store_true",
+        help="record risk acceptance; statistical verdict is unchanged",
+    )
+    ap.add_argument("--note", default="", help="risk-acceptance note when --override")
+    ap.add_argument("--verdict", default=None, help="statistical verdict to store unchanged")
+    ap.add_argument("--change-record", default="change-record.json", help="where to write")
+    args = ap.parse_args(argv)
+    path = Path(args.change_record)
+    if path.is_file():
+        record = load_change_record(path)
+    else:
+        record = ChangeRecord.new(
+            pr=args.pr, base_sha=args.base_sha, candidate_sha=args.candidate_sha
+        )
+    try:
+        approved = approve_bind(
+            record,
+            base_sha=args.base_sha,
+            candidate_sha=args.candidate_sha,
+            base_hash=args.base_hash,
+            candidate_hash=args.candidate_hash,
+            approver=args.approver,
+            override=args.override,
+            note=args.note,
+            statistical_verdict=args.verdict,
+        )
+    except (IllegalTransition, StaleApproval, ValueError) as exc:
+        print(f"lgcov review approve: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    save_change_record(path, approved)
+    print(f"Approved PR #{args.pr} as {args.approver}; wrote {path}")
+    if args.override:
+        print(
+            f"Risk acceptance recorded; statistical verdict stays {args.verdict!r}."
+            if args.verdict
+            else "Risk acceptance recorded; statistical verdict unchanged."
+        )
+    return 0
+
+
 def _review_cmd(argv: list[str]) -> int:
     """T102: override a judge's verdict on one case. The override is a label; when the
     human disagrees, the case is saved so the judge is re-checked on it on every PR; and
@@ -3335,6 +3473,8 @@ def _review_cmd(argv: list[str]) -> int:
         return _review_apply(argv[1:])
     if argv[:1] == ["commit"]:
         return _review_commit(argv[1:])
+    if argv[:1] == ["approve"]:  # T155-B
+        return _review_approve(argv[1:])
     if argv[:1] != ["override"]:
         print(_REVIEW_USAGE, file=sys.stderr)
         return EXIT_ERROR
@@ -4321,6 +4461,11 @@ def _command(argv: list[str]) -> int | None:
         return _calibrate_cmd(argv[1:])
     if argv[:1] == ["review"]:
         return _review_cmd(argv[1:])
+    if argv[:2] == ["change-record", "export"]:
+        return _change_record_export_cmd(argv[2:])
+    if argv[:1] == ["change-record"]:
+        print("lgcov change-record: takes export", file=sys.stderr)
+        return EXIT_ERROR
     if argv[:2] == ["round", "new"]:  # a gate round; every other `round` is a benchmark round
         return _round_new_cmd(argv[2:])
     if argv == ["round"]:
@@ -4463,7 +4608,9 @@ commands:
   judge             run the taxonomy's judges k times per case
   calibrate         compare each judge with human labels and set its band
   review override   override a judge's verdict on one case
+  review approve    bind adoption approval to base/candidate SHAs + hashes (T155)
   review reject     put cassette_dir back to the base's, undoing an accept
+  change-record export  write JSON+markdown evidence for a PR (T129)
   review fetch      read a review comment's command and its data (docs/review.md)
   review apply      run a fetched review command on the fetched files, with no token
   review commit     commit what review apply changed and reply on the PR

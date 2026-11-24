@@ -16,6 +16,17 @@
   Set `llm_model` and `llm_base_url` together in `lgcov.yaml`; key from `OPENAI_API_KEY`
   only (never logged). Nightly tier only (T089). Tests use fakes — no network.
 
+- **Adoption state machine (T155-A).** `AdoptionState`: eligible → approved →
+  baseline_updated → merged → deployed (distinct from `ProposeState`). Change-record stub
+  tracks history; approve-bind is T155-B.
+- **Approve bind (T155-B).** `lgcov review approve` binds approval to base/candidate SHAs
+  and content hashes. `--override` records risk acceptance only (statistical verdict
+  unchanged). Stale approvals are refused. `lgcov cassette accept --require-approval`
+  needs a fresh approval; advancing writes the change record.
+- **Change record export (T129).** `lgcov change-record export` writes JSON + markdown
+  (diff → nodes → KPIs → verdict → approver → state). Docs map to EU AI Act Art. 17(1)
+  and ISO/IEC 42001 8.1 as **evidence only**, never a compliance claim.
+  [docs/change-record.md](docs/change-record.md).
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
   per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,
