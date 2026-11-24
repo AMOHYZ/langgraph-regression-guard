@@ -4413,9 +4413,11 @@ def _round_cmd(argv: list[str]) -> int:
     """T119: a benchmark round: init writes a template, lock freezes it, check verifies it."""
     ap = argparse.ArgumentParser(
         prog="lgcov round",
-        description="A benchmark round, for `lgcov bench`: docs/benchmark-rounds.md.",
-        epilog="A gate round is a different thing, with its own file: lgcov round new and "
-        "lgcov guard, docs/round.md.",
+        description="A benchmark round (for `lgcov bench`), not a gate round: "
+        "docs/benchmark-rounds.md.",
+        epilog="Naming: 'round' means two things. This command is a benchmark round "
+        "(init/lock/check + exposure.jsonl). A gate round is lgcov round new + lgcov guard "
+        "(root lgcov-round.yaml + exposure.json); see docs/round.md.",
     )
     verbs = ap.add_subparsers(dest="verb", required=True)
     init = verbs.add_parser("init", help="write an unfrozen round to fill in")
@@ -4476,8 +4478,8 @@ def _command(argv: list[str]) -> int | None:
         return _round_new_cmd(argv[2:])
     if argv == ["round"]:
         print(
-            "lgcov round: takes init, lock or check for a benchmark round, or new for a gate "
-            "round (lgcov round new)",
+            "lgcov round: 'round' means two things — init/lock/check = benchmark round "
+            "(docs/benchmark-rounds.md); new = gate round (lgcov round new, docs/round.md)",
             file=sys.stderr,
         )
         return EXIT_ERROR
@@ -4624,11 +4626,11 @@ commands:
   taxonomy draft    draft failure modes and KPIs from traces, each pending review
   taxonomy approve  approve one drafted entry
   import langsmith  turn LangSmith dataset examples or --traces into lgcov cases
-  round init        write an unfrozen benchmark round to fill in
+  round init        write an unfrozen benchmark round to fill in (not a gate round)
   round lock        freeze a benchmark round and record its SHAs
   round check       exit 2 if a locked SHA moved or a case was already exposed
-  round new         lock a round: its cases, judge, margins and candidates
-  guard             exit 2 if the round moved or this commit isn't locked in it
+  round new         lock a gate round: its cases, judge, margins and candidates
+  guard             exit 2 if the gate round moved or this commit isn't locked in it
   propose           gate a proposal (--ref SHA, or --node ID --prompt FILE)
   pools check       exit 2 if optimiser and gate pools overlap or leak judge fit
   bench             score the root / propagated labels against hand-written ones

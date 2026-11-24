@@ -50,6 +50,12 @@ flowchart LR
 - An adoption path for each change: eligible → human approval → baseline update → merge →
   deploy.
 
+## Rounds (two meanings)
+
+A **gate round** locks cases/judge/margins/candidates for `lgcov guard` ([round.md](round.md)).
+A **benchmark round** locks what `lgcov bench` compares ([benchmark-rounds.md](benchmark-rounds.md)).
+Same word, different files — neither command family reads the other.
+
 ## Read next
 
 - [Why lgcov](why-us.md): the problem and how lgcov differs from related tools.

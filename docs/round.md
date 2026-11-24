@@ -1,16 +1,26 @@
-# Rounds
+# Gate rounds
 
-A gate run locks its two commits for that one run. A round fixes the plan across runs: which cases,
-which judge, which margins, and which commits may use the gate. `lgcov guard` exits 2 if any of that
-has moved, or if the commit isn't one the round locked. `exposure.json` records what has already
-seen each case, and outlives the round.
+A gate run locks its two commits for that one run. A **gate round** fixes the plan across runs:
+which cases, which judge, which margins, and which commits may use the gate. `lgcov guard` exits 2
+if any of that has moved, or if the commit isn't one the round locked. `exposure.json` records what
+has already seen each case, and outlives the round.
 
-**A gate round and a benchmark round are different things that share a word.** This page is about
-gate rounds: `lgcov round new` and `lgcov guard`, with `lgcov-round.yaml` and `exposure.json`.
-`lgcov round init`, `lock` and `check` work on a [benchmark round](benchmark-rounds.md), which fixes
-what `lgcov bench` compares and keeps its own `exposure.jsonl`. Neither command reads the other's
-files. Case pools (optimiser vs gate) and `lineage.json` are a third concern:
-[`lgcov pools check`](pools.md).
+## Naming: gate round vs benchmark round
+
+**The word "round" means two different things in this repo.** They share the `lgcov round …`
+verb prefix and often the filename `lgcov-round.yaml`, but they are not interchangeable:
+
+| | Gate round (this page) | Benchmark round |
+|---|---|---|
+| Purpose | Lock what `lgcov guard` / the gate may use across PRs | Lock what `lgcov bench` compares |
+| Commands | `lgcov round new`, `lgcov guard` | `lgcov round init`, `lock`, `check` |
+| Default path | `lgcov-round.yaml` at the **repo root** | Any path you choose (usually under `docs/benchmark/rounds/`) |
+| Ledger | `exposure.json` (JSON object) | `exposure.jsonl` next to the round file |
+| Docs | this page | [benchmark-rounds.md](benchmark-rounds.md) |
+
+Neither family of commands reads the other's files. Saying "the round" without "gate" or
+"benchmark" is ambiguous — prefer the full name. Case pools (optimiser vs gate) and
+`lineage.json` are a third concern: [`lgcov pools check`](pools.md).
 
 **`lgcov ci` and the Action don't call `lgcov guard` yet.** Until they do, a round holds only where
 you run the command yourself, and nothing records exposure on its own.
