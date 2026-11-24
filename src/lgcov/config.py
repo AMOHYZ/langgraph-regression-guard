@@ -86,6 +86,9 @@ class Config:
     jev_timeout_s: float = 10.0  # T195: seconds a Jev judge waits for each attempt
     llm_model: str | None = None  # T188: OpenAI-compatible model for judge: llm
     llm_base_url: str | None = None  # T188: base URL (…/v1); both or neither with llm_model
+    gate_judge_family: str | None = None  # T127: gate_judge.family
+    optimised_model_family: str | None = None  # T127: optimised_model.family
+
     group_by: tuple[str, ...] = ("node", "slice")  # T090: report.group_by
     langsmith: LangSmithConfig = field(default_factory=LangSmithConfig)  # T103
 
@@ -93,6 +96,7 @@ class Config:
 _KEYS = (
     "cassette_dir",
     "gate",
+    "gate_judge",
     "graph_entrypoint",
     "ignore_paths",
     "jev_model",
@@ -101,6 +105,7 @@ _KEYS = (
     "llm_base_url",
     "llm_model",
     "mask_volatile_in_key",
+    "optimised_model",
     "report",
     "samples_per_case",
     "taxonomy",  # alias for taxonomy_path
@@ -210,6 +215,18 @@ def _gate(raw: object) -> GateConfig:
     )
 
 
+def _family_block(raw: object, key: str) -> str | None:
+    """T127: gate_judge / optimised_model → optional family string."""
+    if raw is None or raw == {}:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"lgcov.yaml: '{key}' must be a mapping")
+    _check_keys(raw, ("family",), f"lgcov.yaml: {key}")
+    if "family" not in raw:
+        return None
+    return _str(raw["family"], f"{key}.family")
+
+
 def _group_by(raw: object) -> tuple[str, ...]:
     if not isinstance(raw, dict):
         raise ValueError("lgcov.yaml: 'report' must be a mapping")
@@ -296,6 +313,8 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         jev_timeout_s=_positive_seconds(d.get("jev_timeout_s", 10.0), "jev_timeout_s"),
         llm_model=llm_model,
         llm_base_url=llm_base_url,
+        gate_judge_family=_family_block(d.get("gate_judge"), "gate_judge"),
+        optimised_model_family=_family_block(d.get("optimised_model"), "optimised_model"),
         group_by=_group_by(d.get("report", {})),
         langsmith=_langsmith(d.get("langsmith", {})),
     )
