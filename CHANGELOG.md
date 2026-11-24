@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Pitch (T249).** README / why-us tagline and PyPI description: a CI gate a pull request can't grade itself; Early *which change did it*; claims stay inside docs/benchmark.md.
+- **Cumulative-loss pointer options (T234).** Docs note in `docs/round.md`: digest-only vs kept `path` copy vs git-history for the reference round (not built).
 - **Round naming (T236).** Docs and CLI help keep both names and spell out the split: a *gate
   round* (`lgcov round new` / `lgcov guard`, root `lgcov-round.yaml` + `exposure.json`) vs a
   *benchmark round* (`lgcov round init|lock|check`, path of your choice + `exposure.jsonl`). No
