@@ -127,6 +127,20 @@ it makes `lgcov guard` exit 2.
 that `lgcov guard` re-hashes. A key a round doesn't have is left out of its digest, so a round
 locked before `path` exists keeps its bytes and its digest when that key arrives.
 
+### Cumulative-loss pointer options (T234, not built)
+
+Nothing counts cumulative loss yet. When it does, the pointer above has to say *where* the
+reference round's bytes still live. Three options (docs only — pick later):
+
+| Option | What it stores | Pros | Cons |
+|---|---|---|---|
+| **Digest-only** (today) | `reference.round` + `digest` | Already locked; tiny | Bytes live only in git history; someone who edits `reference` then runs `lgcov round new` gets a valid file without re-checking the old round |
+| **Kept `path` copy** | Digest plus a path to a committed snapshot of the reference round | `lgcov guard` can re-hash the file; survives a rewrite of `lgcov-round.yaml` | Another file to protect (CODEOWNERS); rounds locked before `path` must omit it so digests stay stable |
+| **Git-history** | Digest + commit/SHA that held the reference round | No second file | Needs a checkout of that commit in CI; harder offline / shallow clones |
+
+Recommendation when implementing: prefer **kept `path` copy** for CI re-hash, keep digest-only
+as the minimum lock, and treat git-history as a recovery aid — not the sole source of truth.
+
 ## A round, start to finish
 
 A commit can't contain its own SHA, so the round goes on the base and names a candidate on a branch.
