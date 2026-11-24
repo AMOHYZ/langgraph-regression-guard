@@ -173,6 +173,7 @@ from lgcov.gate_round import (
     GateNow,
     JudgeLock,
     case_ids,
+    classify_ci_guard_problems,
     is_full_sha,
     parse_draft,
     prompt_hash,
@@ -2003,6 +2004,63 @@ def _env_pr() -> str:
     return pr_name(env.get("GITHUB_REPOSITORY", ""), env.get("GITHUB_REF", "")) or ""
 
 
+def _ci_guard_exit(args: argparse.Namespace) -> int | None:
+    """T235: run gate-round checks on the evaluate path. Never writes exposure.
+
+    None = no round configured (skip) or round holds. Otherwise the ci exit code (1 or 2).
+    Candidate phase does not call this. Standalone `lgcov guard` stays exit 0/2 only.
+    """
+    round_path = Path(_policy_path(args, _ROUND) if args.policy_dir else _ROUND)
+    if not round_path.is_file():
+        return None  # no round → exit unchanged
+    exposure_path = Path(_policy_path(args, _EXPOSURE) if args.policy_dir else _EXPOSURE)
+    if not exposure_path.is_file():
+        print(
+            f"lgcov ci: gate round present ({round_path}) but ledger missing: {exposure_path}",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    # PR edits to locked gate material (round / ledger) on the working tree → exit 1.
+    if args.policy_dir:
+        for rel in (_ROUND, _EXPOSURE):
+            base_f, here_f = Path(args.policy_dir) / rel, Path(rel)
+            if here_f.is_file() and base_f.is_file() and here_f.read_bytes() != base_f.read_bytes():
+                print(
+                    f"lgcov ci: PR changed locked gate material ({rel}); "
+                    "round check fails (exit 1).",
+                    file=sys.stderr,
+                )
+                return EXIT_NOT_DRIFTED
+    try:
+        ns = argparse.Namespace(
+            policy_dir=args.policy_dir,
+            config=getattr(args, "config", DEFAULT_CONFIG),
+            taxonomy=getattr(args, "taxonomy", None),
+            bands=getattr(args, "bands", _BANDS),
+            round=_ROUND,
+            exposure=_EXPOSURE,
+        )
+        locked = _read_round(str(round_path), parse_gate_round)
+        cases = locked.gate_cases_path
+        # Cases: PR checkout (edits can drift the case set); policy from base via ns.
+        now = _gate_now(ns, cases)
+        ledger = _read_ledger(str(exposure_path))
+    except (OSError, ValueError) as exc:
+        print(f"lgcov ci: gate round harness: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    candidate: str | None = _pr_head() or _head(".")
+    problems = round_problems(locked, now, candidate, entries(ledger))
+    code = classify_ci_guard_problems(problems)
+    if code is None:
+        return None
+    print(
+        f"lgcov ci: this run isn't covered by gate round {locked.round}:",
+        file=sys.stderr,
+    )
+    print("\n".join(f"- {p}" for p in problems), file=sys.stderr)
+    return EXIT_NOT_DRIFTED if code == 1 else EXIT_ERROR
+
+
 def _ci(argv: list[str]) -> int:
     """T078: one run for the GitHub Action: report file, step outputs, exit code."""
     ap = argparse.ArgumentParser(prog="lgcov ci")
@@ -2057,6 +2115,10 @@ def _ci(argv: list[str]) -> int:
     start = _commits(args.base_dir)  # T114: before anything is loaded
     if args.candidate_out:
         return _write_candidate(args, start)
+    # T235: evaluate / single-job only; never on the candidate half; never --record.
+    guarded = _ci_guard_exit(args)
+    if guarded is not None:
+        return guarded
     result = replace(
         _locked(_ci_result(args), start, args.base_dir),
         first_adoption=bootstrap,

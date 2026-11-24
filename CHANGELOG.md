@@ -9,6 +9,7 @@
 - **#163 speed runbook (T194).** `docs/benchmark-speed.md`: served vs `--live` estimate row + maintainer commands; not measured in this ladder.
 - **Real-PR metrics fill (T101-B).** `lgcov bench --fill-real-prs` offline-fills `### Metrics from results (offline)` from results JSON + yaml statuses (pending/reviewed → pending labels); hand narrative kept.
 - **Commit-first judge fakes (T157).** Taxonomy `mode: commit_first` + `reference`; `CommitFirstFakeJudge` + agreement records + A/A FP plumbing (offline). Paid A/A command documented in `docs/judge-commit-first.md` — **not run**.
+- **Guard into `lgcov ci` (T235).** Evaluate / single-job checks the base gate round (never `--record`). Digest / material → exit 1; unlocked-on-base / missing ledger → exit 2; no round → skip. Standalone `lgcov guard` stays 0/2.
 - **Round naming (T236).** Docs and CLI help keep both names and spell out the split: a *gate
   round* (`lgcov round new` / `lgcov guard`, root `lgcov-round.yaml` + `exposure.json`) vs a
   *benchmark round* (`lgcov round init|lock|check`, path of your choice + `exposure.jsonl`). No

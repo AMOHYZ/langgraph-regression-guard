@@ -22,8 +22,17 @@ Neither family of commands reads the other's files. Saying "the round" without "
 "benchmark" is ambiguous — prefer the full name. Case pools (optimiser vs gate) and
 `lineage.json` are a third concern: [`lgcov pools check`](pools.md).
 
-**`lgcov ci` and the Action don't call `lgcov guard` yet.** Until they do, a round holds only where
-you run the command yourself, and nothing records exposure on its own.
+**`lgcov ci` (evaluate / single-job) now checks the gate round on the base** (`--policy-dir`),
+without calling `--record` and without writing `exposure.json`. Mapping (T235):
+
+| Condition | `lgcov ci` exit | `lgcov guard` |
+|---|---|---|
+| No `lgcov-round.yaml` on the base | skip; exit unchanged | n/a |
+| Missing ledger, or round already unlocked on the base (candidate not locked) | **2** (setup) | **2** |
+| Digest mismatch, or locked gate material drifted / PR changed round or ledger | **1** | **2** (never 1) |
+| Clean | continue | **0** |
+
+The candidate job never runs this check. Standalone `lgcov guard` stays exit 0 or 2 only.
 
 **Proposal mode** is a separate command: [`lgcov propose`](propose.md) (`--ref` or
 `--node --prompt`). It never records exposure.
