@@ -8,6 +8,7 @@
 - **Criteria-drift loop (T196).** Spec one-pager: detect taxonomy/label criteria drift → recalibrate → band refresh → gate impact (`docs/criteria-drift.md`).
 - **#163 speed runbook (T194).** `docs/benchmark-speed.md`: served vs `--live` estimate row + maintainer commands; not measured in this ladder.
 - **Real-PR metrics fill (T101-B).** `lgcov bench --fill-real-prs` offline-fills `### Metrics from results (offline)` from results JSON + yaml statuses (pending/reviewed → pending labels); hand narrative kept.
+- **Commit-first judge fakes (T157).** Taxonomy `mode: commit_first` + `reference`; `CommitFirstFakeJudge` + agreement records + A/A FP plumbing (offline). Paid A/A command documented in `docs/judge-commit-first.md` — **not run**.
 - **Round naming (T236).** Docs and CLI help keep both names and spell out the split: a *gate
   round* (`lgcov round new` / `lgcov guard`, root `lgcov-round.yaml` + `exposure.json`) vs a
   *benchmark round* (`lgcov round init|lock|check`, path of your choice + `exposure.jsonl`). No

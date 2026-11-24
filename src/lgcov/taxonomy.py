@@ -56,6 +56,8 @@ class KPISpec:
     check: dict[str, object] | None = None  # judge: code (T072); may nest `when:` (T264)
     margin: float | None = None  # T091: non-inferiority margin δ; None = gate.margin
     tag: CheckTag | None = None  # T264: requirement vs format scoring slice
+    mode: str = ""  # T157: "" | "commit_first"
+    reference: dict[str, object] | None = None  # T157: independent reference for commit-first
 
     def to_kpi(self) -> KPI:
         return KPI(
@@ -162,6 +164,27 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
         if not isinstance(raw_tag, str) or raw_tag not in known:
             raise ValueError(f"{where}: unknown tag {raw_tag!r}, expected one of {CHECK_TAGS}")
         tag = known[raw_tag]
+    mode = ""
+    if "mode" in d:
+        mode = _str(d, "mode", where)
+        if mode not in ("commit_first",):
+            raise ValueError(f"{where}: unknown mode {mode!r}, expected commit_first")
+    reference = _mapping(d["reference"], "reference", where) if "reference" in d else None
+    if mode == "commit_first":
+        has_ref = bool(reference)
+        has_check = check is not None and any(
+            k != "fail_every" and k != "when_input_contains" for k in (check or {})
+        )
+        # Independent answer check: reference.key, or a non-fake code check.
+        if reference is not None and "key" not in reference and "path" not in reference:
+            raise ValueError(f"{where}: commit_first reference needs 'key' or 'path'")
+        if not has_ref and not has_check:
+            raise ValueError(
+                f"{where}: commit_first needs an independent reference or check "
+                "(neither a rubric alone nor a reference taken from the candidate)"
+            )
+    elif reference is not None:
+        raise ValueError(f"{where}: 'reference' is only valid with mode: commit_first")
     spec = KPISpec(
         name=name,
         failure_mode=failure_mode,
@@ -175,6 +198,8 @@ def _kpi_spec(raw: object, index: int, mode_ids: set[str]) -> KPISpec:
         check=(_normalize_check(check) if check is not None else None),
         margin=margin,
         tag=tag,
+        mode=mode,
+        reference=reference,
     )
     spec.to_kpi()  # KPI's own label/score checks, at load time rather than build time
     if judge == "code":
