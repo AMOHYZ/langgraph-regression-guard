@@ -1,7 +1,9 @@
-# Commit-first judge mode (spec, T157)
+# Commit-first judge mode (T157)
 
-**Status: spec only.** Nothing here is built. This file adds no prompt code, no taxonomy
-field and no paid run. It says what to build and how we would know it worked.
+**Status: fakes built; paid A/A not run.** Taxonomy may set `mode: commit_first` with an
+independent `reference: {key: …}` (or a non-fake `check:`). `CommitFirstFakeJudge` and A/A
+FP plumbing live in `src/lgcov/commit_first.py` (offline tests only). Live model two-step
+and the paid A/A measurement still need an explicit maintainer OK — do not run from agents.
 
 ## The idea
 
@@ -150,7 +152,24 @@ Each rate comes with its count and a 95% Wilson interval, the model, and the dat
 - **Offline first:** the two-step flow, the records and the report can be built and tested
   with a fake two-step judge and no network. That tests the plumbing and measures nothing.
 - **The real number needs a paid run,** which needs the maintainer's explicit OK each time and
-  is not part of this spec's PR.
+  is not part of this PR.
+
+### Paid A/A command (maintainer only — do not run in agents)
+
+Exact flags may grow; until a dedicated CLI lands, the measurement is: pin `jev_model`, use
+the demo taxonomy's reference-anchored KPI, same cases as base and PR, both arms, N fixed
+before the run (≈300 judgments/arm to bound FP≈0.01). Example shape:
+
+```bash
+# PAID — maintainer only; agent must not run
+uv run lgcov judge --taxonomy examples/demo_agent/taxonomy.yaml \
+  --mode commit_first --aa-pairs 300
+# Also run the one-step arm on the same pairs for contrast.
+# Budget: two model calls per commit-first judgment; stop if spend > your OK.
+```
+
+Zhou's 0.719→0.012 is **their** figure on Qwen3-4B / 128 cases — not lgcov's. One-step bands
+must not carry over to commit-first.
 
 Limits of this measurement:
 
