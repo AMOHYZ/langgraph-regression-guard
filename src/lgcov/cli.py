@@ -2024,11 +2024,7 @@ def _ci_guard_exit(args: argparse.Namespace) -> int | None:
     if args.policy_dir:
         for rel in (_ROUND, _EXPOSURE):
             base_f, here_f = Path(args.policy_dir) / rel, Path(rel)
-            if (
-                here_f.is_file()
-                and base_f.is_file()
-                and here_f.read_bytes() != base_f.read_bytes()
-            ):
+            if here_f.is_file() and base_f.is_file() and here_f.read_bytes() != base_f.read_bytes():
                 print(
                     f"lgcov ci: PR changed locked gate material ({rel}); "
                     "round check fails (exit 1).",
