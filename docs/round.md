@@ -15,6 +15,9 @@ files. Case pools (optimiser vs gate) and `lineage.json` are a third concern:
 **`lgcov ci` and the Action don't call `lgcov guard` yet.** Until they do, a round holds only where
 you run the command yourself, and nothing records exposure on its own.
 
+**Proposal mode** is a separate command: [`lgcov propose`](propose.md) (`--ref` or
+`--node --prompt`). It never records exposure.
+
 ## The round file
 
 You write these fields in `lgcov-round.yaml`:

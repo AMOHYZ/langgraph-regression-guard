@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from lgcov.drift_gate import FailOn, HarmStatus, drift_exit_code
+from lgcov.sampling import KpiStats
 from lgcov.verdict_actions import Action, CiStatus, Evidence, GateFindings, Mode, decide_action
 
 MARKER = "<!-- lgcov-report -->"  # T081: the comment upsert finds its own comment by this
@@ -119,6 +120,7 @@ class CiResult:
     approved_by: tuple[str, ...] = ()
     ci_status: CiStatus = ""
     cases_copy: str = ""  # T186: cases_copy's line, the report's last; "" for none
+    kpi_stats: tuple[KpiStats, ...] = ()  # T120: structured KPI rows for `lgcov propose`
 
     @property
     def action(self) -> Action:

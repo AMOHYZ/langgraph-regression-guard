@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -205,6 +206,16 @@ from lgcov.pools import (
     load_cases,
     parse_lineage,
     pools_paths_edited,
+)
+from lgcov.propose import (
+    RECORD_HINT,
+    ProposeNode,
+    ProposeReport,
+    apply_declared_prompt,
+    declared_prompt,
+    kpi_from_stats,
+    report_to_json,
+    resolve_state,
 )
 from lgcov.review import Changes, ReviewDecision, apply_decision, reject_changes, unwritable
 from lgcov.review_apply import (
@@ -1365,7 +1376,10 @@ def _run_candidate(args: argparse.Namespace, policy: _GatePolicy, budget: Budget
     budget.seconds = policy.budget
     try:
         # Exception: importing user graph code can raise anything.
-        graph = _load_graph(cfg.graph_entrypoint)
+        module_name = getattr(args, "graph_module", None)
+        graph = _load_graph(
+            cfg.graph_entrypoint, module_name if isinstance(module_name, str) else None
+        )
         head = snapshot_from_compiled(graph)
     except Exception as exc:
         msg = _harness_message("cannot load graph", exc) + _moved_graph(args, cfg)
@@ -1683,6 +1697,7 @@ def _evaluate(
         ),
         timing=replace(judged, total=run.seconds + perf_counter() - start),
         calibration_lines=(*changes, *_rejudge(saved, l2[0], l2[1])),
+        kpi_stats=tuple(stats),
     )
 
 
@@ -1843,7 +1858,9 @@ def _ci_gate(
             f"{args.max_calls}); lower samples_per_case or raise --max-calls"
         )
     gate = replace(cfg.gate, inconclusive_blocks=True) if args.fail_on_inconclusive else cfg.gate
-    return _l2_gate(plan, judges, k, gate, runs, replays, advisory, flagged), gate
+    k_gate_n = getattr(args, "k_gate_n", None)
+    k_gate_n = k_gate_n if isinstance(k_gate_n, int) else None
+    return _l2_gate(plan, judges, k, gate, runs, replays, advisory, flagged, k_gate_n), gate
 
 
 def _coverage_baseline(path: str | None) -> tuple[CoverageSnapshot | None, str]:
@@ -2289,6 +2306,7 @@ def _l2_gate(
     replays: list[tuple[list[Drift], list[Step]]],
     advisory: frozenset[str],
     flagged: frozenset[str] = frozenset(),
+    k_gate_n: int | None = None,
 ) -> list[KpiStats]:
     """T091: k samples per case on both sides, each case paired, then gated across KPIs."""
     run_roots = [_run_root(r, d) for r, (d, _) in zip(runs, replays, strict=True)]
@@ -2310,7 +2328,9 @@ def _l2_gate(
                 case_roots=roots,
             )
         )
-    return gate_kpis(stats, advisory, gate.alpha, flagged=flagged, power=gate.power)
+    return gate_kpis(
+        stats, advisory, gate.alpha, flagged=flagged, power=gate.power, k_gate_n=k_gate_n
+    )
 
 
 def _saved_pair(folder: Path) -> tuple[list[Cassette], list[tuple[list[Drift], list[Step]]]]:
@@ -2729,6 +2749,246 @@ def _guard_cmd(argv: list[str]) -> int:
             f"{cases} cases."
         )
     return 0
+
+
+def _propose_ci_args(**over: object) -> argparse.Namespace:
+    """A Namespace `_ci_result` will accept: proposal mode, not a GitHub Action run."""
+    ns = argparse.Namespace(
+        fail_on="root-drift",
+        harness_error=None,
+        live=False,
+        coverage_out=None,
+        coverage_baseline=None,
+        commit="",
+        max_calls=200,
+        fail_on_inconclusive=False,
+        on_divergence="flag",
+        budget_seconds=None,
+        tier=None,
+        nightly_url=None,
+        timing_out=None,
+        metrics_out=_METRICS,
+        pr="",
+        bands=_BANDS,
+        policy_dir=None,
+        result_out=None,
+        mode="enforcing",
+        approved_by="",
+        ci_status="",
+        candidate_out=None,
+        candidate_in=None,
+        report="report.md",
+        github_output=None,
+        config=DEFAULT_CONFIG,
+        graph=None,
+        cassette_dir=None,
+        taxonomy=None,
+        base_dir=None,
+        k_gate_n=None,
+        graph_module=None,
+    )
+    for key, value in over.items():
+        setattr(ns, key, value)
+    return ns
+
+
+def _materialize_sha(sha: str, dest: Path) -> None:
+    raw = subprocess.run(["git", "archive", sha], check=True, capture_output=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+        archive.extractall(dest, filter="data")
+
+
+def _propose_cmd(argv: list[str]) -> int:
+    """T120: gate a proposal. `--ref` XOR `--node --prompt`. Never records exposure."""
+    ap = argparse.ArgumentParser(prog="lgcov propose")
+    _round_args(ap)
+    ap.add_argument("--policy-dir", help="checkout of the base: round, exposure, policy")
+    ap.add_argument("--ref", type=_candidate_arg, help="locked candidate SHA to gate")
+    ap.add_argument("--node", help="node id to overlay a prompt onto")
+    ap.add_argument("--prompt", help="file whose contents replace that node's declared prompt")
+    ap.add_argument(
+        "--optimiser-proposal",
+        action="store_true",
+        help="K_gate=1 and print every KPI row (audit list); still GATE cases only",
+    )
+    ap.add_argument("--fail-on", type=_fail_on_arg, default="root-drift", help="exit 1 on")
+    ap.add_argument("--fail-on-inconclusive", action="store_true", help=_INCONCLUSIVE_HELP)
+    ap.add_argument("--graph", help="<file.py>:<attr>; overrides graph_entrypoint")
+    ap.add_argument("--cassette-dir", help="overrides cassette_dir")
+    args = ap.parse_args(argv)
+    overlay = bool(args.node or args.prompt)
+    if bool(args.ref) == overlay:
+        ap.error("pass exactly one of --ref SHA, or --node ID --prompt FILE")
+    if overlay and not (args.node and args.prompt):
+        ap.error("--node and --prompt must be passed together")
+    try:
+        locked = _read_round(_policy_path(args, args.round), parse_gate_round)
+        now = _gate_now(args, locked.gate_cases_path)
+        ledger = _read_ledger(_policy_path(args, args.exposure))
+    except (OSError, ValueError) as exc:
+        print(f"lgcov propose: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    candidate = args.ref or _head(".")
+    problems = round_problems(locked, now, candidate, entries(ledger))
+    if args.ref and problems:
+        print(
+            f"lgcov propose: this run isn't covered by round {locked.round}:",
+            file=sys.stderr,
+        )
+        print("\n".join(f"- {p}" for p in problems), file=sys.stderr)
+        return EXIT_ERROR
+    if overlay:
+        # Overlay is never a locked candidate; still require the round's plan to hold.
+        plan_problems = [
+            p
+            for p in round_problems(locked, now, locked.candidates[0], entries(ledger))
+            if "candidate" not in p
+        ]
+        if plan_problems:
+            print(
+                f"lgcov propose: this run isn't covered by round {locked.round}:",
+                file=sys.stderr,
+            )
+            print("\n".join(f"- {p}" for p in plan_problems), file=sys.stderr)
+            return EXIT_ERROR
+    print(RECORD_HINT, file=sys.stderr)
+    tmp_holder: tempfile.TemporaryDirectory[str] | None = None
+    graph_override = args.graph
+    graph_module: str | None = None
+    try:
+        cfg_path = _policy_path(args, args.config)
+        cfg = load_config(
+            cfg_path, {"graph_entrypoint": args.graph, "cassette_dir": args.cassette_dir}
+        )
+        entry = cfg.graph_entrypoint
+        file_path, _, attr = entry.rpartition(":")
+        if args.ref:
+            here = _head(".")
+            if args.ref != here:
+                tmp_holder = tempfile.TemporaryDirectory(prefix="lgcov-propose-")
+                dest = Path(tmp_holder.name)
+                _materialize_sha(args.ref, dest)
+                file_path = str(dest / file_path)
+                graph_override = f"{file_path}:{attr}"
+                graph_module = "lgcov_propose_ref"
+        elif overlay:
+            graph = _load_graph(entry, "lgcov_propose_base")
+            recording_path = Path(cfg.cassette_dir) / "baseline.json"
+            parts = None
+            if recording_path.is_file():
+                parts = recording_from_json(recording_path.read_text(encoding="utf-8")).parts
+            found = declared_prompt(graph, args.node, parts)
+            if found is None:
+                report = ProposeReport(
+                    kpis=(),
+                    nodes=(),
+                    state="unsupported",
+                    reasons=(f"node {args.node} has no declared prompt",),
+                    exposure_recorded=False,
+                    k_gate=now.k_gate,
+                )
+                print(report_to_json(report), end="")
+                return 0
+            new_prompt = Path(args.prompt).read_text(encoding="utf-8")
+            source = Path(file_path).read_text(encoding="utf-8")
+            try:
+                rewritten = apply_declared_prompt(source, found, new_prompt)
+            except ValueError:
+                report = ProposeReport(
+                    kpis=(),
+                    nodes=(),
+                    state="unsupported",
+                    reasons=(f"node {args.node} has no declared prompt",),
+                    exposure_recorded=False,
+                    k_gate=now.k_gate,
+                )
+                print(report_to_json(report), end="")
+                return 0
+            tmp_holder = tempfile.TemporaryDirectory(prefix="lgcov-propose-")
+            dest = Path(tmp_holder.name) / Path(file_path).name
+            dest.write_text(rewritten, encoding="utf-8")
+            graph_override = f"{dest}:{attr}"
+            graph_module = "lgcov_propose_overlay"
+        ci_args = _propose_ci_args(
+            fail_on=args.fail_on,
+            fail_on_inconclusive=args.fail_on_inconclusive,
+            config=args.config,
+            taxonomy=args.taxonomy or cfg.taxonomy_path,
+            bands=args.bands,
+            policy_dir=args.policy_dir,
+            graph=graph_override,
+            cassette_dir=args.cassette_dir or cfg.cassette_dir,
+            k_gate_n=1 if args.optimiser_proposal else None,
+            graph_module=graph_module,
+        )
+        result = _ci_result(ci_args)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        print(f"lgcov propose: {exc}", file=sys.stderr)
+        if tmp_holder is not None:
+            tmp_holder.cleanup()
+        return EXIT_ERROR
+    try:
+        taxonomy_path = args.taxonomy or cfg.taxonomy_path
+        specs = (
+            list(load_taxonomy(_policy_path(args, taxonomy_path)).kpi_specs)
+            if taxonomy_path
+            else []
+        )
+        kinds = {s.name: s.judge for s in specs}
+        kpis = tuple(
+            kpi_from_stats(
+                s,
+                kinds.get(s.kpi, "code"),
+                uncalibrated=kinds.get(s.kpi, "code") != "code" and not s.blocking,
+            )
+            for s in result.kpi_stats
+        )
+        nodes = tuple(ProposeNode(n, "root") for n in result.root_drift) + tuple(
+            ProposeNode(n, "propagated") for n in result.propagated_drift
+        )
+        kpi_block = any(k.verdict == "BLOCK" for k in kpis)
+        statistical = result.gate.statistical
+        if kpi_block and statistical != "BLOCK":
+            statistical = "BLOCK"
+        if not kpi_block and statistical == "BLOCK":
+            statistical = "INCONCLUSIVE"
+        pools_edited = _pools_edited(ci_args)
+        state, reasons = resolve_state(
+            statistical=statistical,
+            drift_roots=result.root_drift,
+            overlay=overlay,
+            locked=bool(args.ref) and not problems,
+            pools_edited=pools_edited,
+            unsupported=result.unsupported,
+            infra=result.harness_error,
+            fail_on=args.fail_on,
+            kpi_block=kpi_block,
+        )
+        k_gate_value = 1 if args.optimiser_proposal else max(result.gate.k_gate, now.k_gate, 1)
+        report = ProposeReport(
+            kpis=kpis,
+            nodes=nodes,
+            state=state,
+            reasons=reasons,
+            exposure_recorded=False,
+            k_gate=k_gate_value,
+        )
+        if args.optimiser_proposal and result.kpi_stats:
+            print(
+                "\n".join(render_gate_table(list(result.kpi_stats))),
+                file=sys.stderr,
+            )
+        print(report_to_json(report), end="")
+        if state == "infra":
+            return EXIT_ERROR
+        if state == "blocked":
+            return 1
+        if state == "needs_human" and args.fail_on_inconclusive:
+            return 1
+        return 0
+    finally:
+        if tmp_holder is not None:
+            tmp_holder.cleanup()
 
 
 def _plain_files(root: Path) -> dict[str, bytes]:
@@ -4032,6 +4292,8 @@ def _command(argv: list[str]) -> int | None:
         return _cassette_accept(argv[1:])
     if argv[:1] == ["guard"]:
         return _guard_cmd(argv[1:])
+    if argv[:1] == ["propose"]:
+        return _propose_cmd(argv[1:])
     if argv[:2] == ["pools", "check"]:
         return _pools_check_cmd(argv[2:])
     if argv[:1] == ["pools"]:
@@ -4149,6 +4411,7 @@ commands:
   round check       exit 2 if a locked SHA moved or a case was already exposed
   round new         lock a round: its cases, judge, margins and candidates
   guard             exit 2 if the round moved or this commit isn't locked in it
+  propose           gate a proposal (--ref SHA, or --node ID --prompt FILE)
   pools check       exit 2 if optimiser and gate pools overlap or leak judge fit
   bench             score the root / propagated labels against hand-written ones
   metrics summary   summarize per-PR records: overridden blocks, label burden, cost, time

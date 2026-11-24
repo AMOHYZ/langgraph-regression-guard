@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
+  `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
+  per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,
+  diagnostic `q = N/N*` (not Holm p), and Holm `p_adj`; per-node `root`/`propagated`;
+  `state` eligible | blocked | needs_human | infra | unsupported; `reasons[]` naming the
+  rule; `exposure_recorded` always `false` (stderr tells you to run `lgcov guard --record`).
+  Exit 0 eligible / default needs_human, 1 blocked, 2 round/pool harness or unlocked `--ref`.
+  `--fail-on-inconclusive` makes needs_human exit 1. Overlay is never eligible (reason
+  **candidate not locked**); a node with no declared prompt is `unsupported` (no body scrape:
+  recording/live parts named `*.prompt` / `*.system_prompt`, else a `system_prompt`/`prompt`
+  attribute on the node). INCONCLUSIVE is needs_human, never eligible. `--optimiser-proposal`
+  sets K_gate=1 and prints every KPI row; optimiser-pool cases are never judged. FakeJudge
+  and uncalibrated judges never BLOCK. `lgcov guard` is unchanged. [docs/propose.md](docs/propose.md).
 - **Score by taxonomy tag (T264).** Synthetic content KPIs carry a first-class `tag:`
   (`requirement` or `format`; comments kept). `harm_for_roots(..., only_tag=)` and the
   synthetic / held-out bench report enforced-root false flags, measured recall, and

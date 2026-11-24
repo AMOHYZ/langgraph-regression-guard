@@ -55,6 +55,8 @@ flowchart LR
 - [Why lgcov](why-us.md): the problem and how lgcov differs from related tools.
 - [Taxonomy](taxonomy.md): the `taxonomy.yaml` format and how KPIs map to judges.
 - [Quickstart](../README.md#quickstart): record a baseline and gate your first PR.
+- [`lgcov propose`](propose.md): gate a local `--ref` or prompt overlay (T120). JSON schema:
+  [guard-schema.json](guard-schema.json).
 
 ## A question for you
 
