@@ -16,7 +16,12 @@ tree.
 | `cases/gate/` | Cases used only for gating. |
 | `calibration/labels/` | Human / judge label rows for banding (unchanged). |
 
-Each case file is a JSON object with `id` and `text` (the input text only).
+Each case file is a JSON object with `id` and `text` (the input text only). Optional
+T123 fields: `control: true` marks an immutable negative control and requires a non-empty
+`immutability_rationale`. Controls are excluded from pass-rate denominators. A control
+that passes is `needs_human` with reason `control_passed` (v0; BLOCK comes later).
+`lgcov pools check` refuses a control with no rationale, or with a recorded human-labelled
+pass (hard-but-solvable is not allowed in v0).
 
 ## `lineage.json`
 

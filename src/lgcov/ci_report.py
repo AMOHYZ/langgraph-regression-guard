@@ -125,6 +125,8 @@ class CiResult:
     same_property_divergence: str = ""
     structural_divergence_note: str = ""
     format_length_drift: str = ""  # T126: length drift + judge-only gains → needs_human
+    control_passed: str = ""  # T123: negative control passed → needs_human
+    control_audit: bool = False  # T123: audit flag
 
     @property
     def action(self) -> Action:
@@ -174,6 +176,8 @@ class CiResult:
                 same_property_divergence=self.same_property_divergence,
                 structural_divergence_note=self.structural_divergence_note,
                 format_length_drift=self.format_length_drift,
+                control_passed=self.control_passed,
+                control_audit=self.control_audit,
                 inconclusive_blocks=self.inconclusive_blocks,
                 mode=self.mode,
                 approved_by=self.approved_by,

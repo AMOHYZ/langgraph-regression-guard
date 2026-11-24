@@ -34,6 +34,8 @@ class CaseRecord:
     id: str
     text: str  # input text only; used for near-exact duplicate detection
     pool: str  # optimiser | gate
+    control: bool = False  # T123: immutable negative control
+    immutability_rationale: str = ""  # required when control is true
 
 
 @dataclass(frozen=True)
@@ -57,12 +59,16 @@ def check_pools(
     cases: Sequence[CaseRecord],
     lineage: Mapping[str, LineageEntry],
     current_judge: JudgeLock | None,
+    *,
+    human_pass_case_ids: frozenset[str] | None = None,
 ) -> list[str]:
     """Every problem that stops the pools being clean; empty when nothing does.
 
     (a) same case id in two pools
     (b) a gate case the current judge was fitted on (no locked round → cannot check)
     (c) two case ids sharing a normalised-text hash (exact / near-exact, not paraphrase)
+    (d) T123: control with no immutability_rationale
+    (e) T123: control with a recorded human-labelled pass (hard-but-solvable; refuse for v0)
     """
     problems: list[str] = []
     by_id: dict[str, list[str]] = {}
@@ -100,7 +106,31 @@ def check_pools(
             problems.append(
                 f"cases {unique[0]} and {unique[1]} share normalised text hash {digest}"
             )
+
+    human_passes = human_pass_case_ids or frozenset()
+    for case in cases:
+        if not case.control:
+            continue
+        if not case.immutability_rationale.strip():
+            problems.append(
+                f"case {case.id}: control: true requires a non-empty immutability_rationale"
+            )
+        if case.id in human_passes:
+            problems.append(
+                f"case {case.id}: control has a recorded human-labelled pass "
+                f"(hard-but-solvable controls are refused in v0)"
+            )
     return problems
+
+
+def pass_rate_excluding_controls(
+    cases: Sequence[CaseRecord], passed_ids: frozenset[str]
+) -> tuple[int, int]:
+    """(passed, total) over non-control cases only — controls stay out of the denominator."""
+    eligible = [c for c in cases if not c.control]
+    total = len(eligible)
+    passed = sum(1 for c in eligible if c.id in passed_ids)
+    return passed, total
 
 
 def parse_lineage(text: str) -> dict[str, LineageEntry]:
@@ -139,7 +169,7 @@ def lineage_to_json(lineage: Mapping[str, LineageEntry]) -> str:
     return json.dumps({"version": VERSION, "cases": cases}, indent=2, sort_keys=True) + "\n"
 
 
-def _case_text(raw: object, where: str) -> tuple[str, str]:
+def _case_fields(raw: object, where: str) -> CaseRecord:
     if not isinstance(raw, dict):
         raise ValueError(f"{where}: needs a JSON object with id and text")
     case_id, text = raw.get("id"), raw.get("text")
@@ -147,7 +177,16 @@ def _case_text(raw: object, where: str) -> tuple[str, str]:
         raise ValueError(f"{where}: needs a non-empty string 'id'")
     if not isinstance(text, str):
         raise ValueError(f"{where}: needs a string 'text' (input text only)")
-    return case_id, text
+    control = raw.get("control", False)
+    if not isinstance(control, bool):
+        raise ValueError(f"{where}: 'control' must be a boolean when set")
+    rationale = raw.get("immutability_rationale", "")
+    if rationale is None:
+        rationale = ""
+    if not isinstance(rationale, str):
+        raise ValueError(f"{where}: 'immutability_rationale' must be a string when set")
+    # pool filled by caller
+    return CaseRecord(case_id, text, "", control=control, immutability_rationale=rationale)
 
 
 def load_pool_dir(path: Path, pool: str) -> list[CaseRecord]:
@@ -157,10 +196,18 @@ def load_pool_dir(path: Path, pool: str) -> list[CaseRecord]:
     cases: list[CaseRecord] = []
     for file in sorted(path.glob("*.json")):
         try:
-            case_id, text = _case_text(json.loads(file.read_text(encoding="utf-8")), str(file))
+            partial = _case_fields(json.loads(file.read_text(encoding="utf-8")), str(file))
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError(f"{file}: {exc}") from None
-        cases.append(CaseRecord(case_id, text, pool))
+        cases.append(
+            CaseRecord(
+                partial.id,
+                partial.text,
+                pool,
+                control=partial.control,
+                immutability_rationale=partial.immutability_rationale,
+            )
+        )
     return cases
 
 
