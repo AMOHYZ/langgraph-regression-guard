@@ -1,0 +1,23 @@
+# Demo copy of the README one-job Action snippet (T183).
+# Concurrency cancels an in-flight run when the same PR pushes again.
+name: lgcov
+on:
+  # Not pull_request_target: the Action runs your PR's own graph code.
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: lgcov-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+jobs:
+  lgcov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: AMOHYZ/langgraph-regression-guard@v0.6.0
+        with:
+          fail-on: root-drift
