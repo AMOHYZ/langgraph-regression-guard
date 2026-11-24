@@ -97,6 +97,11 @@ _ROWS: dict[str, tuple[str, str]] = {
         "Same-property checks diverged beyond MDE ({divergence}). Decide yourself; divergence "
         "alone never fails the check.",
     ),
+    "format_length_drift": (
+        _NO_DECISION,
+        "Format/length drifted with judge-only gains ({drift}). Decide yourself; length drift "
+        "alone never fails the check.",
+    ),
     "drift_not_enforced": (
         _NO_DECISION,
         "Read the drift table and decide. `fail-on: never` means lgcov won't fail this check on "
@@ -151,6 +156,10 @@ _UNDECIDED = {  # each state a human decides, and what its exit 0 means
     ),
     "same_property_divergence": (
         "This check exits 0 because same-property divergence alone never fails. That is not a pass."
+    ),
+    "format_length_drift": (
+        "This check exits 0 because format/length drift with judge-only gains alone never fails. "
+        "That is not a pass."
     ),
     "drift_not_enforced": (
         "This check exits 0 because `fail-on: never` does not block on drift. That is not a pass."
@@ -240,6 +249,7 @@ class Evidence:
     unmeasured_drift: bool = False  # T262: roots no KPI/check covers, under fail-on: harmed-root
     same_property_divergence: str = ""  # T122: same-property |Δ| > MDE reason → needs_human
     structural_divergence_note: str = ""  # T122: investigate note in PR comment only
+    format_length_drift: str = ""  # T126: length drift + judge-only gains → needs_human
     inconclusive_blocks: bool = False  # the switch: an undecided run fails the check
     mode: Mode = "enforcing"
     approved_by: tuple[str, ...] = ()  # recorded only
@@ -298,6 +308,8 @@ def _state(e: Evidence) -> str:
         return "unmeasured_root"
     if e.same_property_divergence:  # T122: beyond MDE → needs_human, never exit 1 alone
         return "same_property_divergence"
+    if e.format_length_drift:  # T126: length + judge-only gains → needs_human, never exit 1 alone
+        return "format_length_drift"
     if e.statistical is None and e.unenforced_drift:
         return "drift_not_enforced"
     if e.statistical is None and e.advisory_drops:
@@ -353,6 +365,7 @@ def decide_action(e: Evidence) -> Action:
         "dropped": _code(e.advisory_drops),
         "unsupported": "; ".join(e.unsupported),
         "divergence": e.same_property_divergence,
+        "drift": e.format_length_drift,
         "blocking": f"{e.k_gate} blocking KPI{'' if e.k_gate == 1 else 's'}",
     }
     headline, step = (text.format(**fill) for text in _ROWS[state])

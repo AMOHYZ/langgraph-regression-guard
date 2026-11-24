@@ -42,21 +42,22 @@ The first matching row wins. "The switch" is `fail-on-inconclusive` or
 | 14 | `unsupported` | Attribution isn't safe (T133): occurrence pairing mismatch, missing/untrusted graph shape, rename-like add+delete, reducer/schema mis-label, add_messages id duplication, checkpointer, interrupt, parallel `InvalidUpdateError`, or Store-on-serve | ⚠️ No decision: needs_human | lgcov can't attribute this change safely: <reason>. Decide yourself; this is not a pass or a fail of the agent. | 0 | 0 | `needs_human` |
 | 15 | `unmeasured_root` | Drift root(s) no **observing** KPI/code check covers, under `fail-on: harmed-root` (even with a SHIP). Presence-only or upstream-only checks do not measure; the comment names why. | ⚠️ No decision: needs_human | Read the unmeasured root(s) and decide, or add a KPI/code check that observes their output or something downstream. `fail-on: harmed-root` never treats unmeasured drift as a pass. | 0 | 0 | `needs_human` |
 | 16 | `same_property_divergence` | Same-property branch scores diverge beyond MDE (`checks_same_property: true`) (T122) | ⚠️ No decision: needs_human | Same-property checks diverged beyond MDE (<divergence>). Decide yourself; divergence alone never fails the check. | 0 | 0 | `needs_human` |
-| 17 | `drift_not_enforced` | Drift, `fail-on: never`, no statistical verdict | ⚠️ No decision: needs_human | Read the drift table and decide. `fail-on: never` means lgcov won't fail this check on drift. | 0 | 0 | `needs_human` |
-| 18 | `advisory_drop_only` | No statistical verdict, and an advisory KPI dropped | ⚠️ No decision: needs_human | `<kpi>` dropped, but no KPI here can block yet. Decide yourself; `lgcov calibrate` is what lets its judge block. | 0 | 0 | `needs_human` |
-| 19 | `ship_advisory_drop` | SHIP, and an advisory KPI dropped | ⚠️ lgcov: SHIP (N blocking KPIs), advisory drop in `<kpi>` | Look at `<kpi>`: it dropped, but its judge is advisory and can't block this PR. | 0 | 0 | `pass` |
-| 20 | `nothing_ran` | Every node was served, so nothing re-ran; SHIP or no statistical verdict | 🟢 lgcov: every node served, nothing re-ran | Review as usual. lgcov measured nothing here: every node's code and masked input match the recording, so it was served. A change that reaches only a masked value, such as a run id or a message's usage, or a Store isn't seen. | 0 | 0 | `pass` |
-| 21 | `ship` | SHIP | 🟢 lgcov: SHIP (N blocking KPIs) | Review as usual. SHIP covers these KPIs on the recorded cases, nothing else. | 0 | 0 | `pass` |
-| 22 | `no_drift_no_kpi` | No drift, and no blocking KPI judged | 🟢 lgcov: no drift (no blocking KPI judged) | Review as usual. lgcov compared the recorded runs; it judged no KPI that can block. | 0 | 0 | `pass` |
+| 17 | `format_length_drift` | Response length drift (≥ +60%) **and** judge-only gains (T126) | ⚠️ No decision: needs_human | Format/length drifted with judge-only gains (<drift>). Decide yourself; length drift alone never fails the check. | 0 | 0 | `needs_human` |
+| 18 | `drift_not_enforced` | Drift, `fail-on: never`, no statistical verdict | ⚠️ No decision: needs_human | Read the drift table and decide. `fail-on: never` means lgcov won't fail this check on drift. | 0 | 0 | `needs_human` |
+| 19 | `advisory_drop_only` | No statistical verdict, and an advisory KPI dropped | ⚠️ No decision: needs_human | `<kpi>` dropped, but no KPI here can block yet. Decide yourself; `lgcov calibrate` is what lets its judge block. | 0 | 0 | `needs_human` |
+| 20 | `ship_advisory_drop` | SHIP, and an advisory KPI dropped | ⚠️ lgcov: SHIP (N blocking KPIs), advisory drop in `<kpi>` | Look at `<kpi>`: it dropped, but its judge is advisory and can't block this PR. | 0 | 0 | `pass` |
+| 21 | `nothing_ran` | Every node was served, so nothing re-ran; SHIP or no statistical verdict | 🟢 lgcov: every node served, nothing re-ran | Review as usual. lgcov measured nothing here: every node's code and masked input match the recording, so it was served. A change that reaches only a masked value, such as a run id or a message's usage, or a Store isn't seen. | 0 | 0 | `pass` |
+| 22 | `ship` | SHIP | 🟢 lgcov: SHIP (N blocking KPIs) | Review as usual. SHIP covers these KPIs on the recorded cases, nothing else. | 0 | 0 | `pass` |
+| 23 | `no_drift_no_kpi` | No drift, and no blocking KPI judged | 🟢 lgcov: no drift (no blocking KPI judged) | Review as usual. lgcov compared the recorded runs; it judged no KPI that can block. | 0 | 0 | `pass` |
 
 Under `fail-on: harmed-root`, roots whose covering checks ran and none failed (`no harm
-seen`) also land on row 22: that mode does not fail on them (pass / exit 0). Unmeasured
+seen`) also land on row 23: that mode does not fail on them (pass / exit 0). Unmeasured
 roots use row 15 instead. Structural divergence (T122) adds an investigate note to the
 comment only and changes no row.
 
 A run this PR removes from its cassettes gets a note naming it, and changes no row. Rows 4 and 5
 block on one case, with no false-alarm bound; [gate.md](gate.md) says why and how to
-opt out. Row 20 names what serving can miss, and [the replay audit](validation/replay-audit.md) has
+opt out. Row 21 names what serving can miss, and [the replay audit](validation/replay-audit.md) has
 the detail.
 
 ## What changes a row, and what doesn't

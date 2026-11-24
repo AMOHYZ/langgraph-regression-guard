@@ -124,6 +124,7 @@ class CiResult:
     # T122: same-property |Δ| > MDE → needs_human; structural = investigate note only
     same_property_divergence: str = ""
     structural_divergence_note: str = ""
+    format_length_drift: str = ""  # T126: length drift + judge-only gains → needs_human
 
     @property
     def action(self) -> Action:
@@ -172,6 +173,7 @@ class CiResult:
                 unmeasured_drift=needs_human_unmeasured,
                 same_property_divergence=self.same_property_divergence,
                 structural_divergence_note=self.structural_divergence_note,
+                format_length_drift=self.format_length_drift,
                 inconclusive_blocks=self.inconclusive_blocks,
                 mode=self.mode,
                 approved_by=self.approved_by,
