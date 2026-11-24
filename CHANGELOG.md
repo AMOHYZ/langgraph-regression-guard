@@ -6,6 +6,7 @@
   round* (`lgcov round new` / `lgcov guard`, root `lgcov-round.yaml` + `exposure.json`) vs a
   *benchmark round* (`lgcov round init|lock|check`, path of your choice + `exposure.jsonl`). No
   rename.
+- **Action concurrency (T183).** README one-job and two-job snippets, plus `examples/demo_agent/.github/workflows/lgcov.yml`, use `concurrency.group: lgcov-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: true`.
 - **`lgcov import langsmith --traces` (T198).** Import recent LangSmith root runs as
   lgcov cases (read-only; `LANGSMITH_API_KEY` from env only, never printed). Optional
   `--project` / `--limit`. Live smoke writes under `.lgcov-langsmith-traces/` (gitignored).

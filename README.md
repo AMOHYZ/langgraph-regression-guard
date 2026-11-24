@@ -274,6 +274,9 @@ on:
   pull_request:
   push:
     branches: [main]  # main's runs record the coverage baseline PRs compare against
+concurrency:
+  group: lgcov-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
   pull-requests: write
@@ -397,6 +400,9 @@ on:
   pull_request:
   push:
     branches: [main]
+concurrency:
+  group: lgcov-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   lgcov-candidate:
     runs-on: ubuntu-latest
