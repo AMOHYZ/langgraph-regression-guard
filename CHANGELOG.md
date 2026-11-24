@@ -15,6 +15,10 @@
 - **Adoption state machine (T155-A).** `AdoptionState`: eligible → approved →
   baseline_updated → merged → deployed (distinct from `ProposeState`). Change-record stub
   tracks history; approve-bind is T155-B.
+- **Approve bind (T155-B).** `lgcov review approve` binds approval to base/candidate SHAs
+  and content hashes. `--override` records risk acceptance only (statistical verdict
+  unchanged). Stale approvals are refused. `lgcov cassette accept --require-approval`
+  needs a fresh approval; advancing writes the change record.
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
   per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,
