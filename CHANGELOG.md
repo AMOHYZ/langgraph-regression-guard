@@ -11,6 +11,10 @@
   `researcher_uses_think_tool`). If the named node was not recorded (e.g. subgraph-only), the
   check is unmeasured for that case — never a silent pass. `tool_sequence` remains whole-run
   and still warns.
+- **LLM judge client v0 (T188).** `judge: llm` KPIs use an OpenAI-compatible
+  `/chat/completions` client (`LlmJudge`) that returns the same typed `Verdict` as Jev.
+  Set `llm_model` and `llm_base_url` together in `lgcov.yaml`; key from `OPENAI_API_KEY`
+  only (never logged). Nightly tier only (T089). Tests use fakes — no network.
 
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):

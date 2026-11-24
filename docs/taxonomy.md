@@ -57,7 +57,8 @@ loads). When scoring by tag (`harm_for_roots(..., only_tag=)` / `lgcov bench --s
   `when: {input_contains: ...}` skips the check for non-matching run inputs (out of scope —
   not a pass). A `jev` judge calls the Jev service (`JEV_API_URL`, `JEV_API_KEY`); `fake` is
   the offline stand-in and **never measures** a root (T264); `llm` runs in the nightly tier
-  only (T089).
+  only (T089) via an OpenAI-compatible client (`llm_model` + `llm_base_url` in lgcov.yaml,
+  `OPENAI_API_KEY`; T188).
 - Optional `tag` must be `requirement` or `format` (T264). Omitted means the KPI is not
   part of a tag slice (overall scoring still includes it).
 - Bands (T063): code judges always block: a check that passed on the base and fails on the PR

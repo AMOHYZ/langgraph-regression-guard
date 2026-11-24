@@ -84,6 +84,8 @@ class Config:
     tier: Tier = "pr"
     jev_model: str | None = None  # T063: the Jev model judges use; labels are only good for it
     jev_timeout_s: float = 10.0  # T195: seconds a Jev judge waits for each attempt
+    llm_model: str | None = None  # T188: OpenAI-compatible model for judge: llm
+    llm_base_url: str | None = None  # T188: base URL (…/v1); both or neither with llm_model
     group_by: tuple[str, ...] = ("node", "slice")  # T090: report.group_by
     langsmith: LangSmithConfig = field(default_factory=LangSmithConfig)  # T103
 
@@ -96,6 +98,8 @@ _KEYS = (
     "jev_model",
     "jev_timeout_s",
     "langsmith",
+    "llm_base_url",
+    "llm_model",
     "mask_volatile_in_key",
     "report",
     "samples_per_case",
@@ -268,6 +272,12 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
     mask_volatile = d.get("mask_volatile_in_key", False)
     if not isinstance(mask_volatile, bool):
         raise ValueError("lgcov.yaml: 'mask_volatile_in_key' must be true or false")
+    llm_model = None if "llm_model" not in d else _str(d["llm_model"], "llm_model")
+    llm_base_url = None if "llm_base_url" not in d else _str(d["llm_base_url"], "llm_base_url")
+    if (llm_model is None) ^ (llm_base_url is None):
+        raise ValueError(
+            "lgcov.yaml: 'llm_model' and 'llm_base_url' must both be set for judge: llm (T188)"
+        )
     return Config(
         graph_entrypoint=entry,
         cassette_dir=_str(d.get("cassette_dir", "cassettes"), "cassette_dir"),
@@ -284,6 +294,8 @@ def parse_config(raw: object, overrides: Mapping[str, str | None] | None = None)
         tier=_tier(d.get("tier", "pr")),
         jev_model=None if "jev_model" not in d else _str(d["jev_model"], "jev_model"),
         jev_timeout_s=_positive_seconds(d.get("jev_timeout_s", 10.0), "jev_timeout_s"),
+        llm_model=llm_model,
+        llm_base_url=llm_base_url,
         group_by=_group_by(d.get("report", {})),
         langsmith=_langsmith(d.get("langsmith", {})),
     )
