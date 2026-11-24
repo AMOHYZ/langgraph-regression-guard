@@ -121,6 +121,9 @@ class CiResult:
     ci_status: CiStatus = ""
     cases_copy: str = ""  # T186: cases_copy's line, the report's last; "" for none
     kpi_stats: tuple[KpiStats, ...] = ()  # T120: structured KPI rows for `lgcov propose`
+    # T122: same-property |Δ| > MDE → needs_human; structural = investigate note only
+    same_property_divergence: str = ""
+    structural_divergence_note: str = ""
 
     @property
     def action(self) -> Action:
@@ -167,6 +170,8 @@ class CiResult:
                 code_failures=self.gate.code_failures,
                 hidden_failures=self.gate.hidden_failures,
                 unmeasured_drift=needs_human_unmeasured,
+                same_property_divergence=self.same_property_divergence,
+                structural_divergence_note=self.structural_divergence_note,
                 inconclusive_blocks=self.inconclusive_blocks,
                 mode=self.mode,
                 approved_by=self.approved_by,

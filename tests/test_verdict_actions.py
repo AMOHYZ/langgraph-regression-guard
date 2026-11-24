@@ -53,6 +53,11 @@ ROWS: dict[str, Evidence] = {
         k_gate=2,
     ),
     "unmeasured_root": Evidence(unmeasured_drift=True, statistical="SHIP", k_gate=1),
+    "same_property_divergence": Evidence(
+        same_property_divergence="same-property divergence: base vs head (|Δ|=0.200 > MDE=0.050)",
+        statistical="SHIP",
+        k_gate=1,
+    ),
     "drift_not_enforced": Evidence(unenforced_drift=True),
     "advisory_drop_only": Evidence(advisory_drops=("tone",)),
     "ship_advisory_drop": Evidence(statistical="SHIP", k_gate=2, advisory_drops=("tone",)),
@@ -76,6 +81,7 @@ def _filled(cell: str) -> str:
         ("<root>", "respond"),
         ("<nodes>", "respond"),
         ("<kpi>", "tone"),
+        ("<divergence>", ROWS["same_property_divergence"].same_property_divergence),
         ("N blocking", "2 blocking"),
         ("F of N cases", "1 of 8 cases"),
         ("<cases>", "run-0/n"),
@@ -471,6 +477,18 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
         replace(
             SHIPPED,
             unsupported=("occurrence pairing is unsafe: node 'worker' ran 2x, baseline has 3x",),
+            replay_lines=NO_DRIFT,
+            tally=UNTOUCHED_0,
+        ),
+        0,
+        "needs_human",
+    ),
+    "same_property_divergence": (
+        replace(
+            SHIPPED,
+            same_property_divergence=(
+                "same-property divergence: base vs head (|Δ|=0.200 > MDE=0.050)"
+            ),
             replay_lines=NO_DRIFT,
             tally=UNTOUCHED_0,
         ),
