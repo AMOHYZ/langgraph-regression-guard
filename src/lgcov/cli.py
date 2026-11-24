@@ -46,9 +46,11 @@ from lgcov.attribution import (
     Score,
     classify,
     explain_runs,
+    fill_real_pr_metrics,
     parse_benchmark,
     pending_result,
     render_markdown,
+    render_real_pr_metrics,
     results_json,
     score,
 )
@@ -4008,6 +4010,58 @@ def _replace_held_out_section(doc: str, section: str) -> str:
     return doc.rstrip("\n") + "\n\n" + body
 
 
+def _bench_fill_real_prs(out: Path, results: Path, folder: Path, *, only: tuple[str, ...]) -> int:
+    """T101-B: fill Real PRs metrics from JSON + yaml statuses; never runs an agent."""
+    try:
+        raw: object = json.loads(results.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"lgcov bench: --fill-real-prs: {results}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if not isinstance(raw, dict):
+        print(f"lgcov bench: --fill-real-prs: {results}: expected a JSON object", file=sys.stderr)
+        return EXIT_ERROR
+    files = [f for f in sorted(folder.glob("*.yaml")) if not only or f.stem in only]
+    if not files:
+        print(f"lgcov bench: --fill-real-prs: no *.yaml in {folder}", file=sys.stderr)
+        return EXIT_ERROR
+    by_name: dict[str, dict[str, object]] = {}
+    for f in files:
+        try:
+            yraw: object = yaml.safe_load(f.read_text(encoding="utf-8"))
+            b = parse_benchmark(f.stem, yraw, f.parent)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"lgcov bench: {f}: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        zero = {"tp": 0, "fp": 0, "fn": 0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
+        by_name[b.name] = {
+            "name": b.name,
+            "root": zero,
+            "propagated": dict(zero),
+            "status": b.status,
+            "error": "",
+        }
+    scored = raw.get("benchmarks", [])
+    if isinstance(scored, list):
+        for row in scored:
+            if not isinstance(row, Mapping):
+                continue
+            name = str(row.get("name", ""))
+            if name not in by_name:
+                continue  # leave synthetic fixtures out of Real PRs
+            if by_name[name].get("status"):
+                continue  # pending/reviewed stay pending labels
+            by_name[name] = dict(row)
+    section = render_real_pr_metrics({"benchmarks": list(by_name.values())})
+    try:
+        doc = out.read_text(encoding="utf-8") if out.exists() else "## Real PRs\n\n"
+    except OSError as exc:
+        print(f"lgcov bench: --fill-real-prs: {out}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    out.write_text(fill_real_pr_metrics(doc, section), encoding="utf-8")
+    print(section, end="")
+    return 0
+
+
 def _bench_synthetic(out: Path, results: Path, *, held_out: bool = False) -> int:
     """T121: offline, so it costs nothing. A report, not a gate: it exits 0 whatever the scores.
     T264: `held_out` scores only the held-out cases and writes a separate ## Held-out section."""
@@ -4151,7 +4205,27 @@ def _bench_cmd(argv: list[str]) -> int:
         help="T211: run a changed model node, and under --live each run's first drifted node, K "
         "more times on each side, and name drift only above base's own spread (2K calls per input)",
     )
+    ap.add_argument(
+        "--fill-real-prs",
+        action="store_true",
+        help="T101-B: offline — fill ### Metrics from results (offline) under ## Real PRs in "
+        "--out from --json (real yaml rows only; pending/reviewed → pending labels); no agent runs",
+    )
     args = ap.parse_args(argv)
+    if args.fill_real_prs:
+        if args.synthetic or args.keep_runs or args.live or args.from_runs or args.noise_repeats:
+            print(
+                "lgcov bench: --fill-real-prs is offline only: no --synthetic, --keep-runs, "
+                "--live, --from-runs or --noise-repeats",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+        return _bench_fill_real_prs(
+            Path(args.out),
+            Path(args.json or "docs/benchmark-results.json"),
+            Path(args.dir or "docs/benchmark"),
+            only=tuple(args.only),
+        )
     if args.from_runs and (args.synthetic or args.keep_runs or args.live or args.noise_repeats):
         print(
             "lgcov bench: --from-runs runs nothing: no --synthetic, --keep-runs, --live or "

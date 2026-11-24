@@ -463,3 +463,99 @@ def test_a_node_a_baseline_run_reached_is_known_to_be_in_base_s_graph() -> None:
     # Base ran it and the PR didn't: head's graph settles it, and base's isn't needed.
     labels = classify(["lookup"], ({"lookup": "1"}, {}), {}, graphs=(None, {"lookup"}))
     assert labels == NodeLabels((), ("lookup",), {})
+
+
+def test_real_pr_metrics_from_json_marks_pending_and_keeps_narrative() -> None:
+    """T101-B: offline fill of a Real PRs metrics subsection from results JSON."""
+    from lgcov.attribution import (
+        fill_real_pr_metrics,
+        render_real_pr_metrics,
+    )
+
+    doc = {
+        "benchmarks": [
+            {
+                "name": "open_deep_research-163",
+                "root": {
+                    "tp": 1,
+                    "fp": 0,
+                    "fn": 5,
+                    "precision": 1.0,
+                    "recall": 0.16666666666666666,
+                    "f1": 0.2857142857142857,
+                },
+                "propagated": {
+                    "tp": 1,
+                    "fp": 1,
+                    "fn": 0,
+                    "precision": 0.5,
+                    "recall": 1.0,
+                    "f1": 0.6666666666666666,
+                },
+                "status": "",
+                "error": "",
+            },
+            {
+                "name": "gemini-fullstack-90",
+                "root": {"tp": 0, "fp": 0, "fn": 0, "precision": 0.0, "recall": 0.0, "f1": 0.0},
+                "propagated": {
+                    "tp": 0,
+                    "fp": 0,
+                    "fn": 0,
+                    "precision": 0.0,
+                    "recall": 0.0,
+                    "f1": 0.0,
+                },
+                "status": "labels_reviewed",
+                "error": "",
+            },
+            {
+                "name": "local-deep-researcher-81",
+                "root": {"tp": 0, "fp": 0, "fn": 0, "precision": 0.0, "recall": 0.0, "f1": 0.0},
+                "propagated": {
+                    "tp": 0,
+                    "fp": 0,
+                    "fn": 0,
+                    "precision": 0.0,
+                    "recall": 0.0,
+                    "f1": 0.0,
+                },
+                "status": "labels_pending_human_review",
+                "error": "",
+            },
+        ]
+    }
+    section = render_real_pr_metrics(doc)
+    assert "### Metrics from results (offline)" in section
+    assert (
+        "| open_deep_research-163 | 1.00 (1 of 1) | 0.17 (1 of 6) | 0.50 (1 of 2) | 1.00 (1 of 1) |"
+        in section
+    )
+    assert (
+        "| gemini-fullstack-90 | pending labels | pending labels | pending labels |"
+        " pending labels |" in section
+    )
+    assert (
+        "| local-deep-researcher-81 | pending labels | pending labels | pending labels |"
+        " pending labels |" in section
+    )
+    assert "first divergence" in section.lower()
+    assert "Reenact" in section
+
+    md = (
+        "## Real PRs\n\n"
+        "Hand narrative stays.\n\n"
+        "### Metrics from results (offline)\n\n"
+        "old table\n\n"
+        "### Benchmark KPIs\n\n"
+        "more hand text\n"
+    )
+    filled = fill_real_pr_metrics(md, section)
+    assert "Hand narrative stays." in filled
+    assert "### Benchmark KPIs" in filled
+    assert "more hand text" in filled
+    assert "old table" not in filled
+    assert (
+        "| open_deep_research-163 | 1.00 (1 of 1) | 0.17 (1 of 6) | 0.50 (1 of 2) | 1.00 (1 of 1) |"
+        in filled
+    )

@@ -7,6 +7,7 @@
 - **Blind labelling packs (T171).** Blank root/propagated/unaffected worksheets for gemini-fullstack #90/#35 and local-deep-researcher #81 under `docs/benchmark/label-packs/` (no lgcov labels).
 - **Criteria-drift loop (T196).** Spec one-pager: detect taxonomy/label criteria drift → recalibrate → band refresh → gate impact (`docs/criteria-drift.md`).
 - **#163 speed runbook (T194).** `docs/benchmark-speed.md`: served vs `--live` estimate row + maintainer commands; not measured in this ladder.
+- **Real-PR metrics fill (T101-B).** `lgcov bench --fill-real-prs` offline-fills `### Metrics from results (offline)` from results JSON + yaml statuses (pending/reviewed → pending labels); hand narrative kept.
 - **Round naming (T236).** Docs and CLI help keep both names and spell out the split: a *gate
   round* (`lgcov round new` / `lgcov guard`, root `lgcov-round.yaml` + `exposure.json`) vs a
   *benchmark round* (`lgcov round init|lock|check`, path of your choice + `exposure.jsonl`). No
