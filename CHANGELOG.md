@@ -20,6 +20,9 @@
   mutated packet stops the call as infra (never a silent pass). Empty messages/tool_calls
   are allowed so demos without LangChain messages stay measured (requiring non-empty would
   flip green fixtures to infra).
+- **Judge-family warn only (T127).** Optional `gate_judge.family` and `optimised_model.family`
+  in `lgcov.yaml`. When both are set and differ, the PR comment warns; the gate never fails
+  on the mismatch alone.
 
 - **Adoption state machine (T155-A).** `AdoptionState`: eligible → approved →
   baseline_updated → merged → deployed (distinct from `ProposeState`). Change-record stub

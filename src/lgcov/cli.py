@@ -183,6 +183,7 @@ from lgcov.github_api import API_URL as GITHUB_API
 from lgcov.github_api import Client, GitHub, GitHubError
 from lgcov.graph_diff import GraphDiff, diff_graphs
 from lgcov.jev_judge import JevJudge
+from lgcov.judge_family import family_mismatch_warning
 from lgcov.judges import KPI, FakeJudge, Judge, JudgeInfraError, NodeState
 from lgcov.langsmith import (
     GetClient,
@@ -1675,6 +1676,11 @@ def _evaluate(
             *_whole_run_note(l2[0] if l2 else []),
             *no_data,
             *([note] if note else []),
+            *(
+                [w]
+                if (w := family_mismatch_warning(cfg.gate_judge_family, cfg.optimised_model_family))
+                else []
+            ),
             *([f"Latest nightly run on main: {args.nightly_url}"] if args.nightly_url else []),
             *_langsmith_notes(cfg.langsmith, args.commit),
         ),
