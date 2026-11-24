@@ -123,6 +123,50 @@ def test_cassette_accept_refuses_without_valid_approval(tmp_path: Path) -> None:
     assert code == 2
 
 
+def test_cassette_accept_advances_approved_change_record(tmp_path: Path) -> None:
+    """Accept with a fresh approval re-baselines and moves eligible→approved→baseline_updated.
+
+    Also guards against shadowing cassette.record with a local `record = ...` in accept.
+    """
+    from lgcov.cli import main
+    from tests.test_cli import _ab_project
+
+    cfg, _baseline = _ab_project(tmp_path)
+    path = tmp_path / "change-record.json"
+    save_change_record(
+        path,
+        approve_bind(
+            ChangeRecord.new(pr=3, base_sha="b" * 40, candidate_sha="c" * 40),
+            base_sha="b" * 40,
+            candidate_sha="c" * 40,
+            base_hash="hb",
+            candidate_hash="hc",
+            approver="ahmed",
+        ),
+    )
+    code = main(
+        [
+            "cassette",
+            "accept",
+            "--all-drifted",
+            "--config",
+            str(cfg),
+            "--change-record",
+            str(path),
+            "--base-sha",
+            "b" * 40,
+            "--candidate-sha",
+            "c" * 40,
+            "--base-hash",
+            "hb",
+            "--candidate-hash",
+            "hc",
+        ]
+    )
+    assert code == 0
+    assert load_change_record(path).state == "baseline_updated"
+
+
 def test_change_record_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "change-record.json"
     record = approve_bind(

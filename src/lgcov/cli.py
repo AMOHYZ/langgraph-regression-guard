@@ -1187,9 +1187,10 @@ def _cassette_accept(argv: list[str]) -> int:
     print(f"wrote {summary_path}")
     if args.change_record:
         try:
-            record = load_change_record(Path(args.change_record))
-            if record.state == "approved":
-                advanced = record.advance("baseline_updated")
+            # Named `change`, not `record`: that name is the cassette.record import.
+            change = load_change_record(Path(args.change_record))
+            if change.state == "approved":
+                advanced = change.advance("baseline_updated")
                 save_change_record(Path(args.change_record), advanced)
         except (OSError, ValueError, IllegalTransition) as exc:
             print(f"lgcov cassette accept: change record: {exc}", file=sys.stderr)
