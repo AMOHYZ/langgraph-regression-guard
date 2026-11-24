@@ -185,6 +185,7 @@ from lgcov.langsmith import (
     traces_to_cases,
 )
 from lgcov.lint import lint, routers_of, summary
+from lgcov.llm_judge import LlmJudge
 from lgcov.lock import Commits, locked_line, moved
 from lgcov.messages import decode, plain, run_tools, tools_for_node
 from lgcov.metrics import (
@@ -1366,16 +1367,20 @@ def _gate_policy(args: argparse.Namespace) -> _GatePolicy | str:
     try:
         every = list(load_taxonomy(_policy_path(args, args.taxonomy)).kpi_specs)
         llm = [s.name for s in every if s.judge == "llm"]
-        runs_llm = rules.llm_judges and _llm_judge is not None
+        llm_factory = _llm_judge_factory(cfg)
+        runs_llm = rules.llm_judges and llm_factory is not None
         specs = every if runs_llm else [s for s in every if s.judge != "llm"]
-        l2 = (specs, [_l2_judge(spec, cfg.jev_model, cfg.jev_timeout_s) for spec in specs])
+        l2 = (
+            specs,
+            [_l2_judge(spec, cfg.jev_model, cfg.jev_timeout_s, llm_factory) for spec in specs],
+        )
     except (OSError, ValueError) as exc:
         return f"invalid taxonomy: {exc}{from_base}"
     try:
         advisory, flagged, calibration = _gate_bands(_policy_path(args, args.bands), every, cfg)
     except (OSError, ValueError) as exc:
         return f"invalid lgcov.yaml or bands.json: {exc}{from_base}"
-    llm_notes, llm_code = _llm_notes(llm, advisory, rules.llm_judges)
+    llm_notes, llm_code = _llm_notes(llm, advisory, rules.llm_judges, llm_factory is not None)
     return _GatePolicy(
         cfg,
         tier,
@@ -1801,11 +1806,15 @@ def _write_candidate(args: argparse.Namespace, start: Commits) -> int:
 
 
 def _llm_notes(
-    llm: list[str], advisory: frozenset[str], tier_runs_them: bool
+    llm: list[str],
+    advisory: frozenset[str],
+    tier_runs_them: bool,
+    has_client: bool | None = None,
 ) -> tuple[list[str], int]:
     """T089: the `judge: llm` KPIs this run won't judge, and the exit code that leaves: on
     nightly, INFRA_ERROR when one with no client blocks; an advisory one is only shown."""
-    if not llm or (tier_runs_them and _llm_judge is not None):
+    client = _llm_judge is not None if has_client is None else has_client
+    if not llm or (tier_runs_them and client):
         return [], 0
     if not tier_runs_them:
         return [f"Nightly only (`judge: llm`): {_quoted(llm)}."], 0
@@ -2089,9 +2098,23 @@ def _verify_result_cmd(argv: list[str]) -> int:
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
 _NODE_SCOPED_TOOLS = frozenset({"tool_called", "tool_not_called"})
 _WHOLE_RUN = "node scope not applied to tool_sequence yet (whole-run)"
-# T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
-# never runs one, and a nightly run reports the KPIs it couldn't judge.
+# T089/T188: general LLM judge factory for `judge: llm`. Tests may set this; otherwise
+# nightly builds one from lgcov.yaml's llm_model + llm_base_url when both are set.
 _llm_judge: Callable[[KPI], Judge] | None = None
+
+
+def _llm_judge_factory(cfg: Config) -> Callable[[KPI], Judge] | None:
+    """T188: test override, else LlmJudge from config, else None (no client)."""
+    if _llm_judge is not None:
+        return _llm_judge
+    if cfg.llm_model is None or cfg.llm_base_url is None:
+        return None
+    model, base = cfg.llm_model, cfg.llm_base_url
+
+    def build(kpi: KPI) -> Judge:
+        return LlmJudge(kpi, model=model, base_url=base)
+
+    return build
 
 
 def _groups(
@@ -2133,14 +2156,20 @@ def _in_band(bands: Bands, band: Band) -> frozenset[str]:
     return frozenset(kpi for kpi, b in bands.of.items() if b == band)
 
 
-def _l2_judge(spec: KPISpec, jev_model: str | None = None, jev_timeout_s: float = 10.0) -> Judge:
+def _l2_judge(
+    spec: KPISpec,
+    jev_model: str | None = None,
+    jev_timeout_s: float = 10.0,
+    llm_factory: Callable[[KPI], Judge] | None = None,
+) -> Judge:
     kpi = spec.to_kpi()
     if spec.judge == "code":
         return code_judge(kpi, spec.check or {})
     if spec.judge == "llm":
-        if _llm_judge is None:
+        factory = llm_factory if llm_factory is not None else _llm_judge
+        if factory is None:
             raise ValueError(f"KPI '{spec.name}': judge llm needs a general LLM judge client")
-        return _llm_judge(kpi)
+        return factory(kpi)
     if spec.judge == "fake":
         check = spec.check or {}
         unknown = sorted(set(check) - set(_FAKE_CHECK_KEYS))
@@ -2418,9 +2447,10 @@ def _judge_cmd(argv: list[str]) -> int:
         return EXIT_ERROR
     try:
         every = list(load_taxonomy(taxonomy_path).kpi_specs)
-        skipped = [s.name for s in every if s.judge == "llm" and _llm_judge is None]
+        llm_factory = _llm_judge_factory(cfg)
+        skipped = [s.name for s in every if s.judge == "llm" and llm_factory is None]
         specs = [s for s in every if s.name not in skipped]
-        judges = [_l2_judge(spec, cfg.jev_model, cfg.jev_timeout_s) for spec in specs]
+        judges = [_l2_judge(spec, cfg.jev_model, cfg.jev_timeout_s, llm_factory) for spec in specs]
     except (OSError, ValueError) as exc:
         print(f"lgcov judge: invalid taxonomy: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -2676,7 +2706,10 @@ def _gate_now(args: argparse.Namespace, cases_path: str) -> GateNow:
     every = list(load_taxonomy(_policy_path(args, taxonomy)).kpi_specs)
     advisory, _, _ = _gate_bands(_policy_path(args, args.bands), every, cfg)
     # As _ci_result chooses them: K_gate is the blocking KPIs the run judges.
-    runs_llm = tier_policy(cfg.tier, cfg.samples_per_case).llm_judges and _llm_judge is not None
+    runs_llm = (
+        tier_policy(cfg.tier, cfg.samples_per_case).llm_judges
+        and _llm_judge_factory(cfg) is not None
+    )
     judged = every if runs_llm else [s for s in every if s.judge != "llm"]
     try:
         ids = case_ids(json.loads(Path(cases_path).read_text(encoding="utf-8")))

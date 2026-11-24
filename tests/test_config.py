@@ -207,6 +207,23 @@ def test_tier_policy() -> None:
     assert tier_policy("nightly", 5).k == 5
 
 
+def test_llm_model_and_base_url_both_or_neither() -> None:
+    """T188: OpenAI-compatible judge needs model + base URL together."""
+    assert parse_config({"graph_entrypoint": "a.py:g"}).llm_model is None
+    cfg = parse_config(
+        {
+            "graph_entrypoint": "a.py:g",
+            "llm_model": "gpt-4o-mini",
+            "llm_base_url": "https://api.openai.com/v1",
+        }
+    )
+    assert (cfg.llm_model, cfg.llm_base_url) == ("gpt-4o-mini", "https://api.openai.com/v1")
+    with pytest.raises(ValueError, match="llm_model.*llm_base_url"):
+        parse_config({"graph_entrypoint": "a.py:g", "llm_model": "gpt-4o-mini"})
+    with pytest.raises(ValueError, match="llm_model.*llm_base_url"):
+        parse_config({"graph_entrypoint": "a.py:g", "llm_base_url": "https://api.openai.com/v1"})
+
+
 def test_gate_uncalibrated_and_the_pinned_jev_model() -> None:
     # T063: what a judge with no labels may do, and the Jev model labels were made with.
     cfg = parse_config({"graph_entrypoint": "a.py:g"})
