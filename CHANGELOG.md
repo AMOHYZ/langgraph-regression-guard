@@ -40,6 +40,11 @@
   `needs_human` with a reason; divergence alone never exits 1. Structural
   (non-same-property) divergence adds an investigate note to the PR comment
   only. New verdict-actions row `same_property_divergence`.
+- **Format/length drift (T126).** Response length ≥ +60% vs baseline **and**
+  judge-only gains → `needs_human` (never exit 1 alone). Tokens ≈ chars/4 of the
+  existing prompt; also tracks response length and markdown density. Length drift
+  or judge-only gains alone do not flag. New verdict-actions row
+  `format_length_drift`.
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
   per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,

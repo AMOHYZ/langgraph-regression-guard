@@ -58,6 +58,14 @@ ROWS: dict[str, Evidence] = {
         statistical="SHIP",
         k_gate=1,
     ),
+    "format_length_drift": Evidence(
+        format_length_drift=(
+            "format/length drift: response 100→160 chars (+60%) with judge-only gains "
+            "(prompt budget≈100 tokens; markdown density 0.050→0.050)"
+        ),
+        statistical="SHIP",
+        k_gate=1,
+    ),
     "drift_not_enforced": Evidence(unenforced_drift=True),
     "advisory_drop_only": Evidence(advisory_drops=("tone",)),
     "ship_advisory_drop": Evidence(statistical="SHIP", k_gate=2, advisory_drops=("tone",)),
@@ -89,6 +97,7 @@ def _filled(cell: str) -> str:
             "<reason>",
             "occurrence pairing is unsafe: node 'worker' ran 2x, baseline has 3x",
         ),
+        ("<drift>", ROWS["format_length_drift"].format_length_drift),
     ):
         cell = cell.replace(placeholder, value)
     return cell
@@ -504,6 +513,16 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
             gate=GateFindings("SHIP", 1),
             l2_lines=_kpi_rows(TONE_SHIP),
             tally=TOUCHED_0,
+        ),
+        0,
+        "needs_human",
+    ),
+    "format_length_drift": (
+        replace(
+            SHIPPED,
+            format_length_drift=ROWS["format_length_drift"].format_length_drift,
+            replay_lines=NO_DRIFT,
+            tally=UNTOUCHED_0,
         ),
         0,
         "needs_human",
