@@ -45,6 +45,11 @@
   existing prompt; also tracks response length and markdown density. Length drift
   or judge-only gains alone do not flag. New verdict-actions row
   `format_length_drift`.
+- **Immutable negative controls (T123 v0).** Pool cases may set `control: true` with a
+  required `immutability_rationale`. `pools check` rejects a control with no rationale or
+  with a recorded human-labelled pass. A control that passes is `needs_human`
+  (`control_passed` + audit flag), not BLOCK yet. Controls are excluded from pass-rate
+  denominators. Fixing a hard non-control case is unaffected.
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
   per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,

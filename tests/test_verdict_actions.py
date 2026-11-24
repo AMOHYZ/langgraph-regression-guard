@@ -66,6 +66,12 @@ ROWS: dict[str, Evidence] = {
         statistical="SHIP",
         k_gate=1,
     ),
+    "control_passed": Evidence(
+        control_passed="control_passed: negative control `ctrl-1` passed",
+        control_audit=True,
+        statistical="SHIP",
+        k_gate=1,
+    ),
     "drift_not_enforced": Evidence(unenforced_drift=True),
     "advisory_drop_only": Evidence(advisory_drops=("tone",)),
     "ship_advisory_drop": Evidence(statistical="SHIP", k_gate=2, advisory_drops=("tone",)),
@@ -98,6 +104,7 @@ def _filled(cell: str) -> str:
             "occurrence pairing is unsafe: node 'worker' ran 2x, baseline has 3x",
         ),
         ("<drift>", ROWS["format_length_drift"].format_length_drift),
+        ("<control_passed>", ROWS["control_passed"].control_passed),
     ):
         cell = cell.replace(placeholder, value)
     return cell
@@ -521,6 +528,17 @@ COMMENTS: dict[str, tuple[CiResult, int, str]] = {
         replace(
             SHIPPED,
             format_length_drift=ROWS["format_length_drift"].format_length_drift,
+            replay_lines=NO_DRIFT,
+            tally=UNTOUCHED_0,
+        ),
+        0,
+        "needs_human",
+    ),
+    "control_passed": (
+        replace(
+            SHIPPED,
+            control_passed=ROWS["control_passed"].control_passed,
+            control_audit=True,
             replay_lines=NO_DRIFT,
             tally=UNTOUCHED_0,
         ),
