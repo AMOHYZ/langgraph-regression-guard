@@ -440,6 +440,27 @@ def _shown(value: object) -> str:
     return value[:12] if isinstance(value, str) and _SHA256.fullmatch(value) else str(value)
 
 
+def classify_ci_guard_problems(problems: list[str]) -> int | None:
+    """T235: map `round_problems` into `lgcov ci` exits. Standalone `lgcov guard` stays 0/2.
+
+    - None: no problems (continue the usual ci path)
+    - 1: digest mismatch or locked gate material drifted / was changed
+    - 2: setup on the base (candidate already unlocked, missing ledger, no candidate)
+    """
+    if not problems:
+        return None
+    setup = (
+        "is not locked in round",
+        "no candidate to check",
+        "exposure history lost",
+        "has no reference",
+        "is not before round",
+    )
+    if all(any(token in p for token in setup) for p in problems):
+        return 2
+    return 1
+
+
 def round_problems(
     locked: Round, now: GateNow, candidate: str | None, exposure_entries: int
 ) -> list[str]:
