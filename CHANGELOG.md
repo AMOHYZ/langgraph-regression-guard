@@ -15,6 +15,11 @@
   `/chat/completions` client (`LlmJudge`) that returns the same typed `Verdict` as Jev.
   Set `llm_model` and `llm_base_url` together in `lgcov.yaml`; key from `OPENAI_API_KEY`
   only (never logged). Nightly tier only (T089). Tests use fakes — no network.
+- **Pre-judge input contract (T200).** Before each judge call, lgcov builds a packet with
+  node I/O, `messages`, and `tool_calls` slots and checks bytes-at-use. A missing slot or
+  mutated packet stops the call as infra (never a silent pass). Empty messages/tool_calls
+  are allowed so demos without LangChain messages stay measured (requiring non-empty would
+  flip green fixtures to infra).
 
 - **Adoption state machine (T155-A).** `AdoptionState`: eligible → approved →
   baseline_updated → merged → deployed (distinct from `ProposeState`). Change-record stub

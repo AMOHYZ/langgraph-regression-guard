@@ -69,14 +69,21 @@ def judge_samples(
     k: int,
     clock: Callable[[], float] = time.perf_counter,
 ) -> tuple[Sample, ...]:
-    """Call the judge k times on one case, timing each call."""
+    """Call the judge k times on one case, timing each call.
+
+    T200: prepare the judge packet (node I/O, messages, tool_calls) and check bytes-at-use
+    before each call; a contract violation is infra (never a silent pass).
+    """
     if k < 1:
         raise ValueError(f"k must be at least 1, got {k}")
+    from lgcov.judge_packet import ensure_judge_packet
+
     samples: list[Sample] = []
     for _ in range(k):
         start = clock()
         try:
-            v = judge.judge(node_input, node_output)
+            packet = ensure_judge_packet(node_input, node_output)
+            v = judge.judge(packet.node_input, packet.node_output)
         except (JudgeInfraError, *TRANSPORT_ERRORS) as exc:  # T074: network trouble too
             # T195: a judge words its own errors without secrets; anything else's text could
             # carry a URL, so only its type is kept
