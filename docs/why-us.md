@@ -1,15 +1,16 @@
 # Why lgcov
 
-lgcov replays your agent, re-runs only the nodes a PR can reach, and shows which node's
-output changed first and which changed after it. Each KPI in your taxonomy gets a paired
-test, and a judge can block only once it has earned that against human labels. Both of those
-are table stakes: several small tools ship them. What was not found in the tools read is
-that node cause, root against propagated, from replay, and it is unvalidated: on real agents it is a [pilot](benchmark.md#real-prs) on one
-PR with 6 labelled roots, and a [base-against-base run](benchmark.md#aa-noise-floor) gave
-the same root. The gate can weigh head against base's recorded `samples` when the baseline
-was recorded with `--samples K` (T229); without them a model node is still inconclusive.
-First report in 2 minutes (L1 only, measured 27 Oct 2026). Other tools as of 31 Oct 2026;
-Kitaru and LangSmith as of 5 Nov; the tools added on 11 Nov and on 13 Nov as of those days.
+lgcov is a CI gate for LangGraph agents that a pull request can't grade itself. **Early:** it
+also names *which change did it* — which node's output changed first and which changed after
+it — from cassette replay. That node-cause claim is unvalidated beyond a
+[pilot](benchmark.md#real-prs) on one real PR (6 labelled roots) and a
+[base-against-base run](benchmark.md#aa-noise-floor) that gave the same root; synthetic scores
+are in [benchmark.md](benchmark.md). Each KPI still gets a paired test, and a judge can block
+only once it has earned that against human labels — table stakes several small tools already
+ship. The gate can weigh head against base's recorded `samples` when the baseline was recorded
+with `--samples K` (T229); without them a model node is still inconclusive. First report in
+2 minutes (L1 only, measured 27 Oct 2026). Other tools as of 31 Oct 2026; Kitaru and LangSmith
+as of 5 Nov; the tools added on 11 Nov and on 13 Nov as of those days.
 
 ## What's still open
 

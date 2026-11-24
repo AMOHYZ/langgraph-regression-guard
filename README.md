@@ -1,9 +1,10 @@
 # langgraph-regression-guard
 
-Catch silent regressions in LangGraph agents on every PR. lgcov replays your agent, re-runs
-only the nodes a PR can reach, and shows which node's output changed first and which changed
-after it. Each KPI in your taxonomy gets a paired test, and a judge can block only once it
-has earned that against human labels. A GitHub Action; first report in 2 minutes.
+lgcov is a CI gate for LangGraph agents that a pull request can't grade itself. **Early:** it
+also names *which change did it* — which node's output changed first and which changed after
+it — from cassette replay. Each KPI in your taxonomy gets a paired test, and a judge can block
+only once it has earned that against human labels. A GitHub Action; first report in 2 minutes.
+What has been measured (one real PR pilot, synthetic tables): [docs/benchmark.md](docs/benchmark.md).
 
 [![PyPI](https://img.shields.io/pypi/v/lgcov)](https://pypi.org/project/lgcov/)
 [![Python](https://img.shields.io/pypi/pyversions/lgcov)](https://pypi.org/project/lgcov/)
