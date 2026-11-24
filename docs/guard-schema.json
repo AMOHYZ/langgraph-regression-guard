@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AMOHYZ/langgraph-regression-guard/docs/guard-schema.json",
+  "title": "lgcov propose JSON (T120 v0)",
+  "type": "object",
+  "required": ["kpis", "nodes", "state", "reasons", "exposure_recorded"],
+  "properties": {
+    "kpis": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "verdict",
+          "delta_hat",
+          "ci",
+          "mde",
+          "n_star",
+          "q",
+          "p_adj"
+        ],
+        "properties": {
+          "name": { "type": "string" },
+          "verdict": { "type": "string", "enum": ["SHIP", "BLOCK", "INCONCLUSIVE"] },
+          "delta_hat": { "type": ["number", "null"] },
+          "ci": {
+            "type": ["array", "null"],
+            "items": { "type": "number" },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "mde": { "type": ["number", "null"] },
+          "n_star": { "type": ["integer", "null"] },
+          "ni_n_star": { "type": ["integer", "null"] },
+          "q": { "type": ["number", "null"] },
+          "p_adj": { "type": ["number", "null"] }
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "label"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string", "enum": ["root", "propagated"] }
+        }
+      }
+    },
+    "state": {
+      "type": "string",
+      "enum": ["eligible", "blocked", "needs_human", "infra", "unsupported"]
+    },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "exposure_recorded": { "type": "boolean" },
+    "k_gate": { "type": "integer", "minimum": 1 }
+  }
+}

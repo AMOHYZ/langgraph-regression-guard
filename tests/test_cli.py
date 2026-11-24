@@ -243,6 +243,7 @@ LGCOV_COMMANDS = (
     "round check",
     "round new",
     "guard",
+    "propose",
     "bench",
     "metrics summary",
     "selfcheck",

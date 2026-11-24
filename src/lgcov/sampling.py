@@ -274,6 +274,27 @@ def lost_too_many(s: KpiStats) -> bool:
     return s.lost_pr - s.lost_base > lost_tolerance(s)
 
 
+def _holm_adjusted_m(pvalues: Sequence[float], m: int) -> list[float]:
+    """Holm-adjusted p-values with a fixed family size `m` (T120 optimiser K_gate=1)."""
+    adjusted, running = [1.0] * len(pvalues), 0.0
+    order = sorted(range(len(pvalues)), key=lambda i: pvalues[i])
+    for rank, i in enumerate(order):
+        running = max(running, min(1.0, max(m - rank, 0) * pvalues[i]))
+        adjusted[i] = running
+    return adjusted
+
+
+def _holm_m(pvalues: Sequence[float], alpha: float, m: int) -> list[bool]:
+    reject = [False] * len(pvalues)
+    order = sorted(range(len(pvalues)), key=lambda i: pvalues[i])
+    for rank, i in enumerate(order):
+        denom = m - rank
+        if denom <= 0 or pvalues[i] > alpha / denom:
+            break
+        reject[i] = True
+    return reject
+
+
 def k_gate(stats: Sequence[KpiStats]) -> int:
     """T114: the blocking KPIs the run judges, as lgcov.yaml and the bands leave them; Holm
     runs across exactly these, so one with no paired case still counts, as p = 1."""
@@ -287,6 +308,7 @@ def gate_kpis(
     min_confidence: float = 0.7,
     flagged: Collection[str] = (),
     power: float = 0.8,
+    k_gate_n: int | None = None,
 ) -> list[KpiStats]:
     """T091: Holm across the blocking KPIs (T114: all K_gate of them, paired or not),
     Benjamini-Hochberg across the advisory ones, then each KPI's decision against its margin.
@@ -299,6 +321,8 @@ def gate_kpis(
         return "advisory" if kpi in advisory else "flag" if kpi in flagged else "blocking"
 
     gated = [replace(s, blocking=s.kpi not in advisory, band=band(s.kpi)) for s in stats]
+    blocking_n = k_gate_n if k_gate_n is not None else k_gate(gated)
+    blocking_n = max(blocking_n, 1)
     for blocking, adjust, reject in (
         (True, holm_adjusted, holm),
         (False, benjamini_hochberg_adjusted, benjamini_hochberg),
@@ -306,11 +330,16 @@ def gate_kpis(
         family = [(i, s.paired) for i, s in enumerate(gated) if s.blocking == blocking and s.paired]
         pvalues = [r.p for _, r in family]
         if blocking:  # T114: m = K_gate, fixed before any p is seen; the missing ones are p = 1
-            pvalues += [1.0] * (k_gate(gated) - len(family))
+            pvalues += [1.0] * max(blocking_n - len(family), 0)
+            adjusted = _holm_adjusted_m(pvalues, blocking_n)
+            rejected = _holm_m(pvalues, alpha, blocking_n)
+        else:
+            adjusted = adjust(pvalues)
+            rejected = reject(pvalues, alpha)
         for (i, r), p_adj, significant in zip(  # not strict: it stops before the padding
-            family, adjust(pvalues), reject(pvalues, alpha), strict=False
+            family, adjusted, rejected, strict=False
         ):
-            sized = alpha / max(k_gate(gated), 1) if blocking else alpha
+            sized = alpha / blocking_n if blocking else alpha
             r = replace(r, required_n=cases_needed(r.sd, r.delta, sized, power))
             s = replace(gated[i], paired=r)
             decision = decide(
