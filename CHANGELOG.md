@@ -19,6 +19,10 @@
   and content hashes. `--override` records risk acceptance only (statistical verdict
   unchanged). Stale approvals are refused. `lgcov cassette accept --require-approval`
   needs a fresh approval; advancing writes the change record.
+- **Change record export (T129).** `lgcov change-record export` writes JSON + markdown
+  (diff → nodes → KPIs → verdict → approver → state). Docs map to EU AI Act Art. 17(1)
+  and ISO/IEC 42001 8.1 as **evidence only**, never a compliance claim.
+  [docs/change-record.md](docs/change-record.md).
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
   per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,

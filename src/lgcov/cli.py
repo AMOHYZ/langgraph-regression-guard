@@ -3344,6 +3344,38 @@ def _review_commit(argv: list[str], client: Client | None = None) -> int:
     return code
 
 
+def _change_record_export_cmd(argv: list[str]) -> int:
+    """T129: write JSON + markdown evidence for a PR from a change record."""
+    from lgcov.change_record_export import ExportPayload, export_json, export_markdown
+
+    ap = argparse.ArgumentParser(prog="lgcov change-record export")
+    ap.add_argument("--change-record", default="change-record.json")
+    ap.add_argument("--diff", default="", help="short diff summary")
+    ap.add_argument("--nodes", default="", help="comma-separated affected nodes")
+    ap.add_argument("--kpis", default="", help="comma-separated KPI names")
+    ap.add_argument("--out-dir", default=".", help="directory for change-<pr>.json/.md")
+    args = ap.parse_args(argv)
+    try:
+        record = load_change_record(Path(args.change_record))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"lgcov change-record export: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    payload = ExportPayload.from_record(
+        record,
+        diff_summary=args.diff,
+        affected_nodes=tuple(n for n in args.nodes.split(",") if n),
+        kpis=tuple(k for k in args.kpis.split(",") if k),
+    )
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    jpath, mpath = out / f"change-{record.pr}.json", out / f"change-{record.pr}.md"
+    export_json(jpath, payload)
+    export_markdown(mpath, payload)
+    print(f"wrote {jpath}")
+    print(f"wrote {mpath}")
+    return 0
+
+
 def _review_approve(argv: list[str]) -> int:
     """T155-B: bind approval to base/candidate SHAs + hashes; write the change record."""
     ap = argparse.ArgumentParser(prog="lgcov review approve")
@@ -4395,6 +4427,11 @@ def _command(argv: list[str]) -> int | None:
         return _calibrate_cmd(argv[1:])
     if argv[:1] == ["review"]:
         return _review_cmd(argv[1:])
+    if argv[:2] == ["change-record", "export"]:
+        return _change_record_export_cmd(argv[2:])
+    if argv[:1] == ["change-record"]:
+        print("lgcov change-record: takes export", file=sys.stderr)
+        return EXIT_ERROR
     if argv[:2] == ["round", "new"]:  # a gate round; every other `round` is a benchmark round
         return _round_new_cmd(argv[2:])
     if argv == ["round"]:
@@ -4539,6 +4576,7 @@ commands:
   review override   override a judge's verdict on one case
   review approve    bind adoption approval to base/candidate SHAs + hashes (T155)
   review reject     put cassette_dir back to the base's, undoing an accept
+  change-record export  write JSON+markdown evidence for a PR (T129)
   review fetch      read a review comment's command and its data (docs/review.md)
   review apply      run a fetched review command on the fetched files, with no token
   review commit     commit what review apply changed and reply on the PR
