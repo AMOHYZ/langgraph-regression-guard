@@ -186,7 +186,7 @@ from lgcov.langsmith import (
 )
 from lgcov.lint import lint, routers_of, summary
 from lgcov.lock import Commits, locked_line, moved
-from lgcov.messages import decode, plain, run_tools
+from lgcov.messages import decode, plain, run_tools, tools_for_node
 from lgcov.metrics import (
     format_summary,
     parse_records,
@@ -1821,8 +1821,8 @@ def _quoted(names: list[str]) -> str:
 
 
 def _whole_run_note(specs: list[KPISpec]) -> list[str]:
-    """T181: a tool check reads every tool the run called, not only its KPI's node's (T210)."""
-    tools = [s.name for s in specs if (s.check or {}).get("type") in _TOOL_CHECKS]
+    """T181/T210: tool_sequence is still whole-run; tool_called/tool_not_called are node-scoped."""
+    tools = [s.name for s in specs if (s.check or {}).get("type") == "tool_sequence"]
     return [f"⚠️ {_WHOLE_RUN}: {_quoted(tools)}."] if tools else []
 
 
@@ -2087,8 +2087,8 @@ def _verify_result_cmd(argv: list[str]) -> int:
 
 
 _FAKE_CHECK_KEYS = ("fail_every", "when_input_contains")
-_TOOL_CHECKS = ("tool_called", "tool_not_called", "tool_sequence")
-_WHOLE_RUN = "node scope not applied to tool checks yet (whole-run)"
+_NODE_SCOPED_TOOLS = frozenset({"tool_called", "tool_not_called"})
+_WHOLE_RUN = "node scope not applied to tool_sequence yet (whole-run)"
 # T089: the general LLM judge client for `judge: llm` KPIs. None is built in yet: the pr tier
 # never runs one, and a nightly run reports the KPIs it couldn't judge.
 _llm_judge: Callable[[KPI], Judge] | None = None
@@ -2170,8 +2170,11 @@ def _l2_cases(
 ) -> _Cases:
     """One case per run: the trace for code judges, else the node's own input and output. A
     run in `stopped` has no whole-run case: its trace is cut off, and its last step isn't the
-    final one, so a code check would read as failed when it was never checked. The trace's
-    tools are the whole run's, whatever node the KPI names (T181).
+    final one, so a code check would read as failed when it was never checked.
+
+    T210: `tool_called` / `tool_not_called` read only the KPI's named node's tool calls
+    (via with_units paths). If that node was not recorded, the case is omitted (unmeasured).
+    `tool_sequence` still reads the whole run.
 
     T264: `output_*` checks read the named node's output; `when:` skips out-of-scope runs
     (omitted from the map — not a pass). Trajectory nodes include unit paths (`sub.inner`).
@@ -2194,8 +2197,14 @@ def _l2_cases(
         case_id = f"run-{i}/{spec.node}"
         units = with_units(steps)
         if spec.judge == "code":
-            tools = run_tools([s.output for s in steps])
             kind = str((spec.check or {}).get("type", ""))
+            if kind in _NODE_SCOPED_TOOLS:
+                scoped = tools_for_node([(s.node, s.output) for s in units], spec.node)
+                if scoped is None:
+                    continue  # named node not recorded → unmeasured, never a silent pass
+                tools = scoped
+            else:
+                tools = run_tools([s.output for s in steps])
             node_out: dict[str, object] = {
                 "trace": {"nodes": [s.node for s in units], "tools": tools}
             }

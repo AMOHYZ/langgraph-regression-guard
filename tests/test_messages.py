@@ -20,7 +20,7 @@ from langchain_core.messages import (
 from langchain_core.messages.tool import ToolCall, tool_call
 from pydantic import BaseModel
 
-from lgcov.messages import decode, encode, key_fields, plain, run_tools
+from lgcov.messages import decode, encode, key_fields, plain, run_tools, tools_for_node
 
 
 def _round_trip(value: object) -> object:
@@ -221,6 +221,22 @@ def _call(name: str, call_id: str | None = None, **args: object) -> ToolCall:
 
 def _asking(*calls: ToolCall) -> AIMessage:
     return AIMessage("", tool_calls=list(calls))
+
+
+def test_tools_for_node_scopes_to_named_node_and_none_when_missing() -> None:
+    """T210: only that node's calls; missing node → None (unmeasured)."""
+
+    def msg(tool: str, call_id: str) -> AIMessage:
+        return AIMessage("", tool_calls=[{"name": tool, "args": {}, "id": call_id}])
+
+    outs = [
+        ("supervisor", {"messages": [msg("think_tool", "1")]}),
+        ("researcher", {"messages": [msg("web_search", "2")]}),
+    ]
+    assert tools_for_node(outs, "researcher") == ["web_search"]
+    assert tools_for_node(outs, "supervisor") == ["think_tool"]
+    assert tools_for_node(outs, "missing") is None
+    assert tools_for_node([("researcher", {"messages": []})], "researcher") == []
 
 
 def test_run_tools_lists_ai_message_calls_in_order_once_per_id() -> None:

@@ -2093,7 +2093,7 @@ kpis:
     rubric: Did the run call refund_order?
     check: {type: tool_not_called, tool: refund_order}
 """
-WHOLE_RUN = "node scope not applied to tool checks yet (whole-run)"
+WHOLE_RUN = "node scope not applied to tool_sequence yet (whole-run)"
 
 
 def _calling_tools(for_999: tuple[str, ...] = ("lookup_order",)) -> str:
@@ -2150,7 +2150,7 @@ def test_cli_ci_a_forbidden_tool_call_fails_its_code_check(
         "`never_refunds` passed on the base and fails here on 1 of 2 cases (`run-1/lookup_order`)."
     ) in report
     assert "looks_up_the_order" not in report.split("passed on the base")[0]
-    assert WHOLE_RUN in report
+    assert WHOLE_RUN not in report  # T210: tool_called/tool_not_called are node-scoped
 
 
 def test_cli_ci_lookup_order_calling_its_tool_passes_tool_called(
@@ -2222,7 +2222,7 @@ def test_cli_ci_a_pr_that_stops_calling_a_tool_a_blocking_tool_sequence_names_fa
     code, report, outputs = _run_ci(tmp_path, *never)
     assert (code, outputs["verdict"]) == (1, "fail")
     assert "`looks_up_the_order` passed on the base and fails here on 1 of 2 cases" in report
-    assert WHOLE_RUN in report
+    assert WHOLE_RUN in report  # tool_sequence still whole-run
     typo = _sequence_taxonomy(TOOL_TAXONOMY, "{type: tool_sequence, tools: lookup_ordr}")
     (tmp_path / "taxonomy.yaml").write_text(typo, encoding="utf-8")
     (tmp_path / "graph.py").write_text(_calling_tools(), encoding="utf-8")  # the base's again
@@ -2242,7 +2242,7 @@ def test_cli_judge_exits_1_on_a_forbidden_tool_call(
     assert main(args) == 1
     out = capsys.readouterr().out
     assert "| 🔴 new failure: never_refunds on 1 of 2 cases: `run-1/lookup_order` |" in out
-    assert WHOLE_RUN in out
+    assert WHOLE_RUN not in out  # T210: tool_not_called is node-scoped
 
 
 # T199: the tally line under the comment's heading. PR 7, the demo PR, makes this change.

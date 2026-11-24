@@ -5,6 +5,13 @@
 - **`lgcov import langsmith --traces` (T198).** Import recent LangSmith root runs as
   lgcov cases (read-only; `LANGSMITH_API_KEY` from env only, never printed). Optional
   `--project` / `--limit`. Live smoke writes under `.lgcov-langsmith-traces/` (gitignored).
+- **Node-scoped tool checks (T210).** `tool_called` / `tool_not_called` only look at the KPI's
+  `node:` tool calls (via recorded AI messages / unit paths). A tool another node called no
+  longer false-passes the check (e.g. supervisor `think_tool` does not satisfy
+  `researcher_uses_think_tool`). If the named node was not recorded (e.g. subgraph-only), the
+  check is unmeasured for that case — never a silent pass. `tool_sequence` remains whole-run
+  and still warns.
+
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
   per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,
