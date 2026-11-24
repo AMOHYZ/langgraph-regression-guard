@@ -12,6 +12,9 @@
   check is unmeasured for that case — never a silent pass. `tool_sequence` remains whole-run
   and still warns.
 
+- **Adoption state machine (T155-A).** `AdoptionState`: eligible → approved →
+  baseline_updated → merged → deployed (distinct from `ProposeState`). Change-record stub
+  tracks history; approve-bind is T155-B.
 - **`lgcov propose` (T120 v0).** Gate a proposal without a GitHub PR: `--ref <sha>` XOR
   `--node <id> --prompt <file>`. JSON on stdout ([docs/guard-schema.json](docs/guard-schema.json)):
   per-KPI SHIP/BLOCK/INCONCLUSIVE with `delta_hat`, `ci`, `mde`, `n_star`, `ni_n_star`,
