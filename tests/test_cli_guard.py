@@ -726,6 +726,63 @@ def test_guard_exits_2_when_the_reference_moves(
     assert "its digest doesn't match" in capsys.readouterr().err
 
 
+def test_guard_exits_2_when_kept_reference_path_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T234: reference.path set but file absent → exit 2."""
+    _locked(tmp_path, monkeypatch)
+    first = _round()
+    Path(ROUND).write_text(
+        yaml.safe_dump({**first, "reference_path": "rounds/1.yaml"}), encoding="utf-8"
+    )
+    assert lgcov_main(["round", "new"]) == 0
+    ref = _round()["reference"]
+    assert isinstance(ref, dict) and ref["path"] == "rounds/1.yaml"
+    capsys.readouterr()
+    assert lgcov_main(["guard"]) == 2
+    assert "missing" in capsys.readouterr().err
+
+
+def test_guard_exits_2_when_kept_reference_hash_mismatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T234: kept copy present but digest ≠ pointer → exit 2."""
+    _locked(tmp_path, monkeypatch)
+    first = _round()
+    Path("rounds").mkdir()
+    # Wrong digest bytes at the kept path (hand-edited copy of round 1).
+    Path("rounds/1.yaml").write_text(
+        yaml.safe_dump({**first, "digest": "f" * 64}), encoding="utf-8"
+    )
+    Path(ROUND).write_text(
+        yaml.safe_dump({**first, "reference_path": "rounds/1.yaml"}), encoding="utf-8"
+    )
+    assert lgcov_main(["round", "new"]) == 0
+    capsys.readouterr()
+    assert lgcov_main(["guard"]) == 2
+    assert "digest" in capsys.readouterr().err
+
+
+def test_guard_passes_with_kept_reference_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T234 happy path: kept copy of round 1 re-hashes to the pointer digest."""
+    _locked(tmp_path, monkeypatch)
+    first = _round()
+    Path("rounds").mkdir()
+    Path("rounds/1.yaml").write_text(Path(ROUND).read_text(encoding="utf-8"), encoding="utf-8")
+    Path(ROUND).write_text(
+        yaml.safe_dump({**first, "reference_path": "rounds/1.yaml"}), encoding="utf-8"
+    )
+    assert lgcov_main(["round", "new"]) == 0
+    assert _round()["reference"] == {
+        "round": 1,
+        "digest": first["digest"],
+        "path": "rounds/1.yaml",
+    }
+    assert lgcov_main(["guard"]) == 0
+
+
 def test_lgcov_round_alone_says_what_it_takes(capsys: pytest.CaptureFixture[str]) -> None:
     assert lgcov_main(["round"]) == 2
     assert "lgcov round new" in capsys.readouterr().err

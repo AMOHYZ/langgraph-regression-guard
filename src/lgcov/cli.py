@@ -177,6 +177,7 @@ from lgcov.gate_round import (
     is_full_sha,
     parse_draft,
     prompt_hash,
+    reference_copy_problems,
     round_problems,
 )
 from lgcov.gate_round import lock_round as lock_gate_round
@@ -2050,6 +2051,9 @@ def _ci_guard_exit(args: argparse.Namespace) -> int | None:
         return EXIT_ERROR
     candidate: str | None = _pr_head() or _head(".")
     problems = round_problems(locked, now, candidate, entries(ledger))
+    if locked.reference is not None:
+        root = Path(args.policy_dir) if args.policy_dir else Path(".")
+        problems += reference_copy_problems(locked.reference, root)
     code = classify_ci_guard_problems(problems)
     if code is None:
         return None
@@ -2921,6 +2925,10 @@ def _guard_cmd(argv: list[str]) -> int:
     # On a PR, HEAD is GitHub's merge commit, which no round can lock.
     candidate: str | None = args.candidate or _pr_head() or _head(".")
     problems = round_problems(locked, now, candidate, entries(ledger))
+    # T234 option 2: re-hash the kept reference copy when the pointer names a path.
+    if locked.reference is not None:
+        root = Path(args.policy_dir) if args.policy_dir else Path(".")
+        problems += reference_copy_problems(locked.reference, root)
     if problems or candidate is None:
         print(f"lgcov guard: this run isn't covered by round {locked.round}:", file=sys.stderr)
         print("\n".join(f"- {p}" for p in problems), file=sys.stderr)

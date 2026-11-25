@@ -356,13 +356,32 @@ def test_a_person_cant_write_the_reference_in_a_draft() -> None:
         {"digest": "e" * 64},
         {"round": 0, "digest": "e" * 64},
         {"round": 1, "digest": "short"},
-        {"round": 1, "digest": "e" * 64, "path": "rounds/1.yaml"},
+        {"round": 1, "digest": "e" * 64, "commit": "abc"},
+        {"round": 1, "digest": "e" * 64, "path": ""},
     ],
-    ids=["bare digest", "no digest", "no round", "round 0", "short digest", "unknown key"],
+    ids=[
+        "bare digest",
+        "no digest",
+        "no round",
+        "round 0",
+        "short digest",
+        "unknown key",
+        "empty path",
+    ],
 )
 def test_a_bad_reference_is_refused(reference: object) -> None:
     with pytest.raises(ValueError, match="reference"):
         parse_round({**_next(_doc()), "reference": reference})
+
+
+def test_a_reference_may_carry_a_kept_path() -> None:
+    """T234 option 2: path is optional; when present it is in the digest."""
+    second = parse_round(_next(_doc()))
+    with_path = replace(second, reference=Reference(1, ROUND_1_DIGEST, "rounds/1.yaml"))
+    locked = replace(with_path, digest=round_digest(with_path))
+    assert locked.reference == Reference(1, ROUND_1_DIGEST, "rounds/1.yaml")
+    assert round_problems(locked, NOW, A, 0) == []
+    assert round_digest(locked) != second.digest
 
 
 # --- Parsing.

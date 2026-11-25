@@ -56,7 +56,7 @@ longer match how maintainers score today.
 
 - Auto-detect rubric paraphrase or silent label-policy change.
 - Auto-invalidate bands when taxonomy drifts.
-- Count cumulative loss from criteria changes (related: [round.md reference pointer](round.md#cumulative-loss-pointer-options-t234-not-built)).
+- Count cumulative loss from criteria changes (related: [round.md reference pointer](round.md#cumulative-loss-pointer-options-t234)).
 - Replace human review of whether two label sets share a meaning.
 
 ## Related

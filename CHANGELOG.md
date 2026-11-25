@@ -2,8 +2,15 @@
 
 ## Unreleased
 
+- **Cumulative loss / kept reference path (T234, option 2).** `reference.path` names a kept
+  copy of the reference round that `lgcov guard` re-hashes. Person-written `reference_path` on
+  a draft is locked under `reference.path`. **No summing** across intermediate rounds: each
+  candidate is paired-tested directly against the kept reference (`loss_vs_reference`); budget
+  is the KPI's non-inferiority margin `m`. **Breach** (loss beyond `m`) → BLOCK / **exit 1**;
+  **inconclusive** → needs_human (existing exit); **missing path or hash mismatch** → **exit 2**.
+  Extends the prior guard contract (standalone guard was 0/2 only). Digests omit `path` when
+  absent so pre-path rounds stay stable. [docs/round.md](docs/round.md).
 - **Pitch (T249).** README / why-us tagline and PyPI description: a CI gate a pull request can't grade itself; Early *which change did it*; claims stay inside docs/benchmark.md.
-- **Cumulative-loss pointer options (T234).** Docs note in `docs/round.md`: digest-only vs kept `path` copy vs git-history for the reference round (not built).
 - **Blind labelling packs (T171).** Blank root/propagated/unaffected worksheets for gemini-fullstack #90/#35 and local-deep-researcher #81 under `docs/benchmark/label-packs/` (no lgcov labels).
 - **Criteria-drift loop (T196).** Spec one-pager: detect taxonomy/label criteria drift → recalibrate → band refresh → gate impact (`docs/criteria-drift.md`).
 - **#163 speed runbook (T194).** `docs/benchmark-speed.md`: served vs `--live` estimate row + maintainer commands; not measured in this ladder.
