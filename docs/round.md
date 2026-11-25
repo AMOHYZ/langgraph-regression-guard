@@ -32,10 +32,28 @@ without calling `--record` and without writing `exposure.json`. Mapping (T235):
 | Digest mismatch, or locked gate material drifted / PR changed round or ledger | **1** | **2** (never 1) |
 | Clean | continue | **0** |
 
-The candidate job never runs this check. Standalone `lgcov guard` stays exit 0 or 2 only.
+The candidate job never runs this check. Standalone `lgcov guard` is exit 0 or 2 for
+lock/setup (including `reference.path` re-hash); cumulative-loss breach is exit 1 (T234).
 
 **Proposal mode** is a separate command: [`lgcov propose`](propose.md) (`--ref` or
 `--node --prompt`). It never records exposure.
+
+### Cumulative loss vs the kept reference (T234, option 2)
+
+When a later round's `reference` carries a kept `path` copy, cumulative loss is checked
+**directly against that reference** — not by summing intermediate rounds
+(`lgcov.cumulative_loss.loss_vs_reference`):
+
+| Rule | Behaviour |
+|---|---|
+| **No summing** | Each candidate is paired-tested against the kept reference with the existing paired test. |
+| **Budget** | The KPI's non-inferiority margin `m` vs the reference. |
+| **Breach** (loss beyond `m`) | **BLOCK**, **exit 1**. |
+| **Inconclusive** vs reference | **needs_human** (exit 0 unless `--fail-on-inconclusive` / `gate.inconclusive_blocks`). |
+| **Missing `reference.path` file or hash mismatch** | **exit 2** (`lgcov guard` / `lgcov ci` re-hash). |
+
+This extends the earlier exit-code contract: a cumulative-loss **breach** is exit 1 (lock
+checks alone stay 0/2). Digest-only pointers (no `path`) skip the re-hash.
 
 ## The round file
 
@@ -69,7 +87,7 @@ stop_rules:       # any names; each a number, a string or true/false
 | `alpha`, `power` | `gate.alpha` and `gate.power`. |
 | `k_gate` | The blocking KPIs, as [docs/gate.md](gate.md) counts them. This is not the number of candidates. |
 | `exposure_floor` | How many entries `exposure.json` had when this round started. |
-| `reference` | The reference round's number and digest. A first round is the reference and has no such key. |
+| `reference` | The reference round's number and digest, and optionally `path` to a kept copy (T234 option 2). A first round is the reference and has no such key. |
 | `digest` | A hash of every field above, so a hand edit exits 2. |
 
 Adding, removing or editing a case's inputs changes `gate_cases.sha256`. Reordering the runs doesn't,
@@ -81,8 +99,9 @@ hash moving.
 
 ## `lgcov guard`
 
-It exits 0 when everything matches and 2 otherwise, naming every problem. It never exits 1. It
-compares the round with:
+It exits 0 when everything matches and 2 on lock/setup problems (including a missing or
+mismatched `reference.path`), naming every problem. Cumulative-loss **breach** vs the kept
+reference is **exit 1** via `loss_vs_reference` — see above. It compares the round with:
 
 - the case set in the checkout under test, the file `lgcov ci` would read;
 - the judge's model, version and prompt hash;
@@ -90,7 +109,9 @@ compares the round with:
 - the candidate: `--candidate` if given, else the PR's head on a `pull_request` event, else `HEAD`.
   On a PR, `HEAD` is GitHub's merge commit, which no round can lock;
 - `exposure_floor`, so a deleted or reset ledger is caught;
-- `reference`: a round numbered 2 or more must have one, and it must name an earlier round.
+- `reference`: a round numbered 2 or more must have one, and it must name an earlier round;
+- `reference.path` (when set): the kept copy must exist and re-hash to `reference.digest`
+  (missing file or mismatch → exit 2).
 
 With `--policy-dir`, it reads the round, the ledger, `lgcov.yaml`, the taxonomy and the bands from
 the base checkout, with no fallback to the PR's files, as `lgcov ci` does for its policy.
@@ -118,37 +139,33 @@ rewrites it, and a case a later round drops keeps its history.
 
 ## The reference round
 
-A later round's cumulative loss will be counted from one fixed round, the reference. Nothing does
-that arithmetic yet. What exists is the pointer:
+A later round's cumulative loss is counted from one fixed round, the reference. The pointer:
 
 ```yaml
 reference:
   round: 1
   digest: 60485ea9991390bab309586bc83c4044f97864448b08c32227889a452a16deb2
+  path: rounds/1.yaml   # optional; T234 option 2 — kept copy guard re-hashes
 ```
 
 The first round is the reference and has no `reference` key. The second round points at the first
 round's number and digest, and every later round carries that pointer unchanged. You don't write
-it: `lgcov round new` refuses a draft that has one. It is inside the digest, so editing or removing
-it makes `lgcov guard` exit 2.
+`reference` itself: `lgcov round new` refuses a draft that has one. To attach a kept copy, set
+person-written `reference_path: rounds/1.yaml` on the draft (or on a locked round before
+`lgcov round new`); the lock writes it under `reference.path`. It is inside the digest, so
+editing or removing it makes `lgcov guard` exit 2.
 
-**Planned, not built:** a `path` key under `reference`, naming a kept copy of the reference round
-that `lgcov guard` re-hashes. A key a round doesn't have is left out of its digest, so a round
-locked before `path` exists keeps its bytes and its digest when that key arrives.
+A key a round doesn't have is left out of its digest, so a round locked before `path` exists
+keeps its bytes and its digest when that key arrives. Digest-only remains the minimum lock;
+git-history can still help recovery but is not the sole source of truth.
 
-### Cumulative-loss pointer options (T234, not built)
+### Cumulative-loss pointer options (T234)
 
-Nothing counts cumulative loss yet. When it does, the pointer above has to say *where* the
-reference round's bytes still live. Three options (docs only — pick later):
-
-| Option | What it stores | Pros | Cons |
-|---|---|---|---|
-| **Digest-only** (today) | `reference.round` + `digest` | Already locked; tiny | Bytes live only in git history; someone who edits `reference` then runs `lgcov round new` gets a valid file without re-checking the old round |
-| **Kept `path` copy** | Digest plus a path to a committed snapshot of the reference round | `lgcov guard` can re-hash the file; survives a rewrite of `lgcov-round.yaml` | Another file to protect (CODEOWNERS); rounds locked before `path` must omit it so digests stay stable |
-| **Git-history** | Digest + commit/SHA that held the reference round | No second file | Needs a checkout of that commit in CI; harder offline / shallow clones |
-
-Recommendation when implementing: prefer **kept `path` copy** for CI re-hash, keep digest-only
-as the minimum lock, and treat git-history as a recovery aid — not the sole source of truth.
+| Option | What it stores | Status |
+|---|---|---|
+| **Digest-only** | `reference.round` + `digest` | Minimum lock (always) |
+| **Kept `path` copy** | Digest plus a path to a committed snapshot of the reference round | **Implemented** — `lgcov guard` re-hashes; see exit mapping above |
+| **Git-history** | Digest + commit/SHA that held the reference round | Not built; recovery aid only |
 
 ## A round, start to finish
 
@@ -193,10 +210,11 @@ A commit can't contain its own SHA, so the round goes on the base and names a ca
 - **`exposure_floor` covers the ledger as it stood when the round started.** Only git protects what
   was recorded since. It is a count, so it catches accidents, not someone replacing entries.
 - **Uncommitted changes aren't covered.** `lgcov guard` warns about them, as `lgcov ci` does.
-- **Nothing re-checks the reference round itself.** `lgcov-round.yaml` is rewritten each round, so the
-  reference round's content is only in git history. Someone who edits `reference` and then runs
-  `lgcov round new` gets a valid file. On a PR, `--policy-dir` reads the base's file, so changing
-  the reference takes a commit to the base branch.
+- **Without `reference.path`, nothing re-checks the reference round's bytes.** `lgcov-round.yaml`
+  is rewritten each round, so with a digest-only pointer the reference content is only in git
+  history. With option 2's kept `path`, `lgcov guard` re-hashes that file. Someone who edits
+  `reference` and then runs `lgcov round new` still gets a valid file. On a PR, `--policy-dir`
+  reads the base's file, so changing the reference takes a commit to the base branch.
 - **`--candidate` is taken as given,** and the digest is not a signature: everything in the file is
   public. A PR's code that shares the job can still forge the result, as
   [the trust boundary](trust-boundary.md) says, so protect both files with CODEOWNERS.

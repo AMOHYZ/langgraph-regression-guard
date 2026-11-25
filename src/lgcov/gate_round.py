@@ -12,6 +12,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 import yaml
 
@@ -44,6 +45,8 @@ _KEYS = (
     "reference",
     "digest",
 )
+# Person-written draft-only: path to a kept copy of the reference round (T234 option 2).
+_DRAFT_KEYS = (*_KEYS, "reference_path")
 
 
 @dataclass(frozen=True)
@@ -80,10 +83,15 @@ class GateNow:
 
 @dataclass(frozen=True)
 class Reference:
-    """T158: the round a later round's cumulative loss will be counted from."""
+    """T158/T234: the round a later round's cumulative loss is counted from.
+
+    ``path`` (option 2) names a kept copy of that round that ``lgcov guard`` re-hashes.
+    Absent on rounds locked before path existed, so their digests stay stable.
+    """
 
     round: int
     digest: str  # that round's own digest, as its file had it
+    path: str | None = None  # kept copy; None = digest-only pointer
 
 
 @dataclass(frozen=True)
@@ -100,6 +108,7 @@ class Draft:
     previous_floor: int = 0
     previous_digest: str | None = None
     previous_reference: Reference | None = None
+    reference_path: str | None = None  # T234: person sets when keeping a copy
 
 
 @dataclass(frozen=True)
@@ -259,11 +268,14 @@ def _tag_list(value: object) -> tuple[str, ...]:
 
 def _reference(value: object) -> Reference:
     ref = _mapping(value, "'reference'")
-    _check_keys(ref, ("round", "digest"), "'reference'")
-    if set(ref) != {"round", "digest"}:
+    _check_keys(ref, ("round", "digest", "path"), "'reference'")
+    if "round" not in ref or "digest" not in ref:
         raise ValueError("'reference' needs 'round' and 'digest'; `lgcov round new` writes both")
+    path = _str(ref["path"], "reference.path") if "path" in ref else None
     return Reference(
-        _count(ref["round"], "reference.round", 1), _hash(ref["digest"], "reference.digest")
+        _count(ref["round"], "reference.round", 1),
+        _hash(ref["digest"], "reference.digest"),
+        path,
     )
 
 
@@ -271,7 +283,7 @@ def parse_draft(raw: object) -> Draft:
     """What a person writes, from a draft or a locked round. The computed fields aren't read here,
     other than the round number and the exposure floor the next round carries on from."""
     doc = _mapping(raw, "the round file")
-    _check_keys(doc, _KEYS, "the round file")
+    _check_keys(doc, _DRAFT_KEYS, "the round file")
     if doc.get("version") != VERSION:
         raise ValueError(f"'version' must be {VERSION}, got {doc.get('version')!r}")
     cases = _mapping(_required(doc, "gate_cases"), "'gate_cases'")
@@ -288,6 +300,9 @@ def parse_draft(raw: object) -> Draft:
         previous_floor=_count(doc.get("exposure_floor", 0), "exposure_floor", 0),
         previous_digest=_hash(doc["digest"], "digest") if "digest" in doc else None,
         previous_reference=_reference(doc["reference"]) if "reference" in doc else None,
+        reference_path=_str(doc["reference_path"], "reference_path")
+        if "reference_path" in doc
+        else None,
     )
 
 
@@ -333,12 +348,17 @@ def parse_round(raw: object) -> Round:
     )
 
 
+def _reference_body(ref: Reference) -> dict[str, object]:
+    """Only the keys the pointer has: omit ``path`` when absent so pre-path digests stay stable."""
+    body: dict[str, object] = {"round": ref.round, "digest": ref.digest}
+    if ref.path is not None:
+        body["path"] = ref.path
+    return body
+
+
 def _body(r: Round) -> dict[str, object]:
     """Only the keys the round has: no `reference` in a reference round, so its bytes and digest
     are what they were before T158, and a key added later can be left out the same way."""
-    reference: dict[str, object] = (
-        {} if r.reference is None else {"round": r.reference.round, "digest": r.reference.digest}
-    )
     return {
         "version": VERSION,
         "round": r.round,
@@ -357,7 +377,7 @@ def _body(r: Round) -> dict[str, object]:
         "candidates": list(r.candidates),
         "stop_rules": r.stop_rules,
         "exposure_floor": r.exposure_floor,
-        **({"reference": reference} if reference else {}),
+        **({"reference": _reference_body(r.reference)} if r.reference is not None else {}),
     }
 
 
@@ -378,6 +398,13 @@ def _lost(exposure_entries: int, floor: int, whose: str) -> str:
     )
 
 
+def _with_path(ref: Reference, path: str | None) -> Reference:
+    """Attach a kept-copy path when the pointer doesn't have one yet (T234 option 2)."""
+    if path is None or ref.path is not None:
+        return ref
+    return Reference(ref.round, ref.digest, path)
+
+
 def _next_reference(draft: Draft) -> Reference | None:
     """A first round is the reference. The round after it points at it, and every later round
     carries that pointer on, so a new round can't start the count again."""
@@ -386,12 +413,12 @@ def _next_reference(draft: Draft) -> Reference | None:
             raise ValueError("'reference' is written by `lgcov round new`; remove it from a draft")
         return None
     if draft.previous_reference is not None:
-        return draft.previous_reference
+        return _with_path(draft.previous_reference, draft.reference_path)
     if draft.previous_digest is None:
         raise ValueError(
             f"round {draft.previous_round} has no 'digest' for the next round to point at"
         )
-    return Reference(draft.previous_round, draft.previous_digest)
+    return Reference(draft.previous_round, draft.previous_digest, draft.reference_path)
 
 
 def lock_round(draft: Draft, now: GateNow, exposure_entries: int) -> Round:
@@ -455,10 +482,35 @@ def classify_ci_guard_problems(problems: list[str]) -> int | None:
         "exposure history lost",
         "has no reference",
         "is not before round",
+        "reference path",  # T234: missing kept copy or hash mismatch → exit 2
     )
     if all(any(token in p for token in setup) for p in problems):
         return 2
     return 1
+
+
+def reference_copy_problems(ref: Reference, root: Path) -> list[str]:
+    """T234 option 2: re-hash the kept reference copy. Empty when path is unset or matches.
+
+    Missing file or digest mismatch → caller exits 2.
+    """
+    if ref.path is None:
+        return []
+    path = Path(ref.path) if Path(ref.path).is_absolute() else root / ref.path
+    if not path.is_file():
+        return [f"reference path missing: {ref.path}"]
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        kept = parse_round(raw)
+    except (OSError, ValueError) as exc:
+        return [f"reference path {ref.path}: {exc}"]
+    if kept.digest != round_digest(kept):
+        return [f"reference path {ref.path}: the kept round was edited; its digest doesn't match"]
+    if kept.digest != ref.digest:
+        return [
+            f"reference path {ref.path}: digest {_shown(kept.digest)}, pointer {_shown(ref.digest)}"
+        ]
+    return []
 
 
 def round_problems(
