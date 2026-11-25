@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.7.0 (2026-11-25)
+
+Everything since 0.6.0 that landed on `main` (and T234 on this release branch). Behaviour / exit-contract changes first. No tag and no publish in this PR.
+
+### Changed
+
+- **Node-scoped tool checks (T210).** `tool_called` / `tool_not_called` only look at the KPI's
+  `node:` tool calls (via recorded AI messages / unit paths). A tool another node called no
+  longer false-passes the check (e.g. supervisor `think_tool` does not satisfy
+  `researcher_uses_think_tool`). If the named node was not recorded (e.g. subgraph-only), the
+  check is unmeasured for that case — never a silent pass. `tool_sequence` remains whole-run
+  and still warns.
+- **Approve bind (T155-B).** `lgcov review approve` binds approval to base/candidate SHAs
+  and content hashes. `--override` records risk acceptance only (statistical verdict
+  unchanged). Stale approvals are refused. `lgcov cassette accept --require-approval`
+  needs a fresh approval; advancing writes the change record.
+- **Guard into `lgcov ci` (T235).** Evaluate / single-job checks the base gate round (never `--record`). Digest / material → exit 1; unlocked-on-base / missing ledger → exit 2; no round → skip. Standalone `lgcov guard` lock/setup stays 0/2; cumulative-loss breach is exit 1 (T234).
 - **Cumulative loss / kept reference path (T234, option 2).** `reference.path` names a kept
   copy of the reference round that `lgcov guard` re-hashes. Person-written `reference_path` on
   a draft is locked under `reference.path`. **No summing** across intermediate rounds: each
@@ -10,13 +27,21 @@
   **inconclusive** → needs_human (existing exit); **missing path or hash mismatch** → **exit 2**.
   Extends the prior guard contract (standalone guard was 0/2 only). Digests omit `path` when
   absent so pre-path rounds stay stable. [docs/round.md](docs/round.md).
+- **Gate behaviour change (T262).** Each drift root gets a harm status from lgcov's own KPIs/code checks only (`harmed` / `no harm seen` / `unmeasured`); `classify` is unchanged and never reads a synthetic truth label. New `fail-on: harmed-root` fails only on harmed roots; unmeasured roots are `needs_human` (never a pass); no-harm-seen alone does not fail (pass / exit 0). Default remains `root-drift` (any root fails). A covering check **measures** a root only when it can observe that root's output or something downstream: same-node `node_visited` / `node_not_visited`, and checks scoped only to upstream nodes, leave the root unmeasured (the PR comment names why, e.g. "only a presence check covers this node").
+- **Gate behaviour change.** Labels read chat-model `parts` (T239): a unit whose part fingerprints differ from the recording counts as fingerprint-changed for root/propagated, and the comment names those parts with the root. The candidate job writes head's part fingerprints (schema 3). Replay already serves a step only when every named part still matches.
+- **Gate behaviour change.** Labels name a changed router only when the route differed (T221): the candidate's router probe on base's `router_state`, or paired `routed` when there was no state. A router edit that still returns base's targets is no longer root of drift a later node caused.
+- **Gate behaviour change.** A tool unit whose `status` is `timeout`, `rate_limited` or `server_error` is never compared, never served and never labelled (T248). That unit and the rest of its run are not checked, so the verdict is INCONCLUSIVE (needs_human), never a pass. `success` and `error` compare as before.
+- **Gate behaviour change.** `lgcov ci` reads base's graph node names from a schema-2 baseline when the recording isn't stale (T243). A node only the PR ran is root when base's graph doesn't have it, and propagated when it does (a route that newly reached it). A recording whose part `source` hashes no longer match the base checkout's files is a harness error that names `lgcov record`; a PR that only edits the cassette folder is exempt so a re-record can land. Chat-model parts now also store `file` and `source` (a hash of that file's syntax tree). A baseline with no `parts` still trusts `graph`.
+- **Gate behaviour change.** The deciding job reads base's recorded `samples` for the noise rule (T229): an unchanged node under its spread gets no label, and a changed node only above it is root (otherwise inconclusive with the noise verdict). `lgcov record --samples K` still stores the re-runs; 0, the default, stores none.
+
+### Added
+
 - **Pitch (T249).** README / why-us tagline and PyPI description: a CI gate a pull request can't grade itself; Early *which change did it*; claims stay inside docs/benchmark.md.
 - **Blind labelling packs (T171).** Blank root/propagated/unaffected worksheets for gemini-fullstack #90/#35 and local-deep-researcher #81 under `docs/benchmark/label-packs/` (no lgcov labels).
 - **Criteria-drift loop (T196).** Spec one-pager: detect taxonomy/label criteria drift → recalibrate → band refresh → gate impact (`docs/criteria-drift.md`).
 - **#163 speed runbook (T194).** `docs/benchmark-speed.md`: served vs `--live` estimate row + maintainer commands; not measured in this ladder.
 - **Real-PR metrics fill (T101-B).** `lgcov bench --fill-real-prs` offline-fills `### Metrics from results (offline)` from results JSON + yaml statuses (pending/reviewed → pending labels); hand narrative kept.
 - **Commit-first judge fakes (T157).** Taxonomy `mode: commit_first` + `reference`; `CommitFirstFakeJudge` + agreement records + A/A FP plumbing (offline). Paid A/A command documented in `docs/judge-commit-first.md` — **not run**.
-- **Guard into `lgcov ci` (T235).** Evaluate / single-job checks the base gate round (never `--record`). Digest / material → exit 1; unlocked-on-base / missing ledger → exit 2; no round → skip. Standalone `lgcov guard` stays 0/2.
 - **Round naming (T236).** Docs and CLI help keep both names and spell out the split: a *gate
   round* (`lgcov round new` / `lgcov guard`, root `lgcov-round.yaml` + `exposure.json`) vs a
   *benchmark round* (`lgcov round init|lock|check`, path of your choice + `exposure.jsonl`). No
@@ -25,12 +50,6 @@
 - **`lgcov import langsmith --traces` (T198).** Import recent LangSmith root runs as
   lgcov cases (read-only; `LANGSMITH_API_KEY` from env only, never printed). Optional
   `--project` / `--limit`. Live smoke writes under `.lgcov-langsmith-traces/` (gitignored).
-- **Node-scoped tool checks (T210).** `tool_called` / `tool_not_called` only look at the KPI's
-  `node:` tool calls (via recorded AI messages / unit paths). A tool another node called no
-  longer false-passes the check (e.g. supervisor `think_tool` does not satisfy
-  `researcher_uses_think_tool`). If the named node was not recorded (e.g. subgraph-only), the
-  check is unmeasured for that case — never a silent pass. `tool_sequence` remains whole-run
-  and still warns.
 - **LLM judge client v0 (T188).** `judge: llm` KPIs use an OpenAI-compatible
   `/chat/completions` client (`LlmJudge`) that returns the same typed `Verdict` as Jev.
   Set `llm_model` and `llm_base_url` together in `lgcov.yaml`; key from `OPENAI_API_KEY`
@@ -47,10 +66,6 @@
 - **Adoption state machine (T155-A).** `AdoptionState`: eligible → approved →
   baseline_updated → merged → deployed (distinct from `ProposeState`). Change-record stub
   tracks history; approve-bind is T155-B.
-- **Approve bind (T155-B).** `lgcov review approve` binds approval to base/candidate SHAs
-  and content hashes. `--override` records risk acceptance only (statistical verdict
-  unchanged). Stale approvals are refused. `lgcov cassette accept --require-approval`
-  needs a fresh approval; advancing writes the change record.
 - **Change record export (T129).** `lgcov change-record export` writes JSON + markdown
   (diff → nodes → KPIs → verdict → approver → state). Docs map to EU AI Act Art. 17(1)
   and ISO/IEC 42001 8.1 as **evidence only**, never a compliance claim.
@@ -114,17 +129,11 @@
   `calibration/labels/`. With no locked gate round the check cannot decide (not a pass). Elapsed
   rounds do not clear a fit. On a PR, lineage and pools are read from the base; editing them
   yields `needs_human` (`pools_edited`). [docs/pools.md](docs/pools.md).
-- **Gate behaviour change (T262).** Each drift root gets a harm status from lgcov's own KPIs/code checks only (`harmed` / `no harm seen` / `unmeasured`); `classify` is unchanged and never reads a synthetic truth label. New `fail-on: harmed-root` fails only on harmed roots; unmeasured roots are `needs_human` (never a pass); no-harm-seen alone does not fail (pass / exit 0). Default remains `root-drift` (any root fails). A covering check **measures** a root only when it can observe that root's output or something downstream: same-node `node_visited` / `node_not_visited`, and checks scoped only to upstream nodes, leave the root unmeasured (the PR comment names why, e.g. "only a presence check covers this node").
 - **Synthetic bench (T262).** Demo, fanout and subgraph code-check taxonomies (committed before measure) drive harm status on synthetic cases. Content checks (T264) measure covered roots; uncovered nodes stay unmeasured under the observe-root rule. `lgcov bench --synthetic` reports enforced-root false flags and measured recall beside the drift-root score. Does not call or copy the suite's outcome helper.
-- **Gate behaviour change.** Labels read chat-model `parts` (T239): a unit whose part fingerprints differ from the recording counts as fingerprint-changed for root/propagated, and the comment names those parts with the root. The candidate job writes head's part fingerprints (schema 3). Replay already serves a step only when every named part still matches.
-- **Gate behaviour change.** Labels name a changed router only when the route differed (T221): the candidate's router probe on base's `router_state`, or paired `routed` when there was no state. A router edit that still returns base's targets is no longer root of drift a later node caused.
-- **Gate behaviour change.** A tool unit whose `status` is `timeout`, `rate_limited` or `server_error` is never compared, never served and never labelled (T248). That unit and the rest of its run are not checked, so the verdict is INCONCLUSIVE (needs_human), never a pass. `success` and `error` compare as before.
-- **Gate behaviour change.** `lgcov ci` reads base's graph node names from a schema-2 baseline when the recording isn't stale (T243). A node only the PR ran is root when base's graph doesn't have it, and propagated when it does (a route that newly reached it). A recording whose part `source` hashes no longer match the base checkout's files is a harness error that names `lgcov record`; a PR that only edits the cassette folder is exempt so a re-record can land. Chat-model parts now also store `file` and `source` (a hash of that file's syntax tree). A baseline with no `parts` still trusts `graph`.
 - `lgcov record` redacts a secret-named key before it writes the value, in the run inputs and in every step's input and output, including a unit inside a subgraph. The name rule is the fingerprint's: a whole word of the key, split on `_` and camelCase, is `key`, `apikey`, `token`, `secret`, `password`, `passwd`, `credential`, `credentials` or `auth`. The stored value is `<redacted>`, and matching redacts the live value the same way, so a redacted input still matches. `max_tokens` and `author` stay. A node that needs the secret from state sees the marker and drifts: a secret does not belong in state. **Re-record** to take secrets out of a baseline. A file recorded before this still loads, and its saved secret is what a served output returns until you re-record.
 - `lgcov record` writes each tool call as a unit of its tool node: the tool's name, its arguments, its message, its code fingerprint, the call id and `success` or `error`. Replay serves that call whole when the code and the arguments match, and does not run the tool. The call id is fitted to the id this run made. A tool whose code changed runs live. **Re-record** to serve tool calls; a baseline without these units runs the tool, as before.
 - `lgcov record` writes a graph started inside a node or a tool as an `agent` unit of that caller, with the visits inside it. Replay serves it only whole: through the node or the tool call that started it. The visits are not served on their own. When the only tool call in a tool node started the graph, the agent unit keeps that call's id. **Re-record** to get these units; a baseline without them records the caller as before.
 - `lgcov record` writes `routed` and `router_state` on a node with a conditional edge: the targets its router returned, and the state it saw. The candidate job probes a changed router on base's recorded state and writes the targets in the candidate file (schema 3). Labels name a changed router only when the route differed (T221). **Re-record** to get the fields.
-- **Gate behaviour change.** The deciding job reads base's recorded `samples` for the noise rule (T229): an unchanged node under its spread gets no label, and a changed node only above it is root (otherwise inconclusive with the noise verdict). `lgcov record --samples K` still stores the re-runs; 0, the default, stores none.
 - `lgcov record` writes a chat model's `model_name`, `model`, `temperature`, `max_tokens` and `top_p` as `parts` of the node that holds the model, in the recording's `parts` table and on that step. Serving and labels read them. A graph with no chat model writes no `parts`.
 
 ## 0.6.0 (2026-11-18)

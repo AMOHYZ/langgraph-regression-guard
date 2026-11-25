@@ -1,6 +1,6 @@
 [project]
 name = "lgcov"
-version = "0.6.0"
+version = "0.7.0"
 description = "A CI gate for LangGraph agents that a pull request can't grade itself. Early: names which change did it — which node's output changed first."
 readme = "README.md"
 license = "MIT"
