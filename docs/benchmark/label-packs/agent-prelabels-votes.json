@@ -1,0 +1,1118 @@
+{
+  "note": "AGENT PRE-LABELS (10-way vote) · NOT HUMAN-REVIEWED · do not use for benchmark scores",
+  "task": "T171",
+  "majority_rule": "a label with >= 6 of 10 votes, else 'no majority'",
+  "prs": {
+    "gemini-fullstack-90": {
+      "url": "https://github.com/google-gemini/gemini-fullstack-langgraph-quickstart/pull/90",
+      "base": "cf240a2c8599eed5244d39c7343736885ddc727f",
+      "head": "8e6f3f576febcec6a15dd6b7449fb27bf38a2c53"
+    },
+    "gemini-fullstack-35": {
+      "url": "https://github.com/google-gemini/gemini-fullstack-langgraph-quickstart/pull/35",
+      "base": "fddf107e0a9f6c1f3c45f70031b65a7138a281b1",
+      "head": "3da4c4e4123683f691bd2c158c19102878211ba1"
+    },
+    "local-deep-researcher-81": {
+      "url": "https://github.com/langchain-ai/local-deep-researcher/pull/81",
+      "base": "24db21faae75ccceb18b5a048e0416e2da45ab47",
+      "head": "6ca0d4625ef7144513845928d7f32ed0ff56ada1"
+    }
+  },
+  "nodes": [
+    {
+      "pack": "gemini-fullstack-90",
+      "node": "generate_query"
+    },
+    {
+      "pack": "gemini-fullstack-90",
+      "node": "web_research"
+    },
+    {
+      "pack": "gemini-fullstack-90",
+      "node": "reflection"
+    },
+    {
+      "pack": "gemini-fullstack-90",
+      "node": "finalize_answer"
+    },
+    {
+      "pack": "gemini-fullstack-35",
+      "node": "generate_query"
+    },
+    {
+      "pack": "gemini-fullstack-35",
+      "node": "web_research"
+    },
+    {
+      "pack": "gemini-fullstack-35",
+      "node": "reflection"
+    },
+    {
+      "pack": "gemini-fullstack-35",
+      "node": "finalize_answer"
+    },
+    {
+      "pack": "local-deep-researcher-81",
+      "node": "generate_query"
+    },
+    {
+      "pack": "local-deep-researcher-81",
+      "node": "web_research"
+    },
+    {
+      "pack": "local-deep-researcher-81",
+      "node": "summarize_sources"
+    },
+    {
+      "pack": "local-deep-researcher-81",
+      "node": "reflect_on_summary"
+    },
+    {
+      "pack": "local-deep-researcher-81",
+      "node": "finalize_summary"
+    }
+  ],
+  "voters": [
+    {
+      "voter": "voter-01",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits query_writer_instructions, the prompt generate_query formats and sends to the LLM. A prompt change can change its output on the same input.",
+                "evidence": "prompts.py:20 hunk: '- ...with ALL three of these exact keys:' -> '+ ...with ALL two of these exact keys:'. graph.py:74 'formatted_prompt = query_writer_instructions.format('"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code is unchanged. Each instance gets its search_query through a Send fan-out over generate_query's query_list, and generate_query is root.",
+                "evidence": "graph.py:89-91 'Send(\"web_research\", {\"search_query\": search_query, ...}) for idx, search_query in enumerate(state[\"query_list\"])'. graph.py:281-283 conditional edge from generate_query"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "Its own code and prompt are unchanged. It reads web_research_result and search_query, which web_research (propagated) writes.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'. graph.py:163 'summaries=\"\\n\\n---\\n\\n\".join(state[\"web_research_result\"])'. graph.py:179 'len(state[\"search_query\"])'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "answer_instructions and its code are unchanged. It is reached through the reflection router and reads web_research_result and sources_gathered, which come from the propagated web_research.",
+                "evidence": "graph.py:287-289 evaluate_research routes to 'finalize_answer'. graph.py:241 'summaries=\"\\n---\\n\\n\".join(state[\"web_research_result\"])'. graph.py:255 'for source in state[\"sources_gathered\"]'"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "The only change in this node is its docstring, and a docstring-only edit is not root. query_writer_instructions is unchanged, and its input is the user's messages, so no upstream node feeds it.",
+                "evidence": "graph.py hunk @@ -42,9: only the docstring lines change ('generates a search queries' -> 'generates search queries' and similar). diff -r shows no other change to graph.py"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Its code and web_searcher_instructions are unchanged. Its input comes from generate_query (unaffected) or the reflection router (unaffected).",
+                "evidence": "graph.py:89-91 Send from query_list. graph.py:208-216 Send from follow_up_queries. pr.diff touches only generate_query's docstring and answer_instructions"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "Its code and reflection_instructions are unchanged. It reads only output from web_research, which is unaffected.",
+                "evidence": "graph.py:285 edge web_research->reflection. graph.py:160-164 uses reflection_instructions, which the diff leaves untouched"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR edits answer_instructions, the prompt finalize_answer sends to the LLM. The change is only a capital letter, but the prompt text differs, so the output could change on the same input.",
+                "evidence": "prompts.py:90 hunk: '- you MUST include all the citations...' -> '+ You MUST include all the citations...'. graph.py:238 'formatted_prompt = answer_instructions.format('"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "Its code and query_writer_instructions are unchanged. Its only input is research_topic from START, and no edge loops back to it.",
+                "evidence": "graph.py:291 'builder.add_edge(START, \"generate_query\")'. graph.py:33-36 formats query_writer_instructions with state.research_topic. The diff does not touch generate_query or query_writer_instructions"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code is unchanged. After the first loop its search_query comes from reflect_on_summary (root) through route_research. The default of 3 loops means this path runs.",
+                "evidence": "graph.py:295 'add_conditional_edges(\"reflect_on_summary\", route_research)'. graph.py:277-278 'if state.research_loop_count <= configurable.max_web_research_loops: return \"web_research\"'. graph.py:226 'return {\"search_query\": query}'. configuration.py:17-18 default=3"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites the human message this node builds and the summarizer_instructions system prompt it sends. Its LLM input changes on the same state.",
+                "evidence": "graph.py hunk @@ -135,14: '+ f\"<New Context> \\n {most_recent_web_research} \\n <New Context>\"' and '+ f\"Update the Existing Summary with the New Context on this topic: ...\"'. prompts.py: '+Generate a high-quality summary of the provided context.' and the new <Task> block. graph.py:166 'SystemMessage(content=summarizer_instructions)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR edits reflection_instructions, the system prompt this node formats. Its input also changes because summarize_sources is upstream, but its own prompt change makes it root.",
+                "evidence": "prompts.py hunk @@ -74,12: '-<EXAMPLE>\\n-Example output:' -> '+<Task>\\n+Reflect carefully on the Summary to identify knowledge gaps...'. graph.py:212 'reflection_instructions.format(research_topic=state.research_topic)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes the format string this node uses to build running_summary: one newline after the '## Summary' heading is removed. Its output differs on the same input.",
+                "evidence": "graph.py hunk @@ -256,7: '- f\"## Summary\\n\\n{state.running_summary}...' -> '+ f\"## Summary\\n{state.running_summary}...' (head graph.py:259)"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "voter": "voter-02",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits query_writer_instructions, the prompt generate_query formats and sends to the LLM. A changed prompt can change the generated queries on the same input.",
+                "evidence": "pr.diff prompts.py@@-17: '- ...JSON object with ALL three of these exact keys' -> '+ ...ALL two of these exact keys'; head graph.py:74 'formatted_prompt = query_writer_instructions.format('"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code and prompt are unchanged. Its search_query comes from generate_query's query_list through a Send fan-out, and generate_query is root.",
+                "evidence": "head graph.py:90 'Send(\"web_research\", {\"search_query\": search_query, ...}) for ... in enumerate(state[\"query_list\"])'; graph.py:81 'return {\"query_list\": result.query}'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "Unchanged code. It reads web_research_result and search_query, which web_research writes, and web_research is propagated.",
+                "evidence": "head graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; graph.py:163 'summaries=\"\\n\\n---\\n\\n\".join(state[\"web_research_result\"])'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "Unchanged code and prompt (answer_instructions). Its input comes from web_research (propagated) and is routed by reflection's evaluate_research (propagated).",
+                "evidence": "head graph.py:241 'summaries=\"\\n---\\n\\n\".join(state[\"web_research_result\"])'; graph.py:255 'for source in state[\"sources_gathered\"]'; graph.py:287-288 conditional edge reflection -> finalize_answer"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "The only change to this node is its docstring, which the definitions say is not root. Its input (messages, config) comes from START and does not change.",
+                "evidence": "pr.diff graph.py@@-42/-52: only docstring lines change, e.g. '-\"\"\"LangGraph node that generates a search queries' -> '+\"\"\"LangGraph node that generates search queries'; prompts.py hunk touches only answer_instructions"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Its code and web_searcher_instructions are unchanged. Its input comes from generate_query (unaffected) or the follow-ups from reflection (unaffected).",
+                "evidence": "diff -r base/head shows only graph.py docstring lines 45/47/55 and prompts.py:90 changed; head graph.py:90 Send from query_list"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "Its code and reflection_instructions are unchanged, and it is upstream of the only changed prompt. Its input comes from web_research (unaffected).",
+                "evidence": "head graph.py:285 'add_edge(\"web_research\", \"reflection\")'; the prompts.py change is at line 90, inside answer_instructions (starts at line 82), not reflection_instructions"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR edits answer_instructions, the prompt finalize_answer formats and sends to the LLM. The edit is only a capitalisation change, but it changes the prompt string, so the output could differ on the same input. It is a prompt edit, not a comment or docstring.",
+                "evidence": "pr.diff prompts.py@@-87: '- you MUST include all the citations...' -> '+ You MUST include all the citations...'; head graph.py:238 'formatted_prompt = answer_instructions.format('"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "Its code and query_writer_instructions are unchanged. It is the entry node and only reads research_topic from the input.",
+                "evidence": "pr.diff touches only summarize_sources (graph.py@@-135), finalize_summary (graph.py@@-256), and summarizer_instructions/reflection_instructions in prompts.py; head graph.py:33 'query_writer_instructions.format(... research_topic=state.research_topic)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its code is unchanged. After the first loop, its search_query comes from reflect_on_summary, which is root (changed reflection_instructions) and also gets a changed running_summary. The default of 3 loops means web_research runs again on that changed query.",
+                "evidence": "head graph.py:226 'return {\"search_query\": query}' in reflect_on_summary; graph.py:277-278 route_research -> 'web_research'; configuration.py:17-18 'max_web_research_loops ... default=3'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites the HumanMessage this node builds and changes summarizer_instructions, its system prompt. Both go to the LLM.",
+                "evidence": "pr.diff graph.py@@-135: '+ f\"<New Context> \\n {most_recent_web_research} \\n <New Context>\"' / '+ f\"Create a Summary using the Context on this topic: ...\"'; prompts.py@@-33 '+Generate a high-quality summary of the provided context.' and the added '<Task>' block; head graph.py:166 'SystemMessage(content=summarizer_instructions)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR changes reflection_instructions, the system prompt this node formats: the <EXAMPLE> block becomes a <Task> block with new wording. Its running_summary input also changes upstream, but its own prompt change makes it root.",
+                "evidence": "pr.diff prompts.py@@-74: '-<EXAMPLE>\\n-Example output:' -> '+<Task>\\n+Reflect carefully on the Summary to identify knowledge gaps...'; head graph.py:212 'SystemMessage(content=reflection_instructions.format(research_topic=state.research_topic))'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes this node's own output format string: one newline is removed after '## Summary'. The same input therefore gives a different running_summary.",
+                "evidence": "pr.diff graph.py@@-256: '-state.running_summary = f\"## Summary\\n\\n{state.running_summary}...' -> '+state.running_summary = f\"## Summary\\n{state.running_summary}...'"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "voter": "voter-03",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits the text of query_writer_instructions, the prompt only generate_query formats and sends to the LLM. Changing the prompt text can change the LLM's output on the same input.",
+                "evidence": "prompts.py:20 hunk: '- ...JSON object with ALL three of these exact keys:' -> 'ALL two of these exact keys:'; used at graph.py:74 'formatted_prompt = query_writer_instructions.format('"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code and prompt (web_searcher_instructions) are unchanged. Each web_research call gets its search_query through a Send fan-out over generate_query's query_list, and generate_query is root.",
+                "evidence": "graph.py:90 'Send(\"web_research\", {\"search_query\": search_query, \"id\": int(idx)}) for idx, search_query in enumerate(state[\"query_list\"])'; graph.py:81 'return {\"query_list\": result.query}'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "Its code and reflection_instructions are unchanged. It reads web_research_result and search_query, which web_research writes, and web_research is propagated.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; graph.py:163 'summaries=\"\\n\\n---\\n\\n\".join(state[\"web_research_result\"])'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "Its code and answer_instructions are unchanged. It reads web_research_result and sources_gathered, which descend from generate_query's changed queries, and it is reached through reflection's router.",
+                "evidence": "graph.py:241 'summaries=\"\\n---\\n\\n\".join(state[\"web_research_result\"])'; graph.py:255 'for source in state[\"sources_gathered\"]'; graph.py:288 router to 'finalize_answer'"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "The only edits touching generate_query are in its docstring, which the definitions exclude from root. It runs first from START, so no upstream node changes its input.",
+                "evidence": "pr.diff graph.py hunk @@ -42,9: only docstring lines change, e.g. '\"\"\"LangGraph node that generates a search queries' -> 'generates search queries'; graph.py:279 'builder.add_edge(START, \"generate_query\")'"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Its code and prompt are unchanged. Its inputs come from generate_query and reflection, and neither changes behaviour in this PR.",
+                "evidence": "diff -r base head shows only graph.py docstring lines 45/47/55 and prompts.py:90 (answer_instructions) changed; web_searcher_instructions untouched"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "Its code and reflection_instructions are unchanged. Its upstream (web_research) is unaffected.",
+                "evidence": "pr.diff touches only generate_query's docstring and answer_instructions line 90; graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR changes a line in answer_instructions, the prompt finalize_answer sends to the LLM. It is a prompt-text edit, not a comment, so the output could differ on the same input, though the change is only one capital letter.",
+                "evidence": "prompts.py:90 '- you MUST include all the citations...' -> '- You MUST include all the citations...' inside answer_instructions; graph.py:238 'formatted_prompt = answer_instructions.format('"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "Its code and query_writer_instructions are unchanged. It runs once from START on research_topic only, so no changed node feeds it.",
+                "evidence": "pr.diff prompts.py hunks touch only summarizer_instructions and reflection_instructions; graph.py:291 'builder.add_edge(START, \"generate_query\")'; graph.py:35 'research_topic=state.research_topic'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code is unchanged. On every loop after the first, it searches state.search_query, which reflect_on_summary writes, and reflect_on_summary is root.",
+                "evidence": "graph.py:295 'builder.add_conditional_edges(\"reflect_on_summary\", route_research)' -> 'web_research'; graph.py:226 'return {\"search_query\": query}'; graph.py:98 'tavily_search(state.search_query, ...)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites both the human message this node builds and the summarizer_instructions system prompt it sends. Either change can alter the summary on the same input.",
+                "evidence": "graph.py:138-146 hunk: '<Search Results>' -> '<Context> ... Create a Summary using the Context on this topic:'; prompts.py hunk: summarizer_instructions GOAL changed and '<Task> Think carefully about the provided Context first...' added; graph.py:166 'SystemMessage(content=summarizer_instructions)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR changes reflection_instructions, the system prompt this node formats and sends: the <EXAMPLE> block is replaced by a <Task> block with new instructions. Its input, running_summary, also changes because summarize_sources is root, but root takes precedence.",
+                "evidence": "prompts.py hunk @@ -74,12: '<EXAMPLE>\\nExample output:' -> '<Task>\\nReflect carefully on the Summary to identify knowledge gaps...'; graph.py:212 'SystemMessage(content=reflection_instructions.format(research_topic=state.research_topic))'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes the f-string that builds this node's output: one fewer newline after the '## Summary' header. Its output differs on the same input.",
+                "evidence": "graph.py:259 hunk: 'f\"## Summary\\n\\n{state.running_summary}...' -> 'f\"## Summary\\n{state.running_summary}\\n\\n ### Sources:\\n{all_sources}\"'"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "voter": "voter-04",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits query_writer_instructions, the prompt generate_query formats and sends to the LLM. The wording change (\"three\" to \"two\" keys) is real prompt text, not a docstring or comment, so the output could change on the same input.",
+                "evidence": "pr.diff prompts.py hunk @@ -17,7: \"-...ALL three of these exact keys\" / \"+...ALL two of these exact keys\"; head graph.py:74 `formatted_prompt = query_writer_instructions.format(`"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code and web_searcher_instructions are unchanged. Its input search_query comes from generate_query's query_list (root) through the Send fan-out, and on loop iterations from reflection (propagated).",
+                "evidence": "head graph.py:90 `Send(\"web_research\", {\"search_query\": search_query, ...}) for ... in enumerate(state[\"query_list\"])`; graph.py:81 `return {\"query_list\": result.query}`"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "Its code and reflection_instructions are unchanged. It reads web_research_result, which web_research (propagated) produces from root-generated queries.",
+                "evidence": "head graph.py:285 `builder.add_edge(\"web_research\", \"reflection\")`; graph.py:163 `summaries=\"\\n\\n---\\n\\n\".join(state[\"web_research_result\"])`"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "Its code and answer_instructions are unchanged. It is reached through reflection's router and reads web_research_result and sources_gathered, both downstream of the root generate_query.",
+                "evidence": "head graph.py:206 `return \"finalize_answer\"`; graph.py:241 `summaries=\"\\n---\\n\\n\".join(state[\"web_research_result\"])`; graph.py:255 `for source in state[\"sources_gathered\"]`"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "The only change to generate_query is its docstring, which the definitions exclude from root. It is the entry node (START), so no upstream change reaches it.",
+                "evidence": "pr.diff graph.py hunks @@ -42,9 and @@ -52,7 touch only the docstring lines (\"generates a search queries\" -> \"generates search queries\", etc.); head graph.py:279 `builder.add_edge(START, \"generate_query\")`"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Its code and web_searcher_instructions are unchanged, and its upstream nodes (generate_query, reflection) are not root or propagated.",
+                "evidence": "diff -r base head shows only the graph.py docstring and prompts.py:90 (answer_instructions) changed; head graph.py:281-288 wiring is unchanged"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "Its code and reflection_instructions are unchanged. Its input comes only from web_research, which is unaffected.",
+                "evidence": "head graph.py:285 `builder.add_edge(\"web_research\", \"reflection\")`; the prompts.py diff touches only answer_instructions (head prompts.py:82-90)"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR changes the text of answer_instructions, the prompt finalize_answer sends to the LLM. The change only capitalises one word (\"you\" to \"You\"), but it is live prompt text, not a docstring or comment, so the LLM output could differ on the same input.",
+                "evidence": "pr.diff prompts.py hunk @@ -87,7: \"- you MUST include all the citations\" -> \"- You MUST include all the citations\"; head graph.py:238 `formatted_prompt = answer_instructions.format(`"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "Its code and query_writer_instructions are unchanged (the prompts.py diff touches only summarizer_instructions and reflection_instructions). It is the entry node, fed only from START.",
+                "evidence": "head graph.py:291 `builder.add_edge(START, \"generate_query\")`; graph.py:33 uses query_writer_instructions, which the pr.diff does not touch"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code is unchanged. On loop iterations route_research sends it back to web_research, where it reads state.search_query written by reflect_on_summary (root).",
+                "evidence": "head graph.py:295 `builder.add_conditional_edges(\"reflect_on_summary\", route_research)`; graph.py:278 `return \"web_research\"`; graph.py:226 `return {\"search_query\": query}`; graph.py:98 `tavily_search(state.search_query, ...)`"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites the human message this node builds (new tags, reordering, added task sentences) and changes summarizer_instructions, the system prompt it uses. Either change can alter its LLM output on the same input.",
+                "evidence": "pr.diff graph.py @@ -135,14: \"+ f\\\"<New Context> ...\\\"\" / \"+ f\\\"Create a Summary using the Context on this topic: ...\\\"\"; prompts.py @@ -33,7: \"+Generate a high-quality summary of the provided context.\"; head graph.py:166 `SystemMessage(content=summarizer_instructions)`"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR changes reflection_instructions, which this node formats as its system prompt: the <EXAMPLE> block becomes a <Task> block with a new instruction. Its input running_summary also comes from the root summarize_sources, but its own prompt change makes it root.",
+                "evidence": "pr.diff prompts.py @@ -74,12: \"-<EXAMPLE>\" -> \"+<Task>\\n+Reflect carefully on the Summary to identify knowledge gaps...\"; head graph.py:212 `SystemMessage(content=reflection_instructions.format(research_topic=state.research_topic))`"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes finalize_summary's own output format string, dropping a newline after \"## Summary\", so the same input gives different output.",
+                "evidence": "pr.diff graph.py @@ -256,7: \"- f\\\"## Summary\\\\n\\\\n{state.running_summary}...\\\"\" -> \"+ f\\\"## Summary\\\\n{state.running_summary}...\\\"\"; head graph.py:259"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "voter": "voter-05",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits the text of query_writer_instructions, the prompt generate_query formats and sends to the LLM. The model sees different tokens on the same input, so its behaviour could change.",
+                "evidence": "prompts.py:20 hunk: '- ...ALL three of these exact keys:' -> '+ ...ALL two of these exact keys:'; graph.py:74 'formatted_prompt = query_writer_instructions.format(...)'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code and prompt (web_searcher_instructions) are unchanged. Its search_query input comes from generate_query's query_list through the Send fan-out, and generate_query is root.",
+                "evidence": "graph.py:89-91 'Send(\"web_research\", {\"search_query\": search_query, ...}) for ... in enumerate(state[\"query_list\"])'; graph.py:281-283 conditional edge from generate_query"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "Its own code and reflection_instructions are unchanged. It reads web_research_result and search_query, which the propagated web_research node writes.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; graph.py:163 'summaries=\"\\n\\n---\\n\\n\".join(state[\"web_research_result\"])'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "Its own code and answer_instructions are unchanged. It reads web_research_result and sources_gathered from the propagated web_research node, reached through reflection's router.",
+                "evidence": "graph.py:287-289 evaluate_research routes to 'finalize_answer'; graph.py:241 'summaries=\"\\n---\\n\\n\".join(state[\"web_research_result\"])', graph.py:255 state[\"sources_gathered\"]"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "The only change in generate_query is to its docstring, which is not root. query_writer_instructions is unchanged, and the node's input comes from START (messages).",
+                "evidence": "graph.py hunk @@ -42,9 +42,9 @@ changes only docstring lines 45, 47 and 55 ('generates a search queries' -> 'generates search queries'); there is no prompts.py change near query_writer_instructions"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Its code and web_searcher_instructions are unchanged. Its input comes from generate_query, which is unaffected, and from reflection's follow-ups, which are also unaffected.",
+                "evidence": "diff -r shows only graph.py docstring lines 45/47/55 and prompts.py:90 (answer_instructions) changed; graph.py:90 'Send(\"web_research\", ...)' fed from the unchanged query_list"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "Its code and reflection_instructions are unchanged. Its only upstream node, web_research, is unaffected.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; the only prompt hunk is answer_instructions at prompts.py:90, not reflection_instructions"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR changes the text of answer_instructions, the prompt finalize_answer sends to the LLM. The edit is only a capitalisation fix, but it is a prompt change, not a docstring change, and the model receives different tokens.",
+                "evidence": "prompts.py:90 '- you MUST include all the citations...' -> '+ You MUST include all the citations...'; graph.py:238 'formatted_prompt = answer_instructions.format('"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "Its code and query_writer_instructions are unchanged. It is the entry node and reads only research_topic from the input.",
+                "evidence": "graph.py:291 'builder.add_edge(START, \"generate_query\")'; graph.py:33-36 uses query_writer_instructions with state.research_topic; no diff hunk touches either"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its code is unchanged. On loop iterations (max_web_research_loops defaults to 3), its search_query comes from reflect_on_summary, which is root.",
+                "evidence": "graph.py:295 'add_conditional_edges(\"reflect_on_summary\", route_research)' -> 'web_research'; graph.py:226 'return {\"search_query\": query}'; configuration.py:17-18 default=3"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites the human message this node builds and the summarizer_instructions system prompt it uses, so the LLM call changes on the same input.",
+                "evidence": "graph.py hunk @@ -135,14 +135,14 @@ '-<Search Results>' -> '+<Context> ... Create a Summary using the Context on this topic'; prompts.py hunk '+<Task>\\nThink carefully about the provided Context first...'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR edits reflection_instructions, the system prompt this node formats and sends, replacing the <EXAMPLE> block with a <Task> instruction. Its running_summary input also changes upstream, but the prompt change makes it root.",
+                "evidence": "prompts.py hunk @@ -74,12 +79,12 @@ '-<EXAMPLE>\\n-Example output:' -> '+<Task>\\n+Reflect carefully on the Summary...'; graph.py:212 'reflection_instructions.format(research_topic=...)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes this node's own output formatting: it drops a blank line after '## Summary'. The same input therefore gives a different running_summary.",
+                "evidence": "graph.py:259 hunk '-f\"## Summary\\n\\n{state.running_summary}...' -> '+f\"## Summary\\n{state.running_summary}...'"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "voter": "voter-06",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits query_writer_instructions, the prompt this node formats and sends to the LLM. A different prompt can change its output on the same input.",
+                "evidence": "pr.diff prompts.py hunk @@ -17,7: '- ... with ALL three of these exact keys' -> '+ ... with ALL two of these exact keys' (head prompts.py:20); used at graph.py:74 'formatted_prompt = query_writer_instructions.format(...)'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code and prompt (web_searcher_instructions) are unchanged. Its search_query input comes from generate_query's query_list through the Send fan-out, and generate_query is root.",
+                "evidence": "graph.py:90 'Send(\"web_research\", {\"search_query\": search_query, ...}) for ... in enumerate(state[\"query_list\"])'; graph.py:281-283 conditional edge generate_query -> continue_to_web_research"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "Its code and reflection_instructions are unchanged. It reads web_research_result and search_query, which come from web_research downstream of the root generate_query.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; graph.py:163 'summaries=\"\\n\\n---\\n\\n\".join(state[\"web_research_result\"])'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "Its code and answer_instructions are unchanged. It consumes web_research_result and sources_gathered, which descend from the root generate_query, and it is reached after reflection.",
+                "evidence": "graph.py:241 'summaries=\"\\n---\\n\\n\".join(state[\"web_research_result\"])'; graph.py:255 'for source in state[\"sources_gathered\"]'; graph.py:287-289 reflection -> evaluate_research -> finalize_answer"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "The only edit to this node is in its docstring, which the definition excludes from root. It is the entry node, so nothing upstream changes its input.",
+                "evidence": "pr.diff graph.py hunks @@ -42,9 and @@ -52,7 change only docstring lines ('generates a search queries' -> 'generates search queries'); query_writer_instructions not in diff; graph.py:279 'builder.add_edge(START, \"generate_query\")'"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Its code and web_searcher_instructions are unchanged. Its only upstream nodes are generate_query (docstring-only edit) and reflection (unchanged), so its input is unchanged.",
+                "evidence": "diff -r base head: only graph.py docstring lines 45/47/55 and prompts.py:90 (answer_instructions) differ; graph.py:90 Send from query_list; graph.py:208-217 Send from follow_up_queries"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "Its code and reflection_instructions are unchanged, and its upstream web_research is unaffected.",
+                "evidence": "graph.py:285 web_research -> reflection; prompts.py diff touches only answer_instructions line 90, not reflection_instructions (prompts.py:50)"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR edits the text of answer_instructions, the prompt this node sends to the LLM. The edit only capitalises one word, but it is a prompt change and not a comment, so the LLM input differs and the output could change.",
+                "evidence": "pr.diff prompts.py @@ -87,7: '- you MUST include all the citations...' -> '+ You MUST include all the citations...' (head prompts.py:90, inside answer_instructions starting at :82); used at graph.py:238 'formatted_prompt = answer_instructions.format(...)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "Neither its code nor query_writer_instructions changed. It is the entry node and reads only research_topic, so its input is unchanged.",
+                "evidence": "pr.diff touches graph.py summarize_sources/finalize_summary and prompts.py summarizer_instructions/reflection_instructions only; graph.py:291 'builder.add_edge(START, \"generate_query\")'; graph.py:35 'research_topic=state.research_topic'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its code is unchanged. After the first loop its search_query comes from reflect_on_summary (root) through route_research, so its input changes.",
+                "evidence": "graph.py:295 'builder.add_conditional_edges(\"reflect_on_summary\", route_research)' returning 'web_research' (graph.py:278); reflect_on_summary returns {\"search_query\": query} (graph.py:226); web_research uses state.search_query (graph.py:98)"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites this node's human message (new tags, reordering, added instructions) and its summarizer_instructions system prompt. The same input now gives the LLM different text.",
+                "evidence": "pr.diff graph.py @@ -135,14: '+ f\"<New Context> ... Update the Existing Summary with the New Context on this topic: ...\"' (head graph.py:138-146); prompts.py: '+Generate a high-quality summary of the provided context.' and new '<Task>' block (head prompts.py:36, 59)"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR changes reflection_instructions, which this node formats as its system prompt: the EXAMPLE block becomes a Task block with new instructions.",
+                "evidence": "pr.diff prompts.py @@ -74,12: '-<EXAMPLE>' -> '+<Task> Reflect carefully on the Summary to identify knowledge gaps...' (head prompts.py:82); used at graph.py:212 'SystemMessage(content=reflection_instructions.format(...))'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes this node's own output format string by dropping a newline after the header, so the same input gives a different output.",
+                "evidence": "pr.diff graph.py @@ -256,7: '- f\"## Summary\\n\\n{state.running_summary}...\"' -> '+ f\"## Summary\\n{state.running_summary}...\"' (head graph.py:259)"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "voter": "voter-07",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits query_writer_instructions, which is the prompt generate_query formats and sends to the LLM. The change is to prompt text, not a docstring, so the LLM can produce a different query_list on the same input.",
+                "evidence": "prompts.py:20 diff: '-...with ALL three of these exact keys:' -> '+...with ALL two of these exact keys:'; graph.py:74 'formatted_prompt = query_writer_instructions.format('"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code and web_searcher_instructions are unchanged (graph.py has no diff). Its search_query input comes from generate_query's query_list through the Send fan-out, and generate_query is root.",
+                "evidence": "graph.py:90 'Send(\"web_research\", {\"search_query\": search_query, \"id\": int(idx)}) for ... in enumerate(state[\"query_list\"])'; graph.py:81 'return {\"query_list\": result.query}'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "reflection_instructions and its code are unchanged. It reads web_research_result, which web_research writes, and web_research is propagated.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; graph.py:163 'summaries=\"\\n\\n---\\n\\n\".join(state[\"web_research_result\"])'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "answer_instructions and its code are unchanged. It formats web_research_result and sources_gathered, both written by web_research, which is propagated, and it is reached from reflection's router.",
+                "evidence": "graph.py:241 'summaries=\"\\n---\\n\\n\".join(state[\"web_research_result\"])'; graph.py:255 'for source in state[\"sources_gathered\"]'; graph.py:288 router to 'finalize_answer'"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "The only change to generate_query is its docstring, and docstring-only edits are not root. Its input comes from START (messages), so nothing upstream changes.",
+                "evidence": "graph.py diff @@ -42,9 +42,9: only docstring lines change ('generates a search queries' -> 'generates search queries'); query_writer_instructions is not in prompts.py's diff"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Its code and web_searcher_instructions are unchanged. Its only input is query_list from generate_query (unaffected) and follow_up_queries from reflection (unaffected).",
+                "evidence": "graph.py:90 Send from query_list; graph.py:209-216 Send from follow_up_queries; the pr.diff has no hunks in web_research or web_searcher_instructions"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "reflection_instructions and reflection's code are unchanged. It reads web_research_result from web_research, which is unaffected.",
+                "evidence": "graph.py:160-164 reflection_instructions.format(... state[\"web_research_result\"]); the prompts.py diff touches only answer_instructions (line 90)"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR changes answer_instructions, the prompt finalize_answer formats and sends to the LLM. Only a capital letter changes, but it is prompt text, not a comment or docstring, so the LLM input differs and the output could change on the same input.",
+                "evidence": "prompts.py:90 diff: '- you MUST include all the citations...' -> '- You MUST include all the citations...'; graph.py:238 'formatted_prompt = answer_instructions.format('"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "Its code and query_writer_instructions are unchanged. It runs only from START and reads only research_topic, so no changed node feeds it.",
+                "evidence": "graph.py:291 'builder.add_edge(START, \"generate_query\")'; graph.py:33-36 uses only state.research_topic; the prompts.py diff hunks start at summarizer_instructions (line 33+)"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its code is unchanged. In the research loop, route_research sends control back to web_research, which then reads the search_query written by reflect_on_summary, and reflect_on_summary is root.",
+                "evidence": "graph.py:295 'builder.add_conditional_edges(\"reflect_on_summary\", route_research)' -> 'return \"web_research\"' (278); graph.py:226 'return {\"search_query\": query}'; graph.py:98 'tavily_search(state.search_query, ...)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites summarize_sources' human message, which reorders the content and adds new instruction text. It also changes summarizer_instructions, the system prompt this node uses.",
+                "evidence": "graph.py diff @@ -135: '+f\"<New Context> ...\"', '+f\"Update the Existing Summary with the New Context on this topic: ...\"'; prompts.py: '+Generate a high-quality summary of the provided context.' and the added '<Task>' block; graph.py:166 'SystemMessage(content=summarizer_instructions)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR changes reflection_instructions, the system prompt this node formats: the <EXAMPLE> block becomes a <Task> block with a new instruction. Its running_summary input also changes, but root takes precedence.",
+                "evidence": "prompts.py diff @@ -74: '-<EXAMPLE>' / '+<Task>' and '+Reflect carefully on the Summary to identify knowledge gaps...'; graph.py:212 'reflection_instructions.format(research_topic=state.research_topic)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes finalize_summary's own output format string (one less newline after the heading), so its output differs on the same input. Its running_summary input also changes upstream, but root takes precedence.",
+                "evidence": "graph.py:259 diff: '-f\"## Summary\\n\\n{state.running_summary}...' -> '+f\"## Summary\\n{state.running_summary}...'"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "voter": "voter-08",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits the text of query_writer_instructions, the prompt this node formats and sends to the LLM. A prompt change can change the output for the same input, and it is not a docstring or comment.",
+                "evidence": "prompts.py:20 hunk: '- ... ALL three of these exact keys:' -> '+ ... ALL two of these exact keys:'; graph.py:74 'formatted_prompt = query_writer_instructions.format('"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code and web_searcher_instructions are unchanged. Its search_query input comes from generate_query's query_list through the Send fan-out, and generate_query is root.",
+                "evidence": "graph.py:89-91 'Send(\"web_research\", {\"search_query\": search_query, ...}) for idx, search_query in enumerate(state[\"query_list\"])'; graph.py:111 'research_topic=state[\"search_query\"]'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "Its code and reflection_instructions are unchanged. It reads web_research_result and search_query, which are written by web_research, and web_research is propagated.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; graph.py:162 'summaries=\"\\n\\n---\\n\\n\".join(state[\"web_research_result\"])'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "Its code and answer_instructions are unchanged. It is reached through reflection's router and reads web_research_result and sources_gathered, which come from the propagated web_research.",
+                "evidence": "graph.py:287-288 add_conditional_edges('reflection', evaluate_research, ['web_research','finalize_answer']); graph.py:241 'summaries=\"\\n---\\n\\n\".join(state[\"web_research_result\"])'; graph.py:255 'for source in state[\"sources_gathered\"]'"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "This PR changes only the node's docstring, which the definitions exclude from root. It is the entry node, so no upstream change can reach its input.",
+                "evidence": "graph.py:45/47/55 hunks change only docstring text ('generates a search queries' -> 'generates search queries'); graph.py:279 'builder.add_edge(START, \"generate_query\")'"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Its code and prompt are unchanged. Its inputs come only from generate_query (unaffected) and reflection (unaffected) via Send.",
+                "evidence": "pr.diff touches only graph.py docstring lines 45-55 and prompts.py:90 (answer_instructions); graph.py:89-91 and 208-216 Send(\"web_research\", ...)"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "Its code and reflection_instructions are unchanged. It reads only state written by web_research, which is unaffected.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; reflection_instructions (prompts.py:50) is not in the diff"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR edits the text of answer_instructions, the prompt this node formats and sends to the LLM, by capitalising 'you' to 'You'. The edit is tiny, but it is a change to the prompt text and not a docstring or comment, so the output could differ on the same input.",
+                "evidence": "prompts.py:90 hunk: '- you MUST include all the citations...' -> '+ You MUST include all the citations...'; graph.py:238 'formatted_prompt = answer_instructions.format('"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "Its code and query_writer_instructions are unchanged. It is the entry node, fed only by START from research_topic.",
+                "evidence": "graph.py:291 'builder.add_edge(START, \"generate_query\")'; graph.py:33 'query_writer_instructions.format(' (query_writer_instructions, prompts.py:7, not in the diff)"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code is unchanged. On loops after the first, its search_query comes from reflect_on_summary, which is root, through the route_research conditional edge.",
+                "evidence": "graph.py:226 reflect_on_summary 'return {\"search_query\": query}'; graph.py:295 'builder.add_conditional_edges(\"reflect_on_summary\", route_research)' -> 'web_research'; graph.py:98 'tavily_search(state.search_query, ...)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites the human message this node builds and the summarizer_instructions system prompt it sends. The new wording adds a <Task> block and renames the tags to Context, so the LLM output can change on the same input.",
+                "evidence": "graph.py:138-145 hunk: '+ f\"<New Context> \\n {most_recent_web_research} \\n <New Context>\"' and '+ f\"Create a Summary using the Context on this topic: ...\"'; prompts.py:36 '+Generate a high-quality summary of the provided context.'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR edits reflection_instructions, the system prompt this node formats and sends: the <EXAMPLE> block becomes a <Task> block with new instructions. Its input running_summary also changes because summarize_sources is root, but root takes precedence.",
+                "evidence": "prompts.py:82-83 hunk: '-<EXAMPLE>\\n-Example output:' -> '+<Task>\\n+Reflect carefully on the Summary to identify knowledge gaps...'; graph.py:212 'reflection_instructions.format(research_topic=state.research_topic)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes this node's own output format string by dropping a blank line after the heading, so its output differs on the same input. Its running_summary input also changes upstream.",
+                "evidence": "graph.py:259 hunk: '- f\"## Summary\\n\\n{state.running_summary}...' -> '+ f\"## Summary\\n{state.running_summary}\\n\\n ### Sources:\\n{all_sources}\"'"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "voter": "voter-09",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits query_writer_instructions, the prompt generate_query formats and sends to its LLM. The prompt text changed, so the output could change on the same input.",
+                "evidence": "prompts.py:20 (head) '- Format your response as a JSON object with ALL two of these exact keys:' (was 'ALL three'); graph.py:74 'formatted_prompt = query_writer_instructions.format('"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "web_research's own code and its web_searcher_instructions prompt are unchanged. Its search_query input comes from generate_query's query_list through the Send fan-out, and generate_query is root.",
+                "evidence": "graph.py:89-91 'Send(\"web_research\", {\"search_query\": search_query, ...}) for idx, search_query in enumerate(state[\"query_list\"])'; graph.py:281-283 conditional edge from generate_query"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "reflection's code and reflection_instructions are unchanged. It reads web_research_result and search_query, which web_research (propagated) writes.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; graph.py:163 'summaries=\"\\n\\n---\\n\\n\".join(state[\"web_research_result\"])'"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "finalize_answer's code and answer_instructions are unchanged. It reads web_research_result and sources_gathered, which come from web_research (propagated), and it is reached through reflection's router.",
+                "evidence": "graph.py:241 'summaries=\"\\n---\\n\\n\".join(state[\"web_research_result\"])'; graph.py:255 'for source in state[\"sources_gathered\"]'; graph.py:287-289 conditional edge to finalize_answer"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "The only change in generate_query is its docstring, which the definitions say is not root. It is the entry node fed from START, so no upstream node changes its input.",
+                "evidence": "pr.diff graph.py @@ -42,9 +42,9 @@: only '\"\"\"LangGraph node that generates search queries...' docstring lines changed; graph.py:279 'builder.add_edge(START, \"generate_query\")'"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Neither web_research's code nor web_searcher_instructions changed. Its input comes from generate_query (unaffected) through the Send fan-out, and from follow-up queries written by reflection (unaffected).",
+                "evidence": "pr.diff touches only the generate_query docstring and answer_instructions; graph.py:89-91 Send from query_list; graph.py:208-217 Send from follow_up_queries"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "Neither reflection's code nor reflection_instructions changed, and its only upstream node, web_research, is unaffected.",
+                "evidence": "graph.py:285 'builder.add_edge(\"web_research\", \"reflection\")'; there is no diff hunk in reflection_instructions (prompts.py:50)"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR edits answer_instructions, the prompt finalize_answer sends to its LLM. The change is only a capital letter ('you' to 'You'), but the prompt text differs, so the output could change on the same input.",
+                "evidence": "prompts.py:90 (head) '- You MUST include all the citations from the summaries in the answer correctly.' (was '- you MUST'); answer_instructions defined at prompts.py:82; graph.py:238 'formatted_prompt = answer_instructions.format('"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "generate_query's code and query_writer_instructions are unchanged. It runs only from START and reads only research_topic from the graph input, so no changed node feeds it.",
+                "evidence": "graph.py:291 'builder.add_edge(START, \"generate_query\")'; graph.py:33-36 'query_writer_instructions.format(current_date=..., research_topic=state.research_topic)'; the prompts.py diff hunks cover only summarizer_instructions and reflection_instructions"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "web_research's own code is unchanged. On the second and later loop passes it searches the search_query written by reflect_on_summary, which is root, so its input changes.",
+                "evidence": "graph.py:295 'builder.add_conditional_edges(\"reflect_on_summary\", route_research)' -> 'web_research' (graph.py:278); graph.py:226 'return {\"search_query\": query}'; graph.py:98 'tavily_search(state.search_query, ...)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites the human message summarize_sources builds and changes the summarizer_instructions system prompt it sends. Its LLM output could change on the same input.",
+                "evidence": "pr.diff graph.py @@ -135,14 +135,14 @@ '+ f\"<New Context> \\n {most_recent_web_research} \\n <New Context>\"'; prompts.py hunk '+Generate a high-quality summary of the provided context.' and the added '<Task>' block; graph.py:166 'SystemMessage(content=summarizer_instructions)'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR changes reflection_instructions, the system prompt reflect_on_summary sends: the <EXAMPLE> block becomes a <Task> block with new wording. Its output could change on the same input.",
+                "evidence": "prompts.py hunk @@ -74,12 +79,12 @@ '-<EXAMPLE>' / '+<Task>' '+Reflect carefully on the Summary to identify knowledge gaps...'; graph.py:212 'SystemMessage(content=reflection_instructions.format(research_topic=state.research_topic))'"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes the f-string finalize_summary uses to build its output: it drops one newline after '## Summary'. The same input now gives a different running_summary.",
+                "evidence": "pr.diff graph.py @@ -256,7 +256,7 @@ '-f\"## Summary\\n\\n{state.running_summary}...' -> '+f\"## Summary\\n{state.running_summary}...'; head graph.py:259"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "voter": "voter-10",
+      "attempts": [
+        {
+          "ok": true,
+          "problems": [],
+          "raw": {
+            "votes": [
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "generate_query",
+                "label": "root",
+                "reason": "The PR edits query_writer_instructions, the prompt generate_query formats and sends to the LLM. Any prompt text change can change the LLM's output on the same input.",
+                "evidence": "pr.diff prompts.py:20 \"-...ALL three of these exact keys:\" -> \"+...ALL two of these exact keys:\"; head/backend/src/agent/graph.py:74 formatted_prompt = query_writer_instructions.format(...)"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code and web_searcher_instructions are unchanged. It gets its search_query from generate_query's query_list through Send fan-out, so its input changes because generate_query is root.",
+                "evidence": "head graph.py:89-91 Send(\"web_research\", {\"search_query\": search_query, ...}) for ... in state[\"query_list\"]; diff touches only prompts.py:20"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "reflection",
+                "label": "propagated",
+                "reason": "Its code and reflection_instructions are unchanged. It reads web_research_result and search_query, which web_research writes, so it is downstream of the root.",
+                "evidence": "head graph.py:285 add_edge(\"web_research\", \"reflection\"); graph.py:163 summaries=...join(state[\"web_research_result\"]); graph.py:179 len(state[\"search_query\"])"
+              },
+              {
+                "pack": "gemini-fullstack-90",
+                "node": "finalize_answer",
+                "label": "propagated",
+                "reason": "Its code and answer_instructions are unchanged. It reads web_research_result and sources_gathered, which come from web_research downstream of the root generate_query, and it is reached through reflection's router.",
+                "evidence": "head graph.py:287-288 add_conditional_edges(\"reflection\", evaluate_research, [\"web_research\", \"finalize_answer\"]); graph.py:241 summaries=...join(state[\"web_research_result\"]); graph.py:255 state[\"sources_gathered\"]"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "The only edits to generate_query are in its docstring, which the definitions say is not root. It is the entry node, so it has no upstream node that could change its input.",
+                "evidence": "pr.diff graph.py:45-55 docstring only: \"-generates a search queries\" -> \"+generates search queries\"; head graph.py:279 add_edge(START, \"generate_query\")"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "web_research",
+                "label": "unaffected",
+                "reason": "Its code and web_searcher_instructions are unchanged. Its only upstream node, generate_query, is unaffected, so its input is the same.",
+                "evidence": "diff -r base head: changes only at graph.py docstring lines 45/47/55 and prompts.py:90 (answer_instructions); head graph.py:281-282 conditional edge generate_query -> web_research"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "reflection",
+                "label": "unaffected",
+                "reason": "Its code and reflection_instructions are unchanged. Its input comes from web_research, which is unaffected.",
+                "evidence": "head graph.py:285 add_edge(\"web_research\", \"reflection\"); prompts.py diff is only at line 90, inside answer_instructions"
+              },
+              {
+                "pack": "gemini-fullstack-35",
+                "node": "finalize_answer",
+                "label": "root",
+                "reason": "The PR changes answer_instructions, the prompt finalize_answer sends to the LLM. The edit is a capitalisation change, but it is prompt text, not a docstring or comment, so the LLM output could change on the same input.",
+                "evidence": "pr.diff prompts.py:90 \"- you MUST include all the citations\" -> \"- You MUST include all the citations\"; head graph.py:238 formatted_prompt = answer_instructions.format(...)"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "generate_query",
+                "label": "unaffected",
+                "reason": "Its code and query_writer_instructions are unchanged. It runs once from START and reads only research_topic from the graph input, so nothing upstream can change its input.",
+                "evidence": "head graph.py:33-36 query_writer_instructions.format(current_date=..., research_topic=state.research_topic); graph.py:291 add_edge(START, \"generate_query\"); diff touches only summarize_sources, finalize_summary, summarizer_instructions and reflection_instructions"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "web_research",
+                "label": "propagated",
+                "reason": "Its own code is unchanged. After the first loop it is reached again through route_research, where its search_query is the one reflect_on_summary (root) wrote. The default of 3 loops means this happens, so its input changes.",
+                "evidence": "head graph.py:295 add_conditional_edges(\"reflect_on_summary\", route_research); graph.py:226 return {\"search_query\": query}; graph.py:98 tavily_search(state.search_query, ...); configuration.py:17-18 max_web_research_loops default=3"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "summarize_sources",
+                "label": "root",
+                "reason": "The PR rewrites the human message this node builds and the summarizer_instructions system prompt it uses. The LLM output can change on the same input.",
+                "evidence": "pr.diff graph.py:138-145 \"-<User Input>...<Search Results>\" -> \"+<Context>... Create a Summary using the Context on this topic\"; prompts.py:36 GOAL reworded and a <Task> block added; head graph.py:166 SystemMessage(content=summarizer_instructions)"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "reflect_on_summary",
+                "label": "root",
+                "reason": "The PR edits reflection_instructions, its system prompt, replacing the <EXAMPLE> block with a <Task> instruction. Its input (running_summary) also changes, but its own prompt change makes it root.",
+                "evidence": "pr.diff prompts.py:82-88 \"-<EXAMPLE>\\n-Example output:\" -> \"+<Task>\\n+Reflect carefully on the Summary to identify knowledge gaps...\"; head graph.py:212 SystemMessage(content=reflection_instructions.format(...))"
+              },
+              {
+                "pack": "local-deep-researcher-81",
+                "node": "finalize_summary",
+                "label": "root",
+                "reason": "The PR changes the f-string that builds this node's output (one newline removed after the heading). Its output changes on the same input, and its running_summary input is also downstream of the root nodes.",
+                "evidence": "pr.diff graph.py:259 f\"## Summary\\n\\n{state.running_summary}...\" -> f\"## Summary\\n{state.running_summary}...\""
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
