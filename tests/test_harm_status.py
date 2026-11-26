@@ -33,9 +33,9 @@ def _specs() -> dict[str, str]:
     return {s.name: s.node for s in load_taxonomy(TAXONOMY).kpi_specs}
 
 
-def _checks() -> dict[str, dict[str, str]]:
+def _checks() -> dict[str, dict[str, object]]:
     """KPI name -> taxonomy check mapping."""
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, object]] = {}
     for s in load_taxonomy(TAXONOMY).kpi_specs:
         assert s.check is not None
         out[s.name] = dict(s.check)
