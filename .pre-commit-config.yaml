@@ -6,6 +6,7 @@ repos:
       - id: check-added-large-files
       - id: end-of-file-fixer
       - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]  # keep two-space hard breaks in .md
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.1
     hooks:
