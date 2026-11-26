@@ -36,7 +36,11 @@ jobs:
         run: uv run python -m lgcov.docs_lint
 
       - name: Mypy (strict)
-        run: uv run mypy --strict src
+        run: uv run mypy --strict src tests
+
+      # The hooks no other step runs: trailing-whitespace, end-of-file-fixer, detect-private-key, large files.
+      - name: Pre-commit (all files)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
 
       - name: Pytest
         run: uv run pytest -q
