@@ -128,8 +128,9 @@ def test_cassette_accept_advances_approved_change_record(tmp_path: Path) -> None
 
     Also guards against shadowing cassette.record with a local `record = ...` in accept.
     """
+    from test_cli import _ab_project
+
     from lgcov.cli import main
-    from tests.test_cli import _ab_project
 
     cfg, _baseline = _ab_project(tmp_path)
     path = tmp_path / "change-record.json"

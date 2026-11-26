@@ -46,7 +46,7 @@ def test_config_rejects_non_mapping_family_block() -> None:
 def test_cli_ci_family_mismatch_warns_and_exits_0(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.test_cli import DEMO_GRAPH, _ci_project, _run_ci
+    from test_cli import DEMO_GRAPH, _ci_project, _run_ci
 
     _ci_project(tmp_path, monkeypatch, DEMO_GRAPH.read_text(encoding="utf-8"))
     (tmp_path / "lgcov.yaml").write_text(

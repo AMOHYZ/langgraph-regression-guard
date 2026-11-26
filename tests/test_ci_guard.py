@@ -44,7 +44,7 @@ def test_ci_skips_when_no_round(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """No lgcov-round.yaml → guard skipped; ci continues (may fail later for other reasons)."""
-    from tests.test_cli_guard import _project
+    from test_cli_guard import _project
 
     _project(tmp_path, monkeypatch)
     # Minimal ci will harness-error without a graph; we only assert guard didn't fire.
@@ -57,7 +57,7 @@ def test_ci_skips_when_no_round(
 def test_ci_missing_ledger_is_exit_2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from tests.test_cli_guard import _draft, _project
+    from test_cli_guard import _draft, _project
 
     head = _project(tmp_path, monkeypatch)
     _draft(head)
@@ -72,7 +72,7 @@ def test_ci_missing_ledger_is_exit_2(
 def test_ci_digest_mismatch_is_exit_1(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from tests.test_cli_guard import _edit_round, _locked
+    from test_cli_guard import _edit_round, _locked
 
     _locked(tmp_path, monkeypatch)
     _edit_round(delta_1=0.5)  # hand edit after lock → digest mismatch
@@ -86,7 +86,7 @@ def test_ci_digest_mismatch_is_exit_1(
 def test_ci_unlocked_candidate_on_base_is_exit_2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from tests.test_cli_guard import OTHER_SHA, _draft, _project
+    from test_cli_guard import OTHER_SHA, _draft, _project
 
     _project(tmp_path, monkeypatch)
     _draft(OTHER_SHA)  # locked a different SHA than HEAD

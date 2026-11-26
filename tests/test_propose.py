@@ -170,7 +170,7 @@ def _prompt_graph(*, declare: bool) -> Any:
         return {"answer": f"{prompt}:{state['question']}"}
 
     if declare:
-        respond.system_prompt = prompt
+        respond.system_prompt = prompt  # type: ignore[attr-defined]  # a prompt attribute on the node function, as a user graph sets it
     builder = StateGraph(State)
     builder.add_node("classify", classify)
     builder.add_node("respond", respond)

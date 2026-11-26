@@ -224,7 +224,7 @@ def test_l2_cases_give_a_code_judge_the_recorded_runs_tool_calls(tmp_path: Path)
     # T181: before, the trace held node names only, so tool_called could never pass.
     _record(tmp_path)
     runs = _load_runs(str(tmp_path / "cassettes" / "baseline.json"))
-    check = {"type": "tool_called", "tool": "search"}
+    check: dict[str, object] = {"type": "tool_called", "tool": "search"}
     spec = KPISpec("k", "f", "model", "code", "a description", "a rubric", check=check)
     _, node_output = _l2_cases(spec, [r.steps for r in runs])["run-0/model"]
     assert node_output == {"trace": {"nodes": ["model", "tools", "respond"], "tools": ["search"]}}
