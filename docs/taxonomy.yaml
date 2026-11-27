@@ -53,6 +53,16 @@ kpis:
     failure_mode: final_report_unsupported_claims
     node: final_report_generation  # not final: the end state clears the notes
     judge: jev
-    description: Every claim in the final report is backed by the gathered research notes.
-    rubric: Is every claim in the report supported by the research notes it was written from?
+    description: >-
+      The final report contradicts nothing in the gathered research notes, and every
+      substantive claim in it is backed by them.
+    rubric: |-
+      Does the report contradict nothing in the research notes it was written from, and is every substantive claim in it supported by those notes?
+      - Fail if any claim contradicts the notes, however small the detail.
+      - Fail if any substantive claim is not supported by the notes.
+      - Substantive: a fact, number, amount, deadline, obligation, name or conclusion a reader would rely on.
+      - Supported: the notes state it, or it follows directly from them.
+      - Do not fail for minor gaps alone: the number of an article, section or title of a law or document; a citation (a reference or link to a source; who said or decided something is a name); an "as of" date; wording that paraphrases the notes without changing what they say, how certain they are, or how far they apply.
+      - A minor gap is a detail missing from the notes, not one that disagrees with them; a disagreement fails under the first rule.
+      - Otherwise pass.
     labels: [pass, fail]

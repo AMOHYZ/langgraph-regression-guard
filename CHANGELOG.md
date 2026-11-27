@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+
+- **`report_claims_supported` tolerates minor gaps.** The PR #163 taxonomy's report check
+  (`docs/taxonomy.yaml`) still fails a report that contradicts its research notes or makes a
+  substantive claim (a fact, number, amount, deadline, obligation, name or conclusion) the notes
+  don't support. It no longer fails a report only for the number of an article, section or title,
+  a citation, an "as of" date, or a paraphrase that keeps what the notes say, how certain they are
+  and how far they apply. Labels and bands made under the old every-claim rubric don't carry over:
+  relabel before calibrating.
+
 ## 0.7.0 (2026-11-25)
 
 Everything since 0.6.0 that landed on `main` (and T234 on this release branch). Behaviour / exit-contract changes first. No tag and no publish in this PR.
