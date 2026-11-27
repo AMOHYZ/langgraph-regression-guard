@@ -278,6 +278,31 @@ def test_docs_pr163_taxonomy_has_one_kpi_per_failure_mode() -> None:
     assert isinstance(by_node["final_report_generation"], FakeJudge)  # judge: jev, faked
 
 
+# report_claims_supported is tolerant of minor gaps but never of a contradiction. This checks
+# that each rule is stated, one rubric line per rule, not the exact wording.
+def test_docs_report_claims_rubric_states_the_tolerant_rules() -> None:
+    spec = {s.name: s for s in load_taxonomy(DOCS_TAXONOMY).kpi_specs}["report_claims_supported"]
+    assert (spec.judge, spec.node, spec.labels) == (
+        "jev",
+        "final_report_generation",
+        ("pass", "fail"),
+    )
+    lines = [line.lower() for line in spec.rubric.splitlines() if line.strip()]
+    assert lines[0].endswith("?")  # one question the judge can answer, then the rules
+
+    def stated(*words: str) -> bool:
+        return any(all(w in line for w in words) for line in lines)
+
+    # A contradiction always fails: any claim, no exception, never reversed.
+    assert stated("fail", "any claim", "contradict")
+    assert not stated("not fail", "contradict") and not stated("contradict", "unless")
+    # An unsupported substantive claim fails, and the rubric says what substantive means.
+    assert stated("fail", "substantive", "not supported") and not stated("not fail", "substantive")
+    substantive = ("fact", "number", "amount", "deadline", "obligation", "name", "conclusion")
+    assert stated("substantive", *substantive)
+    assert stated("not fail", "article", "section", "title", "citation", "as of", "paraphras")
+
+
 # T106: a drafted taxonomy can't gate until a human approves every entry.
 def test_a_taxonomy_with_entries_pending_review_is_refused() -> None:
     from fixtures.drafting import TEAM, TRACES, Scripted

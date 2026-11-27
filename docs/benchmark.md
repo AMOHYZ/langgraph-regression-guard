@@ -405,7 +405,7 @@ From [taxonomy.yaml](taxonomy.yaml). `lgcov bench` doesn't judge these, so the t
 |---|---|---|---|---|
 | `supervisor_delegates` | The supervisor calls `ConductResearch` at least once | code | Pass (1 call) | Pass (1 call) |
 | `researcher_uses_think_tool` | The researcher calls `think_tool` at least once | code | Fail (0 calls) | Pass (1 call) |
-| `report_claims_supported` | Every claim in the report is backed by the research notes | model | Not judged | Not judged |
+| `report_claims_supported` | The report contradicts nothing in the research notes, and every substantive claim is backed by them | model | Not judged | Not judged |
 
 - **`researcher_uses_think_tool` can't pass on base,** because this PR is what added `think_tool`. Head's count comes from the one "Reflection recorded" line in its research notes, because the researcher's own messages aren't saved.
 - **`report_claims_supported` needs a paid model call,** so it wasn't run.
